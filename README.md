@@ -1,6 +1,11 @@
-# MTWM — McGrath Trust Wealth Manager
+# Autonomous Wealth Builder
 
-Autonomous wealth generation system combining algorithmic trading, real estate acquisition, and multi-agent coordination. Built on Robert Allen's *Multiple Streams of Income* and *Nothing Down* strategies.
+Autonomous wealth generation system combining algorithmic trading, real estate acquisition, and multi-agent coordination — multiple streams of income feeding each other.
+
+**Investment Strategy Foundations:**
+- **Michael Burry** — Deep value analysis, contrarian conviction, concentrated positions on highest-confidence setups
+- **Warren Buffett** — Buy quality at a discount, compound winners, cut losers fast, let the star run
+- **Robert Allen** — *Nothing Down* real estate acquisition, *Multiple Streams of Income* cross-pollination between trading profits and real estate capital deployment
 
 **Target:** $5K → $15K in 90 days (paper proving strategy), then real capital deployment.
 
@@ -8,7 +13,7 @@ Autonomous wealth generation system combining algorithmic trading, real estate a
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        MTWM UI (Next.js 16)                        │
+│                        AWB UI (Next.js 16)                        │
 │  Dashboard │ Trading │ Real Estate │ Agents │ Strategy │ Roadmap    │
 │  HeroUI + Tailwind CSS 4 │ Three.js 3D Portfolio Globe             │
 │  Port 3000                                                          │
@@ -64,7 +69,7 @@ Autonomous wealth generation system combining algorithmic trading, real estate a
 
 ## Intelligence Stack
 
-MTWM uses a three-tier intelligence architecture where every agent learns, stores learnings as vectors, and shares them across the system.
+AWB uses a three-tier intelligence architecture where every agent learns, stores learnings as vectors, and shares them across the system.
 
 ### AgentDB (Vector Memory + Self-Learning)
 
@@ -400,7 +405,7 @@ mtwm/
 │   └── lib/                  # Utilities, formatters, RuVector client
 ├── docs/
 │   ├── playbooks/            # Gekko-Buffett Expansion, Commodities Expansion
-│   ├── initial-specs/        # Original MTWM Spec v6
+│   ├── initial-specs/        # Original AWB Spec v6
 │   ├── prompts/              # Setup prompts
 │   └── ROADMAP.md            # Future roadmap (6 phases)
 ├── speckit-specs/            # Generated specifications (constitution, trading, RE, optimization, etc.)
