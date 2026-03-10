@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp.*
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+credentials.json
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Database & data files
+*.db
+*.sqlite
+*.sqlite3
+*.rvf
+*.rvf-shm
+*.rvf-wal
+*.rvf.graph
+ruvector.db
+
+# Logs
+logs/
+*.log
+/tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude local state
+.claude/
+.claude-flow/
+
+# MCP config (may contain local paths)
+.mcp.json
+
+# UI (separate repo)
+mtwm-ui/

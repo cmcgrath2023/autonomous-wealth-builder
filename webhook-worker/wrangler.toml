@@ -1,0 +1,14 @@
+name = "mtwm-dash"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+workers_dev = true
+
+[site]
+bucket = "./public"
+
+[[kv_namespaces]]
+binding = "MTWM_EVENTS"
+id = "94583736b2f84a098ed60dfa656a343f"
+
+[vars]
+DASHBOARD_TITLE = "MTWM Mobile"
