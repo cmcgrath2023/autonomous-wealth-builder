@@ -7,7 +7,7 @@ Autonomous wealth generation system combining algorithmic trading, real estate a
 - **Warren Buffett** — Buy quality at a discount, compound winners, cut losers fast, let the star run
 - **Robert Allen** — *Nothing Down* real estate acquisition, *Multiple Streams of Income* cross-pollination between trading profits and real estate capital deployment
 
-**Target:** $5K → $15K in 90 days (paper proving strategy), then real capital deployment.
+**Target:** 100% return in 30 days (paper proving strategy), then real capital deployment.
 
 ## System Architecture
 
@@ -184,13 +184,13 @@ The system does NOT use a hardcoded portfolio. Three agents work together to dis
 - Queries ReflexionMemory for past trade episodes (wins + failures)
 - Trains GNN model on accumulated pattern outcomes
 - Stores news catalysts as searchable patterns for future reference
-- Checks GOAP progress against daily $166.66 target, adjusts aggression when behind
+- Checks GOAP progress against daily return target, adjusts aggression when behind
 
 ## Strategic Planner (Goalie GOAP + MinCut)
 
 Goal-Oriented Action Planning with A* pathfinding toward financial objectives.
 
-- Creates phased capital growth trajectories ($5K → $15K in 90 days)
+- Creates phased capital growth trajectories (100% return in 30 days)
 - GOAP actions: scan_signals, trade_crypto, trade_stock, take_profit, rebalance, compound, diversify_re, scale_positions
 - Evaluates progress vs expected trajectory every heartbeat
 - Feasibility scoring based on daily return target, win rate, volatility, capital size
