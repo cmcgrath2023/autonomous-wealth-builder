@@ -404,16 +404,210 @@ export class BayesianIntelligence {
     return { winRate: weightedWinRate, observations: totalObs, avgReturn: weightedReturn };
   }
 
+  // === INTELLIGENCE MEASUREMENT — track how agents improve over time ===
+
+  private learningSnapshots: Array<{
+    timestamp: number;
+    domainWinRates: Record<string, number>;
+    totalObservations: number;
+    totalBeliefs: number;
+    avgPosteriorDivergence: number; // How far posteriors are from 0.5 (uninformed)
+    predictionAccuracy: number;     // Rolling accuracy of recent predictions
+    cumulativeRegret: number;       // Sum of losses from suboptimal decisions
+  }> = [];
+
+  private predictionLog: Array<{
+    timestamp: number;
+    beliefId: string;
+    predictedSuccess: boolean; // posterior > 0.5
+    actualSuccess: boolean;
+    posterior: number;
+  }> = [];
+
+  private cumulativeRegret = 0;
+  private lastSnapshotTime = 0;
+
+  /** Record a prediction for accuracy tracking — call BEFORE recording outcome */
+  recordPrediction(beliefId: string, actualSuccess: boolean) {
+    const belief = this.beliefs.get(beliefId);
+    if (!belief || belief.observations < 2) return;
+
+    const predictedSuccess = belief.posterior > 0.5;
+    this.predictionLog.push({
+      timestamp: Date.now(),
+      beliefId,
+      predictedSuccess,
+      actualSuccess,
+      posterior: belief.posterior,
+    });
+
+    // Regret: if we predicted wrong, add the confidence magnitude as regret
+    if (predictedSuccess !== actualSuccess) {
+      this.cumulativeRegret += Math.abs(belief.posterior - 0.5);
+    }
+
+    // Keep last 500 predictions
+    if (this.predictionLog.length > 500) {
+      this.predictionLog = this.predictionLog.slice(-300);
+    }
+  }
+
+  /** Take a learning snapshot — called periodically to track improvement */
+  snapshotLearning() {
+    const now = Date.now();
+    // Don't snapshot more than once per 5 minutes
+    if (now - this.lastSnapshotTime < 5 * 60 * 1000) return;
+    this.lastSnapshotTime = now;
+
+    const domainWinRates: Record<string, number> = {};
+    const domains = new Set(Array.from(this.beliefs.values()).map(b => b.domain));
+    for (const domain of domains) {
+      const wr = this.getDomainWinRate(domain);
+      if (wr.observations > 0) domainWinRates[domain] = wr.winRate;
+    }
+
+    // Posterior divergence: average |posterior - 0.5| across all beliefs with data
+    // Higher = more opinionated/learned; 0 = knows nothing
+    const informedBeliefs = Array.from(this.beliefs.values()).filter(b => b.observations >= 2);
+    const avgDivergence = informedBeliefs.length > 0
+      ? informedBeliefs.reduce((s, b) => s + Math.abs(b.posterior - 0.5), 0) / informedBeliefs.length
+      : 0;
+
+    // Rolling prediction accuracy (last 50 predictions)
+    const recentPreds = this.predictionLog.slice(-50);
+    const accuracy = recentPreds.length > 0
+      ? recentPreds.filter(p => p.predictedSuccess === p.actualSuccess).length / recentPreds.length
+      : 0.5;
+
+    this.learningSnapshots.push({
+      timestamp: now,
+      domainWinRates,
+      totalObservations: Array.from(this.beliefs.values()).reduce((s, b) => s + b.observations, 0),
+      totalBeliefs: this.beliefs.size,
+      avgPosteriorDivergence: avgDivergence,
+      predictionAccuracy: accuracy,
+      cumulativeRegret: this.cumulativeRegret,
+    });
+
+    // Keep last 500 snapshots (~40 hours at 5-min intervals)
+    if (this.learningSnapshots.length > 500) {
+      this.learningSnapshots = this.learningSnapshots.slice(-300);
+    }
+  }
+
+  /** Get intelligence metrics — how much have agents learned? */
+  getIntelligenceMetrics(): {
+    currentAccuracy: number;
+    accuracyTrend: 'improving' | 'declining' | 'stable' | 'insufficient_data';
+    posteriorDivergence: number; // 0 = knows nothing, 0.5 = max conviction
+    convergenceRate: number;    // How fast beliefs are stabilizing
+    cumulativeRegret: number;
+    regretTrend: 'decreasing' | 'increasing' | 'stable' | 'insufficient_data';
+    totalPredictions: number;
+    learningCurve: Array<{ timestamp: number; accuracy: number; divergence: number; observations: number }>;
+    domainProgress: Record<string, { current: number; trend: string; observations: number }>;
+  } {
+    const snapshots = this.learningSnapshots;
+    const recentPreds = this.predictionLog.slice(-50);
+    const currentAccuracy = recentPreds.length >= 5
+      ? recentPreds.filter(p => p.predictedSuccess === p.actualSuccess).length / recentPreds.length
+      : 0.5;
+
+    // Accuracy trend: compare last 25 vs previous 25
+    let accuracyTrend: 'improving' | 'declining' | 'stable' | 'insufficient_data' = 'insufficient_data';
+    if (this.predictionLog.length >= 20) {
+      const half = Math.floor(this.predictionLog.length / 2);
+      const firstHalf = this.predictionLog.slice(0, half);
+      const secondHalf = this.predictionLog.slice(half);
+      const firstAcc = firstHalf.filter(p => p.predictedSuccess === p.actualSuccess).length / firstHalf.length;
+      const secondAcc = secondHalf.filter(p => p.predictedSuccess === p.actualSuccess).length / secondHalf.length;
+      if (secondAcc - firstAcc > 0.05) accuracyTrend = 'improving';
+      else if (firstAcc - secondAcc > 0.05) accuracyTrend = 'declining';
+      else accuracyTrend = 'stable';
+    }
+
+    // Convergence rate: how much are posteriors changing between recent snapshots?
+    let convergenceRate = 0;
+    if (snapshots.length >= 2) {
+      const recent = snapshots.slice(-5);
+      const divergenceChanges = [];
+      for (let i = 1; i < recent.length; i++) {
+        divergenceChanges.push(Math.abs(recent[i].avgPosteriorDivergence - recent[i - 1].avgPosteriorDivergence));
+      }
+      convergenceRate = divergenceChanges.length > 0
+        ? 1 - Math.min(1, divergenceChanges.reduce((s, v) => s + v, 0) / divergenceChanges.length / 0.1)
+        : 0;
+    }
+
+    // Regret trend
+    let regretTrend: 'decreasing' | 'increasing' | 'stable' | 'insufficient_data' = 'insufficient_data';
+    if (snapshots.length >= 4) {
+      const recentSnaps = snapshots.slice(-4);
+      const regretDeltas = [];
+      for (let i = 1; i < recentSnaps.length; i++) {
+        regretDeltas.push(recentSnaps[i].cumulativeRegret - recentSnaps[i - 1].cumulativeRegret);
+      }
+      const avgDelta = regretDeltas.reduce((s, v) => s + v, 0) / regretDeltas.length;
+      const prevAvg = regretDeltas.length >= 2 ? regretDeltas[0] : avgDelta;
+      if (avgDelta < prevAvg * 0.8) regretTrend = 'decreasing';
+      else if (avgDelta > prevAvg * 1.2) regretTrend = 'increasing';
+      else regretTrend = 'stable';
+    }
+
+    // Learning curve data points
+    const learningCurve = snapshots.map(s => ({
+      timestamp: s.timestamp,
+      accuracy: s.predictionAccuracy,
+      divergence: s.avgPosteriorDivergence,
+      observations: s.totalObservations,
+    }));
+
+    // Per-domain progress
+    const domainProgress: Record<string, { current: number; trend: string; observations: number }> = {};
+    const domains = new Set(Array.from(this.beliefs.values()).map(b => b.domain));
+    for (const domain of domains) {
+      const wr = this.getDomainWinRate(domain);
+      let trend = 'stable';
+      if (snapshots.length >= 3) {
+        const recentSnaps = snapshots.slice(-3);
+        const rates = recentSnaps.map(s => s.domainWinRates[domain] || 0.5).filter(r => r > 0);
+        if (rates.length >= 2 && rates[rates.length - 1] > rates[0] + 0.03) trend = 'improving';
+        else if (rates.length >= 2 && rates[rates.length - 1] < rates[0] - 0.03) trend = 'declining';
+      }
+      domainProgress[domain] = { current: wr.winRate, trend, observations: wr.observations };
+    }
+
+    const informedBeliefs = Array.from(this.beliefs.values()).filter(b => b.observations >= 2);
+    const posteriorDivergence = informedBeliefs.length > 0
+      ? informedBeliefs.reduce((s, b) => s + Math.abs(b.posterior - 0.5), 0) / informedBeliefs.length
+      : 0;
+
+    return {
+      currentAccuracy,
+      accuracyTrend,
+      posteriorDivergence,
+      convergenceRate,
+      cumulativeRegret: this.cumulativeRegret,
+      regretTrend,
+      totalPredictions: this.predictionLog.length,
+      learningCurve,
+      domainProgress,
+    };
+  }
+
   /** Serialize for persistence */
-  toJSON(): { beliefs: [string, BayesianBelief][]; insightLog: AgentInsight[] } {
+  toJSON(): { beliefs: [string, BayesianBelief][]; insightLog: AgentInsight[]; learningSnapshots?: any[]; predictionLog?: any[]; cumulativeRegret?: number } {
     return {
       beliefs: Array.from(this.beliefs.entries()),
       insightLog: this.insightLog.slice(-200),
+      learningSnapshots: this.learningSnapshots.slice(-200),
+      predictionLog: this.predictionLog.slice(-200),
+      cumulativeRegret: this.cumulativeRegret,
     };
   }
 
   /** Restore from persistence */
-  fromJSON(data: { beliefs?: [string, BayesianBelief][]; insightLog?: AgentInsight[] }) {
+  fromJSON(data: { beliefs?: [string, BayesianBelief][]; insightLog?: AgentInsight[]; learningSnapshots?: any[]; predictionLog?: any[]; cumulativeRegret?: number }) {
     if (data.beliefs) {
       for (const [id, belief] of data.beliefs) {
         this.beliefs.set(id, belief);
@@ -421,6 +615,15 @@ export class BayesianIntelligence {
     }
     if (data.insightLog) {
       this.insightLog = data.insightLog;
+    }
+    if (data.learningSnapshots) {
+      this.learningSnapshots = data.learningSnapshots;
+    }
+    if (data.predictionLog) {
+      this.predictionLog = data.predictionLog;
+    }
+    if (data.cumulativeRegret !== undefined) {
+      this.cumulativeRegret = data.cumulativeRegret;
     }
   }
 

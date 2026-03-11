@@ -74,10 +74,13 @@ const adaptiveState = {
   stopLossDominance: 0,           // Ratio of stop_loss exits — if high, system is buying garbage
 
   // === Forex ===
-  forexThreshold: 0.45,           // Forex entry score threshold — adaptive like equities
+  forexThreshold: 0.55,           // Forex entry score threshold — raised from 0.45 (was too loose)
   forexAvoidPairs: new Set<string>(), // Pairs that consistently lose
   forexPreferPairs: new Set<string>(), // Pairs that consistently win
-  forexMaxPositions: 7,           // Can be reduced if forex is bleeding
+  forexMaxPositions: 3,           // 3 positions for $700-1200/day target
+  forexBudget: 5000,              // $5K capital — realistic for live trading
+  forexMaxUnitsPerTrade: 100000,  // 100K units × 3 positions = ~$6K margin, ~$300/win at 30 pips
+  forexKnownTradeIds: new Set<string>(), // Track open trade IDs for closed-trade detection
 
   // === Real Estate ===
   reMinNDScore: 4.0,              // Minimum Nothing Down score — raised when deals fail
@@ -163,10 +166,19 @@ eventBus.on('trade:closed', (payload) => {
   if (witnessChain) {
     witnessChain.record('trade_closed', 'position_manager', 'trading', payload);
   }
-  // Feed outcome to trait engine
+  // Record prediction accuracy BEFORE updating beliefs — measures if we predicted correctly
+  bayesianIntel.recordPrediction(`ticker:${payload.ticker}`, payload.success);
+  bayesianIntel.recordPrediction(`momentum:${payload.ticker}:outcome`, payload.success);
+  // Feed outcome to trait engine — use BOTH ID formats so existing traits get updated
   if (traitEngine) {
-    const traitId = `signal_accuracy_${payload.ticker}`;
-    traitEngine.recordOutcome(traitId, payload.success, payload.returnPct);
+    // Hyphenated format (created by signal:new listener)
+    traitEngine.recordOutcome(`signal-accuracy-${payload.ticker}`, payload.success, payload.returnPct);
+    // Underscore format (legacy)
+    traitEngine.recordOutcome(`signal_accuracy_${payload.ticker}`, payload.success, payload.returnPct);
+    // Also update the indicator composite trait
+    traitEngine.recordOutcome(`indicator-composite-${payload.ticker}`, payload.success, payload.returnPct);
+    // Ticker behavior trait
+    traitEngine.recordOutcome(`ticker-${payload.ticker}`, payload.success, payload.returnPct);
   }
 });
 
@@ -539,6 +551,137 @@ app.get('/api/intelligence/insights', (_req, res) => {
   res.json({ insights: bayesianIntel.getRecentInsights() });
 });
 
+// Goal Certainty — probabilistic assessment of achieving 100% return in 30 days
+// Uses FANN neural confidence, Bayesian domain win rates, adaptive state, and trade history
+app.get('/api/intelligence/goal-certainty', async (_req, res) => {
+  try {
+    // 1. Bayesian domain win rates
+    const eqWR = bayesianIntel.getDomainWinRate('momentum_star');
+    const fxWR = bayesianIntel.getDomainWinRate('strategy');
+    const reWR = bayesianIntel.getDomainWinRate('real_estate');
+    const tickerWR = bayesianIntel.getDomainWinRate('ticker');
+
+    // 2. Position manager closed trade stats
+    const pmStats = positionManager.getPerformanceStats();
+
+    // 3. Adaptive state health
+    const adaptiveHealth = {
+      eqThreshold: adaptiveState.momentumStarThreshold,
+      fxThreshold: adaptiveState.forexThreshold,
+      stopLossDominance: adaptiveState.stopLossDominance,
+      avoidCount: adaptiveState.avoidTickers.size + adaptiveState.forexAvoidPairs.size,
+      preferCount: adaptiveState.preferTickers.size + adaptiveState.forexPreferPairs.size,
+    };
+
+    // 4. Neural forecast confidence (sample current watchlist)
+    const quotes = midstream.getAllQuotes();
+    let neuralBullish = 0, neuralBearish = 0, neuralNeutral = 0;
+    const sampleSize = Math.min(20, quotes.length);
+    for (let i = 0; i < sampleSize; i++) {
+      const q = quotes[i];
+      const history = neuralTrader.getPriceHistory(q.ticker);
+      if (history.length < 30) { neuralNeutral++; continue; }
+      try {
+        const forecast = await neuralForecast(history.map((h: any) => h.close || h.price));
+        if (forecast) {
+          if (forecast.direction === 'up') neuralBullish++;
+          else if (forecast.direction === 'down') neuralBearish++;
+          else neuralNeutral++;
+        } else neuralNeutral++;
+      } catch { neuralNeutral++; }
+    }
+
+    // 5. Compute goal certainty factors (0-1 each)
+    // a) Strategy effectiveness — are our trades winning?
+    const strategyFactor = Math.max(0, Math.min(1,
+      (eqWR.winRate * 0.5 + tickerWR.winRate * 0.3 + (pmStats.winRate || 0.5) * 0.2)
+    ));
+
+    // b) Market conditions — is the market favorable?
+    const marketBullRatio = sampleSize > 0 ? neuralBullish / sampleSize : 0.5;
+    const marketFactor = Math.max(0, Math.min(1,
+      marketBullRatio * 0.6 + (1 - adaptiveHealth.stopLossDominance) * 0.4
+    ));
+
+    // c) Learning maturity — does the system have enough data to be smart?
+    const totalObs = eqWR.observations + fxWR.observations + reWR.observations;
+    const learningFactor = Math.max(0, Math.min(1,
+      1 - (1 / (1 + totalObs * 0.01))
+    ));
+
+    // d) Risk management — is the system protecting capital?
+    const riskFactor = Math.max(0, Math.min(1,
+      (1 - adaptiveHealth.stopLossDominance) * 0.5 +
+      (pmStats.profitFactor || 0) * 0.3 +
+      (adaptiveHealth.avoidCount > 0 ? 0.2 : 0) // Learning to avoid is good
+    ));
+
+    // e) Diversification — are multiple streams active?
+    const streams = [
+      eqWR.observations > 5 ? 1 : 0,  // Equities active
+      fxWR.observations > 5 ? 1 : 0,   // Forex active
+      reWR.observations > 5 ? 1 : 0,   // Real estate active
+    ];
+    const diversificationFactor = Math.max(0.2, streams.reduce((a, b) => a + b, 0) / 3);
+
+    // Weighted composite certainty
+    const certainty = Math.max(0, Math.min(1,
+      strategyFactor * 0.35 +
+      marketFactor * 0.25 +
+      learningFactor * 0.15 +
+      riskFactor * 0.15 +
+      diversificationFactor * 0.10
+    ));
+
+    // Classification
+    const level = certainty >= 0.75 ? 'HIGH' :
+                  certainty >= 0.50 ? 'MODERATE' :
+                  certainty >= 0.30 ? 'LOW' : 'VERY LOW';
+
+    // Blockers and accelerators
+    const blockers: string[] = [];
+    const accelerators: string[] = [];
+
+    if (adaptiveHealth.stopLossDominance > 0.60) blockers.push(`${(adaptiveHealth.stopLossDominance * 100).toFixed(0)}% of exits are stop losses — entry quality needs improvement`);
+    if (eqWR.winRate < 0.35) blockers.push(`Equity win rate at ${(eqWR.winRate * 100).toFixed(0)}% — need >50% for compounding`);
+    if (pmStats.profitFactor < 1.0 && pmStats.totalTrades > 0) blockers.push(`Profit factor ${pmStats.profitFactor.toFixed(2)} < 1.0 — losing more than winning`);
+    if (marketBullRatio < 0.3) blockers.push(`Neural sees ${(marketBullRatio * 100).toFixed(0)}% bullish — bearish market headwind`);
+    if (totalObs < 50) blockers.push(`Only ${totalObs} observations — system still learning`);
+
+    if (eqWR.winRate > 0.55) accelerators.push(`Equity win rate ${(eqWR.winRate * 100).toFixed(0)}% — compounding working`);
+    if (adaptiveHealth.preferCount > 0) accelerators.push(`${adaptiveHealth.preferCount} preferred tickers/pairs identified by Bayesian learning`);
+    if (marketBullRatio > 0.6) accelerators.push(`Neural sees ${(marketBullRatio * 100).toFixed(0)}% bullish — favorable conditions`);
+    if (pmStats.profitFactor > 1.5) accelerators.push(`Profit factor ${pmStats.profitFactor.toFixed(2)} — winners outpacing losers`);
+    if (learningFactor > 0.7) accelerators.push(`Learning maturity at ${(learningFactor * 100).toFixed(0)}% — system calibrated`);
+    if (streams.reduce((a, b) => a + b, 0) >= 2) accelerators.push(`${streams.reduce((a, b) => a + b, 0)} income streams active — diversified`);
+
+    res.json({
+      goalCertainty: {
+        certainty: Math.round(certainty * 1000) / 10, // percentage with 1 decimal
+        level,
+        target: '100% return in 30 days',
+        factors: {
+          strategy: { score: Math.round(strategyFactor * 100), label: 'Strategy Effectiveness', detail: `Eq WR: ${(eqWR.winRate * 100).toFixed(0)}%, Ticker WR: ${(tickerWR.winRate * 100).toFixed(0)}%, PM WR: ${((pmStats.winRate || 0) * 100).toFixed(0)}%` },
+          market: { score: Math.round(marketFactor * 100), label: 'Market Conditions', detail: `Neural: ${neuralBullish}↑ ${neuralBearish}↓ ${neuralNeutral}→ of ${sampleSize}` },
+          learning: { score: Math.round(learningFactor * 100), label: 'Learning Maturity', detail: `${totalObs} total observations across ${streams.reduce((a, b) => a + b, 0)} domains` },
+          risk: { score: Math.round(riskFactor * 100), label: 'Risk Management', detail: `SL dominance: ${(adaptiveHealth.stopLossDominance * 100).toFixed(0)}%, PF: ${(pmStats.profitFactor || 0).toFixed(2)}` },
+          diversification: { score: Math.round(diversificationFactor * 100), label: 'Stream Diversification', detail: `${streams.reduce((a, b) => a + b, 0)}/3 streams active` },
+        },
+        blockers,
+        accelerators,
+        neuralSentiment: { bullish: neuralBullish, bearish: neuralBearish, neutral: neuralNeutral, total: sampleSize },
+        tradeStats: pmStats,
+        adaptive: {
+          eqThreshold: adaptiveHealth.eqThreshold,
+          fxThreshold: adaptiveHealth.fxThreshold,
+        },
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/intelligence/adaptive', (_req, res) => {
   res.json({
     adaptive: {
@@ -566,8 +709,38 @@ app.get('/api/intelligence/adaptive', (_req, res) => {
         momentum_star: bayesianIntel.getDomainWinRate('momentum_star'),
         ticker: bayesianIntel.getDomainWinRate('ticker'),
         strategy: bayesianIntel.getDomainWinRate('strategy'),
+        forex_pair: bayesianIntel.getDomainWinRate('forex_pair'),
         real_estate: bayesianIntel.getDomainWinRate('real_estate'),
       },
+    },
+  });
+});
+
+// Intelligence Metrics — how much smarter are agents getting over time?
+// Tracks prediction accuracy, posterior convergence, regret minimization, and learning curves
+app.get('/api/intelligence/metrics', (_req, res) => {
+  const metrics = bayesianIntel.getIntelligenceMetrics();
+  const intel = bayesianIntel.getCollectiveIntelligence();
+  res.json({
+    intelligence: {
+      // Core metrics
+      predictionAccuracy: metrics.currentAccuracy,
+      accuracyTrend: metrics.accuracyTrend,
+      posteriorDivergence: metrics.posteriorDivergence,
+      convergenceRate: metrics.convergenceRate,
+      cumulativeRegret: metrics.cumulativeRegret,
+      regretTrend: metrics.regretTrend,
+      totalPredictions: metrics.totalPredictions,
+      // How knowledgeable the system is
+      totalBeliefs: intel.totalBeliefs,
+      totalObservations: intel.totalObservations,
+      agentContributions: intel.agentContributions,
+      // Per-domain intelligence growth
+      domainProgress: metrics.domainProgress,
+      // Learning curve time series (for charting)
+      learningCurve: metrics.learningCurve,
+      // Top insights the system has discovered
+      topInsights: intel.topInsights,
     },
   });
 });
@@ -2984,40 +3157,50 @@ async function start() {
 
     // ===== FOREX ADAPTIVE LEARNING =====
     // Learn which pairs win/lose and adjust forex threshold
-    const forexBeliefs = bayesianIntel.query({ domain: 'strategy' })
-      .filter(b => b.id.startsWith('forex_pair_') && b.observations >= 3);
-    if (forexBeliefs.length > 0) {
-      const fxTotalObs = forexBeliefs.reduce((s, b) => s + b.observations, 0);
-      const fxWeightedWinRate = forexBeliefs.reduce((s, b) => s + b.posterior * b.observations, 0) / fxTotalObs;
-      // Adaptive forex threshold: tighten when losing, relax when winning
-      const fxBase = 0.45;
-      const fxAdj = (0.50 - fxWeightedWinRate) * 0.25;
-      adaptiveState.forexThreshold = Math.max(0.35, Math.min(0.60, fxBase + fxAdj));
-      tel('forex_threshold_adapted', { fxWeightedWinRate, newThreshold: adaptiveState.forexThreshold });
+    // Query BOTH domains — old entries used 'strategy', new entries use 'forex_pair'
+    const forexBeliefs = [
+      ...bayesianIntel.query({ domain: 'forex_pair' }).filter(b => b.id.startsWith('forex_pair_') && b.observations >= 2),
+      ...bayesianIntel.query({ domain: 'strategy' }).filter(b => b.id.startsWith('forex_pair_') && b.observations >= 2),
+    ];
+    // Deduplicate by ID
+    const seenFxIds = new Set<string>();
+    const uniqueForexBeliefs = forexBeliefs.filter(b => {
+      if (seenFxIds.has(b.id)) return false;
+      seenFxIds.add(b.id);
+      return true;
+    });
+    if (uniqueForexBeliefs.length > 0) {
+      const fxTotalObs = uniqueForexBeliefs.reduce((s, b) => s + b.observations, 0);
+      const fxWeightedWinRate = uniqueForexBeliefs.reduce((s, b) => s + b.posterior * b.observations, 0) / fxTotalObs;
+      // Adaptive forex threshold: tighten when losing, relax when winning (base raised to 0.55)
+      const fxBase = 0.55;
+      const fxAdj = (0.50 - fxWeightedWinRate) * 0.30;
+      adaptiveState.forexThreshold = Math.max(0.45, Math.min(0.70, fxBase + fxAdj));
+      tel('forex_threshold_adapted', { fxWeightedWinRate, newThreshold: adaptiveState.forexThreshold, beliefs: uniqueForexBeliefs.length });
     }
 
     // Forex pair avoidance/preference from Bayesian
     adaptiveState.forexAvoidPairs.clear();
     adaptiveState.forexPreferPairs.clear();
-    for (const fb of forexBeliefs) {
+    for (const fb of uniqueForexBeliefs) {
       // Extract pair name: forex_pair_EUR/USD_long → EUR/USD
       const match = fb.id.match(/forex_pair_(.+?)_(long|short)/);
       if (!match) continue;
       const pairName = match[1];
-      if (fb.posterior < 0.30 && fb.observations >= 5) {
+      if (fb.posterior < 0.35 && fb.observations >= 3) {
         adaptiveState.forexAvoidPairs.add(pairName);
-      } else if (fb.posterior > 0.65 && fb.observations >= 5) {
+      } else if (fb.posterior > 0.60 && fb.observations >= 3) {
         adaptiveState.forexPreferPairs.add(pairName);
       }
     }
 
     // If forex is bleeding (>70% of forex exits are losses), reduce max positions
-    const fxLosers = forexBeliefs.filter(b => b.posterior < 0.40);
-    if (forexBeliefs.length >= 3 && fxLosers.length / forexBeliefs.length > 0.70) {
-      adaptiveState.forexMaxPositions = Math.max(3, adaptiveState.forexMaxPositions - 1);
+    const fxLosers = uniqueForexBeliefs.filter(b => b.posterior < 0.40);
+    if (uniqueForexBeliefs.length >= 3 && fxLosers.length / uniqueForexBeliefs.length > 0.70) {
+      adaptiveState.forexMaxPositions = Math.max(2, adaptiveState.forexMaxPositions - 1);
       tel('forex_positions_reduced', { maxPositions: adaptiveState.forexMaxPositions });
-    } else if (forexBeliefs.length >= 3 && fxLosers.length / forexBeliefs.length < 0.30) {
-      adaptiveState.forexMaxPositions = Math.min(7, adaptiveState.forexMaxPositions + 1);
+    } else if (uniqueForexBeliefs.length >= 3 && fxLosers.length / uniqueForexBeliefs.length < 0.30) {
+      adaptiveState.forexMaxPositions = Math.min(4, adaptiveState.forexMaxPositions + 1);
     }
 
     // ===== REAL ESTATE ADAPTIVE LEARNING =====
@@ -3066,9 +3249,14 @@ async function start() {
 
     tel('sync_complete', { insights: intel.topInsights.length });
 
+    // Snapshot learning metrics every heartbeat (internally rate-limited to 5-min intervals)
+    bayesianIntel.snapshotLearning();
+
+    const metrics = bayesianIntel.getIntelligenceMetrics();
     const adaptNote = `ADAPTIVE: eq=${adaptiveState.momentumStarThreshold.toFixed(2)}/min$${adaptiveState.minPrice.toFixed(2)} fx=${adaptiveState.forexThreshold.toFixed(2)}/max${adaptiveState.forexMaxPositions} re=ND${adaptiveState.reMinNDScore.toFixed(1)} | avoid=${adaptiveState.avoidTickers.size}eq+${adaptiveState.forexAvoidPairs.size}fx+${adaptiveState.reAvoidSources.size}re`;
+    const learningNote = `LEARNING: accuracy=${(metrics.currentAccuracy * 100).toFixed(0)}% (${metrics.accuracyTrend}), divergence=${metrics.posteriorDivergence.toFixed(3)}, regret=${metrics.cumulativeRegret.toFixed(2)} (${metrics.regretTrend}), preds=${metrics.totalPredictions}`;
     return {
-      detail: `${intel.totalBeliefs} beliefs, ${intel.totalObservations} observations across ${Object.keys(intel.agentContributions).length} agents | ${intel.topInsights.slice(0, 2).join('; ') || 'learning...'} | ${adaptNote}`,
+      detail: `${intel.totalBeliefs} beliefs, ${intel.totalObservations} observations | ${intel.topInsights.slice(0, 2).join('; ') || 'learning...'} | ${adaptNote} | ${learningNote}`,
       result: intel.totalObservations > 0 ? 'success' : 'skipped',
     };
   });
@@ -3721,18 +3909,11 @@ async function start() {
 
         rationale.push(`COMPOSITE SCORE: ${totalScore.toFixed(2)} (neural: ${neuralConf.toFixed(2)}, bayesian: ${(bayesianAdj * 0.15).toFixed(2)}, patterns: ${patternBoost.toFixed(2)}, trend: +${trendBonus.toFixed(2)})`);
 
-        // ─── STEP 8: MinCut Kelly position sizing ───
-        // Kelly: f = (p * b - q) / b where p=winRate, b=reward/risk, q=1-p
-        const estimatedWinRate = Math.min(0.65, 0.50 + totalScore * 0.15);
-        const rewardRisk = 2.0; // 2:1 R:R ratio
-        const kellyFraction = (estimatedWinRate * rewardRisk - (1 - estimatedWinRate)) / rewardRisk;
-        const halfKelly = Math.max(0.02, kellyFraction * 0.5); // Half-Kelly for safety
-        const forexBudget = 2500;
-        const positionValue = forexBudget * halfKelly * 50; // 50:1 leverage
-        const units = Math.round(positionValue / current) || 25000;
-        const cappedUnits = Math.min(50000, Math.max(10000, units)); // 10K-50K range
+        // ─── STEP 8: Position sizing (budget-constrained) ───
+        // User budget: $5K total, $2,500 forex. Max 4 positions × 5,000 units = ~$1,600 margin total
+        const maxUnits = adaptiveState.forexMaxUnitsPerTrade; // Default 5,000
 
-        rationale.push(`Kelly: winRate=${(estimatedWinRate * 100).toFixed(0)}%, halfKelly=${(halfKelly * 100).toFixed(1)}%, units=${cappedUnits}`);
+        rationale.push(`Position: ${maxUnits} units (budget: $${adaptiveState.forexBudget}, margin: ~$${Math.round(maxUnits * current * 0.02)})`);
 
         // ─── STEP 9: Calculate SL/TP from ATR ───
         const isJpy = pair.includes('JPY');
@@ -3819,7 +4000,9 @@ async function start() {
       if (existingTrade) continue;
 
       const symbol = instrument.replace('_', '/');
-      const units = analysis.direction === 'long' ? 25000 : -25000; // Use Kelly-derived but cap at 25K for now
+      // Position sizing from Kelly + budget constraint (user budget: $5K total, $2.5K forex)
+      const maxUnits = adaptiveState.forexMaxUnitsPerTrade;
+      const units = analysis.direction === 'long' ? maxUnits : -maxUnits;
 
       try {
         const result = await forexScanner.placeOrder(symbol, units, analysis.stopLoss, analysis.takeProfit);
@@ -3838,9 +4021,10 @@ async function start() {
           } catch {}
         }
 
-        // Update Bayesian beliefs
+        // Track this trade ID for closed-trade detection (learning happens on EXIT, not entry)
         try {
-          bayesianIntel.recordOutcome(`forex_pair_${symbol}_${analysis.direction}`, { domain: 'strategy', subject: symbol }, true, 0);
+          const tradeId = result?.orderFillTransaction?.tradeOpened?.tradeID;
+          if (tradeId) adaptiveState.forexKnownTradeIds.add(tradeId);
         } catch {}
 
         // Emit to event bus for cross-agent learning
@@ -3948,7 +4132,7 @@ async function start() {
           // Bayesian: learn that this pair underperforms in current conditions
           try {
             const direction = dog.units > 0 ? 'long' : 'short';
-            bayesianIntel.recordOutcome(`forex_pair_${symbol}_${direction}`, { domain: 'strategy', subject: symbol }, false, dog.pl);
+            bayesianIntel.recordOutcome(`forex_pair_${symbol}_${direction}`, { domain: 'forex_pair', subject: symbol, tags: ['forex', 'dog_cut'], contributors: ['position-mgmt'] }, false, dog.pl);
           } catch {}
 
           // Emit for cross-agent learning
@@ -3982,7 +4166,7 @@ async function start() {
       try {
         const starSymbol = star.instrument.replace('_', '/');
         const direction = star.units > 0 ? 'long' : 'short';
-        bayesianIntel.recordOutcome(`forex_pair_${starSymbol}_${direction}`, { domain: 'strategy', subject: starSymbol }, true, star.pl);
+        bayesianIntel.recordOutcome(`forex_pair_${starSymbol}_${direction}`, { domain: 'forex_pair', subject: starSymbol, tags: ['forex', 'star'], contributors: ['position-mgmt'] }, true, star.pl);
       } catch {}
     } else if (dogs.length >= 2) {
       // Multiple dogs, no clear star — cut the worst dog
@@ -4002,10 +4186,104 @@ async function start() {
     return { detail: actions.join(' | '), result: 'success' };
   });
 
+  // ── Forex Closed-Trade Detector ──────────────────────────────────────
+  // Polls OANDA for trades that closed (via TP/SL on their server) and feeds outcomes
+  // into Bayesian learning. Without this, the system NEVER learns from forex results.
+  autonomyEngine.registerAction('forex-scanner', 'detect_closed_trades', async () => {
+    const OANDA_KEY = process.env.OANDA_API_KEY;
+    const OANDA_ACCT = process.env.OANDA_ACCOUNT_ID;
+    if (!OANDA_KEY || !OANDA_ACCT) return { detail: 'OANDA not configured', result: 'skipped' };
+
+    const isPractice = process.env.OANDA_MODE === 'practice' || (OANDA_ACCT?.startsWith('101-') ?? false);
+    const oandaBase = isPractice ? 'https://api-fxpractice.oanda.com' : 'https://api-fxtrade.oanda.com';
+
+    try {
+      // Get currently open trade IDs
+      const openTrades = await forexScanner.getOpenTrades();
+      const currentOpenIds = new Set(openTrades.map((t: any) => t.id));
+
+      // Compare with known IDs to find closures
+      const closedIds: string[] = [];
+      for (const knownId of adaptiveState.forexKnownTradeIds) {
+        if (!currentOpenIds.has(knownId)) {
+          closedIds.push(knownId);
+        }
+      }
+
+      // Also seed known IDs from currently open trades (for first run)
+      for (const t of openTrades) {
+        adaptiveState.forexKnownTradeIds.add(t.id);
+      }
+
+      if (closedIds.length === 0) {
+        return { detail: `Forex learning: tracking ${adaptiveState.forexKnownTradeIds.size} trades, ${currentOpenIds.size} open`, result: 'skipped' };
+      }
+
+      // Fetch details of closed trades from OANDA
+      const learnings: string[] = [];
+      for (const tradeId of closedIds) {
+        try {
+          const res = await fetch(`${oandaBase}/v3/accounts/${OANDA_ACCT}/trades/${tradeId}`, {
+            headers: { Authorization: `Bearer ${OANDA_KEY}` },
+          });
+          if (!res.ok) {
+            adaptiveState.forexKnownTradeIds.delete(tradeId);
+            continue;
+          }
+          const data = await res.json() as any;
+          const trade = data.trade;
+          if (!trade) {
+            adaptiveState.forexKnownTradeIds.delete(tradeId);
+            continue;
+          }
+
+          const instrument = trade.instrument;
+          const symbol = instrument.replace('_', '/');
+          const units = parseInt(trade.initialUnits || '0');
+          const direction = units > 0 ? 'long' : 'short';
+          const realizedPL = parseFloat(trade.realizedPL || '0');
+          const success = realizedPL > 0;
+          const entryPrice = parseFloat(trade.price || '0');
+          const closeReason = trade.closingTransactionIDs ? 'server_tp_sl' : 'unknown';
+
+          // Record outcome in Bayesian system
+          bayesianIntel.recordOutcome(
+            `forex_pair_${symbol}_${direction}`,
+            { domain: 'forex_pair', subject: symbol, tags: ['forex', closeReason], contributors: ['forex-closed-detector'] },
+            success,
+            realizedPL
+          );
+
+          // Emit trade:closed for cross-system learning
+          eventBus.emit('trade:closed' as any, {
+            ticker: symbol,
+            success,
+            returnPct: entryPrice > 0 ? realizedPL / (Math.abs(units) * entryPrice) : 0,
+            pnl: realizedPL,
+            reason: success ? 'take_profit' : 'stop_loss',
+          });
+
+          learnings.push(`${symbol} ${direction}: ${success ? 'WIN' : 'LOSS'} $${realizedPL.toFixed(2)}`);
+          adaptiveState.forexKnownTradeIds.delete(tradeId);
+        } catch {
+          adaptiveState.forexKnownTradeIds.delete(tradeId);
+        }
+      }
+
+      return {
+        detail: `Forex LEARNING: ${learnings.join(' | ')} — fed to Bayesian system`,
+        result: learnings.length > 0 ? 'success' : 'skipped',
+      };
+    } catch (err: any) {
+      return { detail: `Forex closed-trade detection error: ${err.message}`, result: 'error' };
+    }
+  });
+
   // ── Priority overrides for execution-critical agents ──
-  // Data feed first (5), Research (10), Execution (15), Position management (16), rest default (50)
+  // Data feed first (5), Research (10), Closed-trade detection (12), Execution (15), Position management (16)
   (autonomyEngine as any).actionPriority.set('midstream-feed:refresh_quotes', 5);
   (autonomyEngine as any).actionPriority.set('research-agent:forex_strategic_research', 10);
+  (autonomyEngine as any).actionPriority.set('forex-scanner:detect_closed_trades', 12);
   (autonomyEngine as any).actionPriority.set('forex-scanner:execute_forex', 15);
   (autonomyEngine as any).actionPriority.set('forex-scanner:manage_positions', 16);
   (autonomyEngine as any).actionPriority.set('neural-trader:scan_signals', 20);
@@ -4436,6 +4714,10 @@ async function start() {
   // Start expansion services (observe mode only — no auto-trading)
   openClawExpansion.startAll();
   console.log('[✓] Expansion Services — 7 agents active (GlobalStream, Commodities, DataCenter, Metals, Forex, REITs, Options)');
+
+  // Auto-enable autonomy in act mode on startup
+  autonomyEngine.updateConfig({ enabled: true, level: 'act' });
+  console.log('[✓] Autonomy auto-enabled: ACT mode');
 
   app.listen(PORT, () => {
     console.log(`\n[Gateway] Listening on http://localhost:${PORT}`);

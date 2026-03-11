@@ -144,8 +144,20 @@ export class TraitEngine {
 
   // Bayesian update: given an outcome, update the trait's posterior
   recordOutcome(traitId: string, success: boolean, returnPct: number = 0) {
-    const trait = this.traits.get(traitId);
-    if (!trait) return;
+    let trait = this.traits.get(traitId);
+    if (!trait) {
+      // Auto-create trait from outcome — don't silently drop learning data
+      const category = traitId.startsWith('signal') ? 'signal_accuracy' as const
+        : traitId.startsWith('indicator') ? 'indicator_reliability' as const
+        : traitId.startsWith('ticker') ? 'ticker_behavior' as const
+        : 'strategy' as const;
+      const ticker = traitId.replace(/^(signal[-_]accuracy[-_]|indicator-composite-|ticker-)/, '');
+      trait = this.getOrCreateTrait(traitId, {
+        name: `${category.replace(/_/g, ' ')}: ${ticker}`,
+        category,
+        context: { ticker, autoCreated: true },
+      });
+    }
 
     trait.observations++;
     if (success) {
