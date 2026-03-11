@@ -44,5 +44,6 @@ Thumbs.db
 # MCP config (may contain local paths)
 .mcp.json
 
-# UI (separate repo)
-mtwm-ui/
+# UI build artifacts (source tracked)
+mtwm-ui/.next/
+mtwm-ui/node_modules/
