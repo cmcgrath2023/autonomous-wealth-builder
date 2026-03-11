@@ -4733,10 +4733,12 @@ async function start() {
     console.log(`[✓] Webhook Relay — pushing to ${process.env.WEBHOOK_RELAY_URL}`);
   }
 
-  process.on('SIGTERM', () => { webhookRelay.shutdown(); });
-  process.on('SIGINT', () => { webhookRelay.shutdown(); });
-
   // Crash protection — never let unhandled errors kill the gateway
+  // Must come AFTER all imports/inits because goalie MCP server registers process.exit(0) on SIGINT
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+  process.on('SIGTERM', () => { console.log('[Gateway] SIGTERM received — shutting down gracefully'); webhookRelay.shutdown(); process.exit(0); });
+  process.on('SIGINT', () => { console.log('[Gateway] SIGINT received — shutting down gracefully'); webhookRelay.shutdown(); process.exit(0); });
   process.on('uncaughtException', (err) => {
     console.error('[CRASH PREVENTED] Uncaught exception:', err.message);
     console.error(err.stack);
