@@ -4102,8 +4102,45 @@ async function start() {
     const star = positions[0];
     const dogs = positions.filter(p => p.pl < -2); // Losing more than $2
 
+    // ── TAKE PROFIT: Bank winners that hit target ──
+    // $50+ per 100K position = ~15 pips, solid scalp profit. Close and free capital for next trade.
+    const bankableWinners = positions.filter(p => p.pl >= 50);
+    if (bankableWinners.length > 0) {
+      const bankedActions: string[] = [];
+      for (const winner of bankableWinners) {
+        try {
+          const symbol = winner.instrument.replace('_', '/');
+          await forexScanner.closePosition(symbol);
+          bankedActions.push(`BANKED ${symbol} +$${winner.pl.toFixed(2)}`);
+
+          // Record success in Bayesian system
+          try {
+            const direction = winner.units > 0 ? 'long' : 'short';
+            bayesianIntel.recordOutcome(`forex_pair_${symbol}_${direction}`, { domain: 'forex_pair', subject: symbol, tags: ['forex', 'take_profit'], contributors: ['position-mgmt'] }, true, winner.pl);
+            bayesianIntel.recordPrediction(`ticker:${symbol}`, true);
+          } catch {}
+
+          // Emit for cross-system learning
+          try {
+            eventBus.emit('trade:closed' as any, {
+              ticker: symbol,
+              success: true,
+              returnPct: winner.pl / 500,
+              pnl: winner.pl,
+              reason: 'take_profit_scalp',
+            });
+          } catch {}
+        } catch (err: any) {
+          bankedActions.push(`FAILED to bank ${winner.instrument}: ${err.message}`);
+        }
+      }
+      const remaining = positions.length - bankableWinners.length;
+      return { detail: `TAKE PROFIT: ${bankedActions.join(' | ')} | ${remaining} positions remaining`, result: 'success' };
+    }
+
     if (dogs.length === 0) {
-      return { detail: `All ${positions.length} positions profitable — holding`, result: 'skipped' };
+      const totalPl = positions.reduce((s, p) => s + p.pl, 0);
+      return { detail: `All ${positions.length} positions profitable ($${totalPl.toFixed(2)}) — below $50/pos TP threshold, holding`, result: 'skipped' };
     }
 
     // If star is strongly positive and dogs exist → cut dogs, concentrate
