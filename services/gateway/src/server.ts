@@ -4699,6 +4699,15 @@ async function start() {
   process.on('SIGTERM', () => { webhookRelay.shutdown(); });
   process.on('SIGINT', () => { webhookRelay.shutdown(); });
 
+  // Crash protection — never let unhandled errors kill the gateway
+  process.on('uncaughtException', (err) => {
+    console.error('[CRASH PREVENTED] Uncaught exception:', err.message);
+    console.error(err.stack);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[CRASH PREVENTED] Unhandled rejection:', reason);
+  });
+
   // Wire expansion events to console
   openClawExpansion.on('pendingApproval', (data) => {
     console.log(`[OpenClaw Expansion] Pending approval: ${data.type} from ${data.agentId}`);
@@ -4716,7 +4725,7 @@ async function start() {
   console.log('[✓] Expansion Services — 7 agents active (GlobalStream, Commodities, DataCenter, Metals, Forex, REITs, Options)');
 
   // Auto-enable autonomy in act mode on startup
-  autonomyEngine.updateConfig({ enabled: true, level: 'act' });
+  autonomyEngine.updateConfig({ enabled: true, autonomyLevel: 'act' });
   console.log('[✓] Autonomy auto-enabled: ACT mode');
 
   app.listen(PORT, () => {
