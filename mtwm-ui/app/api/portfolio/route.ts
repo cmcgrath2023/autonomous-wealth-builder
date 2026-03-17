@@ -105,6 +105,9 @@ export async function GET() {
     const totalValue = account.portfolioValue || 0;
     const totalPnl = totalValue - INITIAL_BALANCE; // TRUE total P&L from starting balance
     const realizedPnl = (closedData.trades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
+    // Today's P&L from Alpaca (equity - last_equity from previous close)
+    const dayPnl = account.dayPnl || 0;
+    const dayPnlPercent = (account.lastEquity || 0) > 0 ? (dayPnl / account.lastEquity) * 100 : 0;
 
     // Performance stats
     const closedTrades = closedData.trades || [];
@@ -120,9 +123,12 @@ export async function GET() {
       // Breakdown
       unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
       realizedPnl: Math.round(realizedPnl * 100) / 100,
+      // Today's P&L (from Alpaca: equity - last_equity)
+      dayPnl: Math.round(dayPnl * 100) / 100,
+      dayPnlPercent: Math.round(dayPnlPercent * 100) / 100,
       // Legacy fields (keep backward compat)
-      dayChange: Math.round(totalPnl),
-      dayChangePercent: INITIAL_BALANCE > 0 ? (totalPnl / INITIAL_BALANCE) * 100 : 0,
+      dayChange: Math.round(dayPnl),
+      dayChangePercent: Math.round(dayPnlPercent * 100) / 100,
       // Broker status
       brokerConnected: account.connected || false,
       buyingPower: account.buyingPower || 0,

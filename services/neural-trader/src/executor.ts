@@ -197,7 +197,25 @@ export class TradeExecutor {
         cash: parseFloat(account.cash),
         portfolioValue: parseFloat(account.portfolio_value),
         buyingPower: parseFloat(account.buying_power),
+        lastEquity: parseFloat(account.last_equity),
+        equity: parseFloat(account.equity),
       };
+    } catch {
+      return null;
+    }
+  }
+
+  async getPortfolioHistory(period = '1W', timeframe = '1D'): Promise<{ timestamp: number[]; equity: number[]; profit_loss: number[]; profit_loss_pct: number[] } | null> {
+    if (!this.config.apiKey || !this.config.apiSecret) return null;
+    try {
+      const response = await fetch(`${this.config.baseUrl}/v2/account/portfolio/history?period=${period}&timeframe=${timeframe}&intraday_reporting=market_hours&pnl_reset=per_day`, {
+        headers: {
+          'APCA-API-KEY-ID': this.config.apiKey,
+          'APCA-API-SECRET-KEY': this.config.apiSecret,
+        },
+      });
+      if (!response.ok) return null;
+      return await response.json() as any;
     } catch {
       return null;
     }

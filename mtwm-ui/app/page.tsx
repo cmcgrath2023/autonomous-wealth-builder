@@ -21,7 +21,7 @@ import { REFRESH_INTERVALS } from '@/lib/utils/constants';
 export default function Dashboard() {
   const {
     totalValue, totalPnl, totalPnlPercent, unrealizedPnl, realizedPnl,
-    brokerConnected, buyingPower, cash, tradeStats, autonomy,
+    dayChange, brokerConnected, buyingPower, cash, tradeStats, autonomy,
     assets, lastUpdated, fetchPortfolio,
   } = usePortfolioStore();
   const { modules, fetchModules } = useModulesStore();
@@ -145,11 +145,11 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Daily Target Tracker */}
+      {/* Daily Cash Goal */}
       <DailyTargetTracker
-        totalPnl={totalPnl}
-        totalValue={totalValue}
-        dayNumber={1}
+        dayPnl={dayChange}
+        realizedPnl={realizedPnl}
+        unrealizedPnl={unrealizedPnl}
       />
 
       {/* Decisions + Portfolio Table */}

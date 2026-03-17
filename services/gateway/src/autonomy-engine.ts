@@ -27,7 +27,7 @@ const DEFAULT_CONFIG: AutonomyConfig = {
   nightMode: false, // crypto trades 24/7, always be scanning
   nightStart: 99,
   nightEnd: 99,
-  enabledAgents: ['neural-trader', 'midstream-feed', 'safla-oversight', 'qudag-witness', 'trait-learner', 'authority-matrix', 'analyst-agent', 'news-desk', 'mincut-optimizer', 'bayesian-intel', 'research-agent', 'options-trader', 'forex-scanner', 're-scout', 're-outreach', 're-analyst', 're-portfolio'],
+  enabledAgents: ['neural-trader', 'midstream-feed', 'safla-oversight', 'qudag-witness', 'trait-learner', 'authority-matrix', 'analyst-agent', 'news-desk', 'mincut-optimizer', 'bayesian-intel', 'research-agent', 'options-trader', 'forex-scanner', 'crypto-researcher', 'forex-researcher', 're-scout', 're-outreach', 're-analyst', 're-portfolio'],
 };
 
 export class AutonomyEngine extends EventEmitter {

@@ -35,7 +35,7 @@ import { REITTrader } from '../../reit-trader/src/index.js';
 import { OptionsTrader } from '../../options-trader/src/index.js';
 import { OpenClawExpansion } from './openclaw-expansion.js';
 import { createExpansionRoutes } from './routes/expansion.js';
-import { neuralForecast, quickForecast } from '../../neural-trader/src/neural-forecast.js';
+import { neuralForecast, quickForecast, probabilisticForecast } from '../../neural-trader/src/neural-forecast.js';
 import { AGUIStream } from './ag-ui-stream.js';
 import { WebhookRelay } from './webhook-relay.js';
 
@@ -67,7 +67,7 @@ let traitEngine: TraitEngine;
 const adaptiveState = {
   // === US Equities (Momentum Star) ===
   momentumStarThreshold: 0.55,    // Entry threshold — raised when losing, lowered when winning
-  minPrice: 0.50,                  // Minimum stock price — raised when penny stocks lose
+  minPrice: 5.00,                   // Minimum stock price — no penny stocks, swing-quality only
   maxPriceForMomentum: 500,       // Upper price limit
   avoidTickers: new Set<string>(), // Bayesian worst performers — blocked from entry
   preferTickers: new Set<string>(), // Bayesian best performers — prioritized
@@ -77,9 +77,9 @@ const adaptiveState = {
   forexThreshold: 0.55,           // Forex entry score threshold — raised from 0.45 (was too loose)
   forexAvoidPairs: new Set<string>(), // Pairs that consistently lose
   forexPreferPairs: new Set<string>(), // Pairs that consistently win
-  forexMaxPositions: 3,           // 3 positions for $700-1200/day target
-  forexBudget: 5000,              // $5K capital — realistic for live trading
-  forexMaxUnitsPerTrade: 100000,  // 100K units × 3 positions = ~$6K margin, ~$300/win at 30 pips
+  forexMaxPositions: 2,           // 2 positions on $1K capital — concentrated
+  forexBudget: 1000,              // $1K OANDA capital ($5K total: $4K Alpaca + $1K OANDA)
+  forexMaxUnitsPerTrade: 25000,   // 25K units × 2 positions = ~$1K margin at 50:1, fits $1K account
   forexKnownTradeIds: new Set<string>(), // Track open trade IDs for closed-trade detection
 
   // === Real Estate ===
@@ -341,8 +341,18 @@ app.get('/api/risk', async (_req, res) => {
 // Broker account & positions
 app.get('/api/broker/account', async (_req, res) => {
   const account = await executor.getAccount();
-  if (!account) return res.json({ cash: 0, portfolioValue: 0, buyingPower: 0, connected: false });
-  res.json({ ...account, connected: true });
+  if (!account) return res.json({ cash: 0, portfolioValue: 0, buyingPower: 0, equity: 0, lastEquity: 0, dayPnl: 0, connected: false });
+  // Day P&L: equity - last_equity is what Alpaca shows on their dashboard
+  const dayPnl = (account.equity || 0) - (account.lastEquity || 0);
+  res.json({ ...account, dayPnl, connected: true });
+});
+
+app.get('/api/broker/history', async (req, res) => {
+  const period = (req.query.period as string) || '1M';
+  const timeframe = (req.query.timeframe as string) || '1D';
+  const history = await executor.getPortfolioHistory(period, timeframe);
+  if (!history) return res.json({ error: 'unavailable' });
+  res.json(history);
 });
 
 app.get('/api/broker/positions', async (_req, res) => {
@@ -1809,6 +1819,14 @@ async function start() {
   console.log('=== MTWM Gateway v6.0 ===');
   console.log('Starting services...');
 
+  // Start HTTP server EARLY so healthcheck can reach /api/status during bootstrap
+  await new Promise<void>((resolve) => {
+    app.listen(PORT, () => {
+      console.log(`[Gateway] Listening on http://localhost:${PORT} (bootstrap starting...)`);
+      resolve();
+    });
+  });
+
   // Start market data feed
   await midstream.start();
   console.log('[✓] MidStream — market data feed active');
@@ -1915,37 +1933,89 @@ async function start() {
     }
   }, 2000);
 
-  // Helper: bootstrap a single ticker with historical data (called by analyst when discovering new tickers)
-  async function bootstrapTicker(ticker: string) {
+  // Helper: bootstrap tickers with historical data — batches up to 30 at a time
+  const bootstrapQueue: string[] = [];
+  let bootstrapFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function flushBootstrapQueue() {
+    if (bootstrapQueue.length === 0) return;
     const apiKey = (midstream as any).config.alpacaApiKey;
     const apiSecret = (midstream as any).config.alpacaApiSecret;
     if (!apiKey || !apiSecret) return;
     const headers = { 'APCA-API-KEY-ID': apiKey, 'APCA-API-SECRET-KEY': apiSecret };
     const dataUrl = 'https://data.alpaca.markets';
     const end = new Date().toISOString();
-    const start = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(); // 14 days
-    try {
-      const isCrypto = ticker.includes('-') || ticker.includes('/');
-      const symbol = isCrypto ? ticker.replace('-', '/') : ticker;
-      const url = isCrypto
-        ? `${dataUrl}/v1beta3/crypto/us/bars?symbols=${symbol}&timeframe=1Hour&start=${start}&end=${end}&limit=200`
-        : `${dataUrl}/v2/stocks/bars?symbols=${symbol}&timeframe=1Hour&start=${start}&end=${end}&limit=200&feed=iex`;
-      const resp = await fetch(url, { headers });
-      if (resp.ok) {
-        const data = await resp.json() as any;
-        const bars = isCrypto ? (data.bars?.[symbol] || []) : (data.bars?.[ticker] || []);
-        if (bars.length > 0) {
-          const displayTicker = isCrypto ? symbol.replace('/', '-') : ticker;
-          neuralTrader.ingestHistoricalData(displayTicker, {
-            closes: bars.map((b: any) => b.c),
-            highs: bars.map((b: any) => b.h),
-            lows: bars.map((b: any) => b.l),
-            volumes: bars.map((b: any) => b.v),
-          });
-          console.log(`[Bootstrap] ${displayTicker}: ${bars.length} bars loaded (dynamic)`);
+    const start = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Separate crypto and stocks
+    const tickers = bootstrapQueue.splice(0, bootstrapQueue.length);
+    const cryptoTickers = tickers.filter(t => t.includes('-') || t.includes('/'));
+    const stockTickers = tickers.filter(t => !t.includes('-') && !t.includes('/'));
+
+    // Batch stocks in groups of 30
+    for (let i = 0; i < stockTickers.length; i += 30) {
+      const batch = stockTickers.slice(i, i + 30).join(',');
+      try {
+        const resp = await fetch(
+          `${dataUrl}/v2/stocks/bars?symbols=${batch}&timeframe=1Hour&start=${start}&end=${end}&limit=200&feed=iex`,
+          { headers },
+        );
+        if (resp.ok) {
+          const data = await resp.json() as any;
+          let loaded = 0;
+          for (const [ticker, bars] of Object.entries(data.bars || {})) {
+            const barArr = bars as any[];
+            if (barArr.length > 0) {
+              neuralTrader.ingestHistoricalData(ticker, {
+                closes: barArr.map((b: any) => b.c),
+                highs: barArr.map((b: any) => b.h),
+                lows: barArr.map((b: any) => b.l),
+                volumes: barArr.map((b: any) => b.v),
+              });
+              loaded++;
+            }
+          }
+          console.log(`[Bootstrap] Batch: ${loaded}/${stockTickers.slice(i, i + 30).length} stocks loaded`);
         }
-      }
-    } catch { /* non-critical */ }
+      } catch { /* non-critical */ }
+    }
+
+    // Batch crypto (all at once — only 6-10 symbols)
+    if (cryptoTickers.length > 0) {
+      const symbols = cryptoTickers.map(t => t.replace('-', '/')).join(',');
+      try {
+        const resp = await fetch(
+          `${dataUrl}/v1beta3/crypto/us/bars?symbols=${symbols}&timeframe=1Hour&start=${start}&end=${end}&limit=200`,
+          { headers },
+        );
+        if (resp.ok) {
+          const data = await resp.json() as any;
+          for (const [symbol, bars] of Object.entries(data.bars || {})) {
+            const barArr = bars as any[];
+            if (barArr.length > 0) {
+              neuralTrader.ingestHistoricalData(symbol.replace('/', '-'), {
+                closes: barArr.map((b: any) => b.c),
+                highs: barArr.map((b: any) => b.h),
+                lows: barArr.map((b: any) => b.l),
+                volumes: barArr.map((b: any) => b.v),
+              });
+            }
+          }
+          console.log(`[Bootstrap] Batch: ${cryptoTickers.length} crypto loaded`);
+        }
+      } catch { /* non-critical */ }
+    }
+  }
+
+  async function bootstrapTicker(ticker: string) {
+    bootstrapQueue.push(ticker);
+    // Debounce: flush after 500ms of no new tickers, or when queue hits 30
+    if (bootstrapFlushTimer) clearTimeout(bootstrapFlushTimer);
+    if (bootstrapQueue.length >= 30) {
+      await flushBootstrapQueue();
+    } else {
+      bootstrapFlushTimer = setTimeout(() => flushBootstrapQueue(), 500);
+    }
   }
   // Expose for use by analyst agent
   (app as any)._bootstrapTicker = bootstrapTicker;
@@ -2107,10 +2177,10 @@ async function start() {
         // SPEC-005: Small Capital Strategy — position sizing
         // Paper phase: simulate $5K capital constraints on $100K account
         // This validates the strategy before deploying real $5K
-        const simulatedCapital = 5000; // Emulate $5K even though paper account is $100K
-        const deployable = simulatedCapital; // Full $5K deployed — every dollar working
-        const maxPosition = simulatedCapital * 0.40; // $2,000 max per star position
-        const baseSize = simulatedCapital * 0.20; // $1,000 base allocation — concentrated
+        const simulatedCapital = 4000; // Emulate $4K Alpaca deposit — crypto-first, swing equities
+        const deployable = simulatedCapital; // Full $4K deployed — every dollar working
+        const maxPosition = simulatedCapital * 0.35; // $1,400 max per position
+        const baseSize = simulatedCapital * 0.20; // $800 base allocation — concentrated bets
         const isCryptoSignal = signal.ticker.includes('-');
         const existingPosition = positionMap.get(signal.ticker);
         let positionSize: number;
@@ -2300,19 +2370,19 @@ async function start() {
     if (!plan) {
       // Auto-initialize strategy on first heartbeat
       await strategicPlanner.createStrategy({
-        startCapital: 5000,
-        targetCapital: 15000,
-        timeframeDays: 90,
-        riskTolerance: 'moderate',
+        startCapital: 4000,
+        targetCapital: 25000,
+        timeframeDays: 30,
+        riskTolerance: 'aggressive',
       });
-      return { detail: 'Strategy initialized: $5K → $15K in 90 days (GOAP plan active)', result: 'success' };
+      return { detail: 'Strategy initialized: $4K Alpaca → $25K in 30 days — unlock PDT (GOAP plan active)', result: 'success' };
     }
 
     const account = await executor.getAccount();
     const realPortfolio = account?.portfolioValue || 0;
-    // SPEC-005: simulate $5K capital. Track P&L relative to $100K start, but report as $5K + P&L
+    // Simulate $3K Alpaca capital. Track P&L relative to paper start, report as $3K + P&L
     const totalPnl = realPortfolio - 100000; // Actual P&L from trading
-    const simulatedCapital = 5000 + totalPnl; // What $5K would be with same P&L
+    const simulatedCapital = 4000 + totalPnl; // What $4K Alpaca would be with same P&L
     const perfStats = positionManager.getPerformanceStats();
     const daysSinceStart = Math.max(1, Math.floor((Date.now() - (plan.createdAt?.getTime?.() || Date.now())) / (24 * 60 * 60 * 1000)));
     const progress = strategicPlanner.evaluateProgress(simulatedCapital, perfStats.totalTrades, perfStats.winRate, daysSinceStart);
@@ -2573,34 +2643,73 @@ async function start() {
     const marketOpen = !['Sat', 'Sun'].includes(etDayNow) && ((etHourNow === 9 && etMinNow >= 30) || (etHourNow >= 10 && etHourNow < 16));
 
     console.log(`[MomentumStar] Market open: ${marketOpen}, level: ${autonomyEngine.getConfig().autonomyLevel}, ET: ${etDayNow} ${etHourNow}:${etMinNow}`);
-    if (marketOpen && autonomyEngine.getConfig().autonomyLevel === 'act') {
+    // Always run in ACT mode — crypto trades 24/7, equities only during market hours
+    if (autonomyEngine.getConfig().autonomyLevel === 'act') {
       try {
         const currentPositions = await executor.getPositions();
-        const positionTickers = new Set(currentPositions.map(p => p.ticker));
-        const simulatedCap = 5000;
-        const maxPos = 5;
-        // Count positions by simulated $5K budget — only positions under $2K each count
+        // Normalize ticker formats: ETHUSD, ETH-USD, ETH/USD all match
+        const positionTickers = new Set<string>();
+        for (const p of currentPositions) {
+          positionTickers.add(p.ticker);                           // ETHUSD
+          positionTickers.add(p.ticker.replace('USD', '-USD'));     // ETH-USD
+          positionTickers.add(p.ticker.replace('USD', '/USD'));     // ETH/USD
+        }
+        const simulatedCap = 4000; // $4K Alpaca deposit — crypto unlimited, equities swing only
+        const maxPos = 6; // More slots — crypto doesn't count against PDT
+        // Count positions by simulated $3K budget — only positions under $1.5K each count
         // Legacy oversized positions from before the fix don't count against our slots
-        const budgetPositions = currentPositions.filter(p => Math.abs(p.marketValue) <= 2500);
+        const budgetPositions = currentPositions.filter(p => Math.abs(p.marketValue) <= 1500);
         let slotsAvailable = maxPos - budgetPositions.length;
         console.log(`[MomentumStar] Positions: ${currentPositions.length} total, ${budgetPositions.length} budget, ${slotsAvailable} slots`);
 
         if (slotsAvailable > 0) {
+          // Intelligence gate: log what Bayesian knows before evaluating
+          const avoidCount = adaptiveState.avoidTickers.size;
+          const preferCount = adaptiveState.preferTickers.size;
+          console.log(`[Intelligence] Gate: threshold=${adaptiveState.momentumStarThreshold.toFixed(2)}, avoid=${avoidCount} tickers, prefer=${preferCount} tickers`);
+
           // Fetch today's top movers directly for execution
-          const moversResp = await fetch(
-            'https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=10',
-            { headers: alpacaHeaders },
-          );
-          if (moversResp.ok) {
-            const moversData = await moversResp.json() as any;
+          let moversData: any = { gainers: [], losers: [] };
+          if (marketOpen) {
+            const moversResp = await fetch(
+              'https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=10',
+              { headers: alpacaHeaders },
+            );
+            if (moversResp.ok) {
+              moversData = await moversResp.json() as any;
+            }
+          }
+          {
             const candidates: { symbol: string; pctChange: number; price: number; score: number; rationale: string }[] = [];
 
-            console.log(`[MomentumStar] Movers fetched: ${(moversData.gainers || []).length} gainers, Research stars: ${researchStars.size}`);
+            // Always add crypto candidates — crypto trades 24/7
+            const cryptoSymbols = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD'];
+            for (const cryptoSym of cryptoSymbols) {
+              const dashSym = cryptoSym.replace('/', '-');
+              const quote = midstream.getLatestQuote(dashSym) || midstream.getLatestQuote(cryptoSym);
+              if (quote?.price) {
+                // Check 1h price change from historical data
+                const bars = midstream.getHistoricalBars?.(cryptoSym) || [];
+                const oldPrice = bars.length >= 2 ? bars[bars.length - 2]?.close : quote.price;
+                const pctChange = oldPrice > 0 ? ((quote.price - oldPrice) / oldPrice) * 100 : 0;
+                if (!positionTickers.has(dashSym) && !positionTickers.has(cryptoSym)) {
+                  console.log(`[MomentumStar] Crypto ${dashSym}: $${quote.price.toFixed(2)} (${pctChange >= 0 ? '+' : ''}${pctChange.toFixed(2)}%)`);
+                }
+              }
+            }
 
-            // Merge movers with research stars — research gets priority
+            console.log(`[MomentumStar] Movers fetched: ${(moversData.gainers || []).length} gainers, Research stars: ${researchStars.size}, Crypto: ${cryptoSymbols.length}`);
+
+            // Merge movers with research stars and crypto — research gets priority
             const allCandidateSyms = new Set<string>();
-            for (const g of (moversData.gainers || []).slice(0, 10)) {
-              if (g.symbol && g.symbol.length <= 5) allCandidateSyms.add(g.symbol);
+            if (marketOpen) {
+              for (const g of (moversData.gainers || []).slice(0, 10)) {
+                if (g.symbol && g.symbol.length <= 5) allCandidateSyms.add(g.symbol);
+              }
+            }
+            // Always add crypto
+            for (const cs of cryptoSymbols) {
+              allCandidateSyms.add(cs.replace('/', '-'));
             }
             for (const [sym] of researchStars) {
               allCandidateSyms.add(sym);
@@ -2613,31 +2722,40 @@ async function start() {
                 if (!existingPos || existingPos.unrealizedPnl <= 10) continue; // Only add to winners with >$10 profit
                 console.log(`[MomentumStar] ${sym} — adding to winning position (+$${existingPos.unrealizedPnl.toFixed(2)})`);
               }
+              const isCryptoSym = sym.includes('-') || sym.includes('/');
               const moverData = (moversData.gainers || []).find((g: any) => g.symbol === sym);
               const researchData = researchStars.get(sym);
               const pctChange = moverData?.percent_change || 0;
 
-              // Research stars don't need 8%+ move — they have catalysts
-              if (!researchData && Math.abs(pctChange) < 8) continue;
+              // Research stars and crypto don't need 8%+ move — they have catalysts or trade 24/7
+              if (!researchData && !isCryptoSym && Math.abs(pctChange) < 8) continue;
+              // Skip non-crypto during closed market
+              if (!isCryptoSym && !marketOpen) continue;
 
               // Get current price
-              const quote = midstream.getLatestQuote(sym);
+              const quote = midstream.getLatestQuote(sym) || midstream.getLatestQuote(sym.replace('-', '/'));
               let price = quote?.price || moverData?.price || 0;
               if (price <= 0) {
-                // Spot-fetch price
+                // Spot-fetch price — different endpoint for crypto vs equities
                 try {
-                  const snapResp = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${sym}&feed=iex`, { headers: alpacaHeaders });
+                  const snapUrl = isCryptoSym
+                    ? `https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=${sym.replace('-', '/')}`
+                    : `https://data.alpaca.markets/v2/stocks/snapshots?symbols=${sym}&feed=iex`;
+                  const snapResp = await fetch(snapUrl, { headers: alpacaHeaders });
                   if (snapResp.ok) {
                     const snapData = await snapResp.json() as any;
-                    price = snapData[sym]?.latestTrade?.p || snapData[sym]?.dailyBar?.c || 0;
+                    const snapKey = isCryptoSym ? sym.replace('-', '/') : sym;
+                    const snap = (snapData.snapshots || snapData)[snapKey];
+                    price = snap?.latestTrade?.p || snap?.dailyBar?.c || 0;
                   }
                 } catch {}
               }
               console.log(`[MomentumStar] Evaluating ${sym}: +${pctChange.toFixed(1)}% price=$${price} research=${!!researchData} sector=${researchData?.sector || 'none'}`);
 
               // === ADAPTIVE FILTERS (learned from outcomes) ===
-              if (price <= 0 || price > adaptiveState.maxPriceForMomentum) continue;
-              if (price < adaptiveState.minPrice && !researchData) {
+              if (price <= 0) continue;
+              if (!isCryptoSym && price > adaptiveState.maxPriceForMomentum) continue;
+              if (!isCryptoSym && price < adaptiveState.minPrice && !researchData) {
                 console.log(`[MomentumStar] ${sym} SKIP — price $${price} below learned min $${adaptiveState.minPrice.toFixed(2)}`);
                 continue;
               }
@@ -2652,25 +2770,64 @@ async function start() {
               }
 
               // Composite score: research + momentum + Bayesian + sector
-              let score = researchData ? researchData.score : Math.min(0.90, pctChange / 100 + 0.50);
+              let score: number;
+              if (researchData) {
+                score = researchData.score;
+              } else if (isCryptoSym) {
+                // Crypto scoring: use neural trader signals + real-time price data
+                const neuralSignal = neuralTrader.getActiveSignals().find(s => s.ticker === sym || s.ticker === sym.replace('-', '/'));
+                const neuralConf = neuralSignal?.confidence || 0.45;
+                // Crypto base score: these are liquid major assets trading 24/7
+                // Higher base than random penny stocks — BTC/ETH/SOL are tier-1 assets
+                score = Math.max(0.55, neuralConf * 0.7 + 0.25); // Ensures major crypto clears threshold
+              } else {
+                score = Math.min(0.90, pctChange / 100 + 0.50);
+              }
               // Sector bonus — our target sectors get a boost
               if (researchData?.sector === 'AI/DataCenter') score += 0.10;
               else if (researchData?.sector === 'Minerals/Metals') score += 0.05;
               else if (researchData?.sector === 'Catalyst') score += 0.08;
 
-              // Bayesian ticker-level learning — blend prior into score
+              // Bayesian ticker-level learning — HARD GATE then blend
               const prior = bayesianIntel.getTickerPrior(sym);
               if (prior.observations >= 3) {
-                score = score * 0.70 + prior.posterior * 0.30; // 30% Bayesian weight (was 20%)
+                // HARD BLOCK: if Bayesian says this ticker loses (< 45% win rate), skip entirely
+                if (prior.posterior < 0.45) {
+                  console.log(`[MomentumStar] ${sym} BLOCKED — Bayesian win rate ${(prior.posterior * 100).toFixed(0)}% (${prior.observations} trades). Intelligence says NO.`);
+                  continue;
+                }
+                // Strong blend: 50% Bayesian weight — intelligence MUST agree with momentum
+                score = score * 0.50 + prior.posterior * 0.50;
+              } else {
+                // Unproven ticker penalty — require higher momentum to justify unknown risk
+                score -= 0.05;
               }
               // Bayesian prefer bonus — tickers the system has learned are winners
-              if (adaptiveState.preferTickers.has(sym)) score += 0.08;
+              if (adaptiveState.preferTickers.has(sym)) score += 0.10;
 
               // ReasoningBank — proven patterns
               try {
                 const patterns = await queryPatterns(`buy ${sym} momentum`, { k: 1, minSuccessRate: 0.6 });
                 if (patterns.length > 0) score += 0.05;
               } catch {}
+
+              // FANN Neural Forecast — get probabilistic prediction before buying
+              const priceHistory = neuralTrader.getPriceHistory(sym);
+              if (priceHistory && priceHistory.length >= 50) {
+                try {
+                  const forecast = await neuralForecast(priceHistory);
+                  if (forecast) {
+                    if (forecast.direction === 'down' && forecast.confidence > 0.5) {
+                      console.log(`[Intelligence] ${sym} BLOCKED by FANN — neural predicts DOWN (conf=${(forecast.confidence * 100).toFixed(0)}%, agreement=${(forecast.modelAgreement * 100).toFixed(0)}%)`);
+                      continue; // Neural says price going down — don't buy
+                    }
+                    if (forecast.direction === 'up' && forecast.confidence > 0.4) {
+                      score += forecast.modelAgreement * 0.15; // Up to +0.15 boost from neural agreement
+                      console.log(`[Intelligence] ${sym} FANN boost +${(forecast.modelAgreement * 0.15).toFixed(2)} — neural UP (conf=${(forecast.confidence * 100).toFixed(0)}%)`);
+                    }
+                  }
+                } catch {}
+              }
 
               // News sentiment check
               for (const [, entry] of newsCache) {
@@ -2693,27 +2850,52 @@ async function start() {
                   pctChange: pctChange,
                   price,
                   score,
-                  rationale: researchData ? `RESEARCH: ${researchData.sector} — ${researchData.catalyst}` : `Momentum +${pctChange.toFixed(1)}%`,
+                  rationale: researchData ? `RESEARCH: ${researchData.sector} — ${researchData.catalyst}` : isCryptoSym ? `Crypto 24/7 (score: ${score.toFixed(2)})` : `Momentum +${pctChange.toFixed(1)}%`,
                 });
               }
             }
 
-            // Sort by score, execute top stars
-            candidates.sort((a, b) => b.score - a.score);
+            // Crypto-first allocation: reserve 70% of slots for crypto (primary income engine, no PDT, 24/7)
+            // Split candidates into crypto and equity, fill crypto first, then equity gets remaining slots
+            const cryptoCandidates = candidates.filter(c => c.symbol.includes('-') || c.symbol.includes('/'));
+            const equityCandidates = candidates.filter(c => !c.symbol.includes('-') && !c.symbol.includes('/'));
+            cryptoCandidates.sort((a, b) => b.score - a.score);
+            equityCandidates.sort((a, b) => b.score - a.score);
 
-            // Star concentration: if top candidate is way ahead, only trade that one
-            if (candidates.length >= 2 && candidates[0].score - candidates[1].score > 0.10) {
-              candidates.splice(1); // Only the star
-            } else {
-              candidates.splice(Math.min(candidates.length, slotsAvailable));
+            // Count existing crypto vs equity positions
+            const cryptoBases = ['BTC','ETH','SOL','AVAX','DOGE','SHIB','LINK','UNI','DOT','MATIC','XRP','NEAR','ADA','AAVE','LTC','BCH','PEPE','BONK','RENDER'];
+            const isCryptoTicker = (t: string) => cryptoBases.some(b => t.startsWith(b) && (t.endsWith('USD') || t.includes('-') || t.includes('/')));
+            const existingCrypto = budgetPositions.filter(p => isCryptoTicker(p.ticker)).length;
+            const cryptoSlots = Math.max(0, Math.ceil(maxPos * 0.7) - existingCrypto); // 70% reserved for crypto
+            const equitySlots = Math.max(0, slotsAvailable - cryptoSlots);
+
+            // Fill crypto first, then equity
+            const selectedCrypto = cryptoCandidates.slice(0, Math.min(cryptoSlots, slotsAvailable));
+            const remainingSlots = slotsAvailable - selectedCrypto.length;
+            const selectedEquity = equityCandidates.slice(0, remainingSlots);
+            candidates.length = 0;
+            candidates.push(...selectedCrypto, ...selectedEquity);
+            console.log(`[MomentumStar] Crypto-first: ${selectedCrypto.length} crypto (${cryptoSlots} slots), ${selectedEquity.length} equity (${equitySlots} slots)`);
+
+            // SPEC-005: Total capital cap — don't deploy more than $4K simulated capital
+            const totalDeployed = currentPositions.reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const budgetDeployed = budgetPositions.reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const capitalRemaining = Math.max(0, simulatedCap - budgetDeployed);
+            console.log(`[MomentumStar] ${candidates.length} candidates, ${slotsAvailable} slots, capital: $${budgetDeployed.toFixed(0)}/$${simulatedCap} deployed, $${capitalRemaining.toFixed(0)} remaining`);
+            if (capitalRemaining < 100) {
+              console.log(`[MomentumStar] Capital fully deployed ($${budgetDeployed.toFixed(0)}/$${simulatedCap}) — no new positions`);
+              candidates.length = 0;
             }
 
-            console.log(`[MomentumStar] ${candidates.length} candidates qualified, ${slotsAvailable} slots`);
             for (const c of candidates) {
               if (slotsAvailable <= 0) break;
-              const posSize = Math.min(simulatedCap * 0.40, 2000); // $2K max star position
-              const qty = Math.floor(posSize / c.price);
-              console.log(`[MomentumStar] EXECUTING ${c.symbol}: qty=${qty} @ $${c.price.toFixed(2)} size=$${posSize} score=${c.score.toFixed(2)}`);
+              const posSize = Math.min(simulatedCap * 0.35, 1400, capitalRemaining); // $1.4K max, capped by remaining capital
+              const isCryptoOrder = c.symbol.includes('-') || c.symbol.includes('/');
+              // Crypto supports fractional quantities (e.g. 0.02 BTC), equities need whole shares
+              const qty = isCryptoOrder
+                ? Math.max(0.001, parseFloat((posSize / c.price).toFixed(6)))  // fractional crypto
+                : Math.floor(posSize / c.price);
+              console.log(`[MomentumStar] EXECUTING ${c.symbol}: qty=${qty} @ $${c.price.toFixed(2)} size=$${posSize} score=${c.score.toFixed(2)} crypto=${isCryptoOrder}`);
               if (qty <= 0) continue;
 
               const signal = {
@@ -3098,9 +3280,10 @@ async function start() {
       // If momentum_star win rate < 40%, raise threshold (be more selective)
       // If > 60%, lower threshold (system is picking well)
       // Range: 0.55 (very selective when losing) to 0.45 (relaxed when winning)
-      const baseThreshold = 0.50;
-      const adjustment = (0.50 - weightedPosterior) * 0.30; // 30% sensitivity
-      adaptiveState.momentumStarThreshold = Math.max(0.45, Math.min(0.70, baseThreshold + adjustment));
+      const baseThreshold = 0.55;
+      const adjustment = (0.50 - weightedPosterior) * 0.50; // 50% sensitivity — react harder to losses
+      adaptiveState.momentumStarThreshold = Math.max(0.50, Math.min(0.80, baseThreshold + adjustment));
+      console.log(`[Intelligence] Threshold adapted: ${adaptiveState.momentumStarThreshold.toFixed(2)} (win rate: ${(weightedPosterior * 100).toFixed(0)}%, ${totalObs} obs)`);
       tel('threshold_adapted', { weightedPosterior, newThreshold: adaptiveState.momentumStarThreshold, totalObs });
     }
 
@@ -3125,12 +3308,13 @@ async function start() {
     adaptiveState.avoidTickers.clear();
     adaptiveState.preferTickers.clear();
     for (const wp of worstPerformers) {
-      if (wp.observations >= 3 && wp.posterior < 0.35) {
+      if (wp.observations >= 2 && wp.posterior < 0.45) {
         adaptiveState.avoidTickers.add(wp.subject);
+        console.log(`[Intelligence] AVOID ${wp.subject}: ${(wp.posterior * 100).toFixed(0)}% win rate (${wp.observations} obs)`);
       }
     }
     for (const tp of topPerformers) {
-      if (tp.observations >= 3 && tp.posterior > 0.60) {
+      if (tp.observations >= 3 && tp.posterior > 0.55) {
         adaptiveState.preferTickers.add(tp.subject);
       }
     }
@@ -4611,6 +4795,260 @@ async function start() {
     return { detail, result: kellyAlloc > 0 ? 'success' : 'skipped' };
   });
 
+  // ═══════════════════════════════════════════════════════════════════
+  // CRYPTO RESEARCHER — Deep crypto market analysis, 24/7
+  // ═══════════════════════════════════════════════════════════════════
+  autonomyEngine.registerAction('crypto-researcher', 'deep_scan', async () => {
+    const alpacaHeaders = {
+      'APCA-API-KEY-ID': (midstream as any).config.alpacaApiKey || '',
+      'APCA-API-SECRET-KEY': (midstream as any).config.alpacaApiSecret || '',
+    };
+    const insights: string[] = [];
+
+    // ── 1. Top crypto by volume & momentum via Alpaca snapshots ──
+    const cryptoUniverse = [
+      'BTC/USD', 'ETH/USD', 'SOL/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD',
+      'DOT/USD', 'MATIC/USD', 'UNI/USD', 'AAVE/USD', 'LTC/USD', 'BCH/USD',
+      'XLM/USD', 'ALGO/USD', 'ATOM/USD', 'NEAR/USD', 'FTM/USD', 'XRP/USD',
+      'ADA/USD', 'SHIB/USD', 'APE/USD', 'CRV/USD', 'MKR/USD', 'SUSHI/USD',
+    ];
+
+    const movers: Array<{ sym: string; pct: number; vol: number; price: number }> = [];
+
+    // Batch snapshots in groups of 10
+    for (let i = 0; i < cryptoUniverse.length; i += 10) {
+      const batch = cryptoUniverse.slice(i, i + 10);
+      try {
+        const url = `https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=${batch.join(',')}`;
+        const resp = await fetch(url, { headers: alpacaHeaders });
+        if (!resp.ok) continue;
+        const snapRaw = await resp.json() as any;
+        // Crypto API wraps in 'snapshots' key
+        const snapData = snapRaw.snapshots || snapRaw;
+
+        for (const [sym, snap] of Object.entries(snapData as Record<string, any>)) {
+          const dailyBar = snap?.dailyBar;
+          const prevBar = snap?.prevDailyBar;
+          if (!dailyBar || !prevBar || !prevBar.c) continue;
+
+          const pctChange = ((dailyBar.c - prevBar.c) / prevBar.c) * 100;
+          const volume = dailyBar.v || 0;
+          movers.push({ sym, pct: pctChange, vol: volume, price: dailyBar.c });
+        }
+      } catch {}
+    }
+
+    // Sort by absolute move
+    movers.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+
+    for (const m of movers.slice(0, 10)) {
+      const dir = m.pct > 0 ? 'BULL' : 'BEAR';
+      insights.push(`${m.sym} ${m.pct > 0 ? '+' : ''}${m.pct.toFixed(1)}% $${m.price.toFixed(2)}`);
+
+      // Register strong movers as research stars for MomentumStar
+      if (Math.abs(m.pct) >= 2) {
+        const alpacaSym = m.sym.replace('/', '-');
+        researchStars.set(alpacaSym, {
+          symbol: alpacaSym,
+          sector: 'Crypto',
+          catalyst: `Crypto ${dir}: ${m.pct > 0 ? '+' : ''}${m.pct.toFixed(1)}%`,
+          score: Math.min(0.95, 0.55 + Math.abs(m.pct) / 30),
+          timestamp: Date.now(),
+        });
+      }
+
+      // Bayesian update
+      bayesianIntel.recordOutcome(
+        `crypto:momentum:${m.sym}`,
+        { domain: 'crypto_research', subject: m.sym, tags: ['crypto', dir.toLowerCase()], contributors: ['crypto-researcher'] },
+        m.pct > 0,
+        m.pct / 100,
+      );
+    }
+
+    // ── 2. Crypto fear/greed & trending via CoinGecko free API ──
+    try {
+      const trendResp = await fetch('https://api.coingecko.com/api/v3/search/trending', {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (trendResp.ok) {
+        const trendData = await trendResp.json() as any;
+        const trendCoins = (trendData.coins || []).slice(0, 5);
+        for (const coin of trendCoins) {
+          const name = coin.item?.symbol?.toUpperCase() || '';
+          const rank = coin.item?.market_cap_rank || '?';
+          insights.push(`TRENDING: ${name} (rank #${rank})`);
+        }
+      }
+    } catch {}
+
+    // ── 3. Multi-timeframe momentum for top movers ──
+    for (const m of movers.slice(0, 5)) {
+      try {
+        // Get hourly bars for momentum analysis
+        const barsUrl = `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=${m.sym}&timeframe=1Hour&limit=24`;
+        const barsResp = await fetch(barsUrl, { headers: alpacaHeaders });
+        if (!barsResp.ok) continue;
+        const barsData = await barsResp.json() as any;
+        const bars = barsData.bars?.[m.sym] || [];
+        if (bars.length < 6) continue;
+
+        // Calculate 6h and 24h momentum
+        const last = bars[bars.length - 1]?.c || 0;
+        const sixHAgo = bars[Math.max(0, bars.length - 6)]?.c || last;
+        const twentyFourHAgo = bars[0]?.c || last;
+
+        const mom6h = sixHAgo > 0 ? ((last - sixHAgo) / sixHAgo) * 100 : 0;
+        const mom24h = twentyFourHAgo > 0 ? ((last - twentyFourHAgo) / twentyFourHAgo) * 100 : 0;
+
+        if (Math.abs(mom6h) >= 1 || Math.abs(mom24h) >= 3) {
+          insights.push(`${m.sym} momentum: 6h=${mom6h > 0 ? '+' : ''}${mom6h.toFixed(1)}% 24h=${mom24h > 0 ? '+' : ''}${mom24h.toFixed(1)}%`);
+
+          // Boost score for multi-timeframe alignment
+          const alpacaSym = m.sym.replace('/', '-');
+          const existing = researchStars.get(alpacaSym);
+          if (existing && mom6h > 0 && mom24h > 0) {
+            existing.score = Math.min(0.95, existing.score + 0.10);
+            existing.catalyst += ` | Aligned 6h/24h momentum`;
+          }
+        }
+      } catch {}
+    }
+
+    insights.push(`CRYPTO UNIVERSE: ${movers.length} tracked, ${researchStars.size} total stars`);
+    return { detail: insights.slice(0, 8).join(' | '), result: 'success' };
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FOREX RESEARCHER — Deep forex analysis, session-aware
+  // ═══════════════════════════════════════════════════════════════════
+  autonomyEngine.registerAction('forex-researcher', 'analyze_sessions', async () => {
+    const OANDA_KEY = process.env.OANDA_API_KEY;
+    const OANDA_ACCT = process.env.OANDA_ACCOUNT_ID;
+    const isPractice = process.env.OANDA_MODE === 'practice' || (OANDA_ACCT?.startsWith('101-') ?? false);
+    const oandaBase = isPractice ? 'https://api-fxpractice.oanda.com' : 'https://api-fxtrade.oanda.com';
+
+    if (!OANDA_KEY || !OANDA_ACCT) {
+      return { detail: 'Forex research: OANDA not configured', result: 'skipped' };
+    }
+
+    const insights: string[] = [];
+
+    // ── 1. Session awareness ──
+    const now = new Date();
+    const utcH = now.getUTCHours();
+    const activeSessions: string[] = [];
+    if (utcH >= 0 && utcH < 9) activeSessions.push('TOKYO');
+    if (utcH >= 7 && utcH < 16) activeSessions.push('LONDON');
+    if (utcH >= 13 && utcH < 22) activeSessions.push('NEW_YORK');
+    if (utcH >= 21 || utcH < 6) activeSessions.push('SYDNEY');
+    insights.push(`Sessions: ${activeSessions.join('+') || 'TRANSITION'}`);
+
+    // Session-optimized pairs
+    const sessionPairs: Record<string, string[]> = {
+      TOKYO: ['USD_JPY', 'EUR_JPY', 'GBP_JPY', 'AUD_JPY', 'NZD_JPY', 'AUD_USD', 'NZD_USD'],
+      LONDON: ['EUR_USD', 'GBP_USD', 'EUR_GBP', 'EUR_CHF', 'GBP_CHF', 'USD_CHF', 'EUR_JPY'],
+      NEW_YORK: ['EUR_USD', 'GBP_USD', 'USD_CAD', 'USD_MXN', 'USD_JPY', 'XAU_USD'],
+      SYDNEY: ['AUD_USD', 'NZD_USD', 'AUD_NZD', 'AUD_JPY', 'NZD_JPY'],
+    };
+
+    // Collect unique pairs for active sessions
+    const activePairs = new Set<string>();
+    for (const session of activeSessions) {
+      for (const pair of (sessionPairs[session] || [])) activePairs.add(pair);
+    }
+    // Always include majors
+    for (const p of ['EUR_USD', 'GBP_USD', 'USD_JPY', 'XAU_USD']) activePairs.add(p);
+
+    // ── 2. Fetch candle data and calculate ATR + range position ──
+    const pairAnalyses: Array<{ pair: string; atr: number; rangePos: number; trend: string; pctMove: number }> = [];
+
+    for (const pair of activePairs) {
+      try {
+        const candleRes = await fetch(
+          `${oandaBase}/v3/instruments/${pair}/candles?granularity=H4&count=30`,
+          { headers: { Authorization: `Bearer ${OANDA_KEY}` } }
+        );
+        if (!candleRes.ok) continue;
+        const candleData = await candleRes.json() as any;
+        const candles = (candleData.candles || []).filter((c: any) => c.complete);
+        if (candles.length < 10) continue;
+
+        // ATR calculation
+        let atrSum = 0;
+        for (let i = 1; i < candles.length; i++) {
+          const h = parseFloat(candles[i].mid.h);
+          const l = parseFloat(candles[i].mid.l);
+          const pc = parseFloat(candles[i - 1].mid.c);
+          atrSum += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+        }
+        const atr = atrSum / (candles.length - 1);
+
+        // Range position (0 = at low, 1 = at high)
+        const closes = candles.map((c: any) => parseFloat(c.mid.c));
+        const high20 = Math.max(...closes.slice(-20));
+        const low20 = Math.min(...closes.slice(-20));
+        const current = closes[closes.length - 1];
+        const rangePos = high20 !== low20 ? (current - low20) / (high20 - low20) : 0.5;
+
+        // Trend via SMA comparison
+        const sma5 = closes.slice(-5).reduce((a: number, b: number) => a + b, 0) / 5;
+        const sma20 = closes.slice(-20).reduce((a: number, b: number) => a + b, 0) / Math.min(20, closes.length);
+        const trend = sma5 > sma20 * 1.001 ? 'BULL' : sma5 < sma20 * 0.999 ? 'BEAR' : 'FLAT';
+
+        const pctMove = closes.length >= 2 ? ((current - closes[closes.length - 2]) / closes[closes.length - 2]) * 100 : 0;
+
+        pairAnalyses.push({ pair, atr, rangePos, trend, pctMove });
+      } catch {}
+    }
+
+    // ── 3. Cross-pair correlation analysis ──
+    // Look for USD strength/weakness across pairs
+    const usdPairs = pairAnalyses.filter(p => p.pair.includes('USD'));
+    const usdLong = usdPairs.filter(p => {
+      const isBase = p.pair.startsWith('USD_');
+      return isBase ? p.trend === 'BULL' : p.trend === 'BEAR';
+    }).length;
+    const usdShort = usdPairs.filter(p => {
+      const isBase = p.pair.startsWith('USD_');
+      return isBase ? p.trend === 'BEAR' : p.trend === 'BULL';
+    }).length;
+
+    if (usdLong > usdShort + 1) {
+      insights.push('USD STRONG across pairs — favor USD longs');
+    } else if (usdShort > usdLong + 1) {
+      insights.push('USD WEAK across pairs — favor USD shorts');
+    } else {
+      insights.push('USD MIXED — pair-specific analysis needed');
+    }
+
+    // ── 4. Identify best opportunities ──
+    // Sort by absolute move and trend clarity
+    pairAnalyses.sort((a, b) => Math.abs(b.pctMove) - Math.abs(a.pctMove));
+
+    for (const pa of pairAnalyses.slice(0, 8)) {
+      const signal = pa.trend === 'BULL' && pa.rangePos < 0.7 ? 'BUY'
+        : pa.trend === 'BEAR' && pa.rangePos > 0.3 ? 'SELL'
+        : 'WAIT';
+      insights.push(`${pa.pair}: ${pa.trend} rng=${(pa.rangePos * 100).toFixed(0)}% ATR=${pa.atr.toFixed(5)} → ${signal}`);
+
+      // Record to Bayesian intelligence
+      bayesianIntel.recordOutcome(
+        `forex:session:${pa.pair}`,
+        { domain: 'forex_research', subject: pa.pair, tags: ['forex', ...activeSessions.map(s => s.toLowerCase()), pa.trend.toLowerCase()], contributors: ['forex-researcher'] },
+        pa.trend !== 'FLAT',
+        Math.abs(pa.pctMove) / 100,
+      );
+    }
+
+    // ── 5. Session overlap detection (high volume periods) ──
+    if (activeSessions.length >= 2) {
+      insights.push(`OVERLAP: ${activeSessions.join('+')} — expect higher volatility and volume`);
+    }
+
+    return { detail: insights.slice(0, 8).join(' | '), result: 'success' };
+  });
+
   // Add RE leads API endpoints
   app.get('/api/realestate/leads', (_req, res) => {
     const stats = {
@@ -4737,7 +5175,7 @@ async function start() {
   // Must come AFTER all imports/inits because goalie MCP server registers process.exit(0) on SIGINT
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
-  process.on('SIGTERM', () => { console.log('[Gateway] SIGTERM received — shutting down gracefully'); webhookRelay.shutdown(); process.exit(0); });
+  process.on('SIGTERM', () => { console.log('[Gateway] SIGTERM received — ignoring (use SIGINT for shutdown)'); });
   process.on('SIGINT', () => { console.log('[Gateway] SIGINT received — shutting down gracefully'); webhookRelay.shutdown(); process.exit(0); });
   process.on('uncaughtException', (err) => {
     console.error('[CRASH PREVENTED] Uncaught exception:', err.message);
@@ -4767,10 +5205,7 @@ async function start() {
   autonomyEngine.updateConfig({ enabled: true, autonomyLevel: 'act' });
   console.log('[✓] Autonomy auto-enabled: ACT mode');
 
-  app.listen(PORT, () => {
-    console.log(`\n[Gateway] Listening on http://localhost:${PORT}`);
-    console.log('[Gateway] All services operational — MTWM is running\n');
-  });
+  console.log('\n[Gateway] All services operational — MTWM is running\n');
 }
 
 start().catch(console.error);

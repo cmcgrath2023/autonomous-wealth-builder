@@ -1,0 +1,340 @@
+import { config } from 'dotenv';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import express from 'express';
+import { ForexScanner } from './index.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+config({ path: resolve(__dirname, '../../gateway/.env') });
+config({ path: resolve(__dirname, '../../gateway/.env.local'), override: true });
+
+const app = express();
+app.use(express.json());
+
+const PORT = parseInt(process.env.FOREX_SERVICE_PORT || '3003');
+
+const scanner = new ForexScanner({
+  oandaApiKey: process.env.OANDA_API_KEY,
+  oandaAccountId: process.env.OANDA_ACCOUNT_ID,
+  oandaMode: (process.env.OANDA_MODE as 'live' | 'practice') || undefined,
+});
+
+// ── Track trade history for P&L reporting ──
+interface TradeRecord {
+  id: string;
+  instrument: string;
+  units: number;
+  direction: 'long' | 'short';
+  entryPrice: number;
+  exitPrice?: number;
+  realizedPL?: number;
+  openTime: string;
+  closeTime?: string;
+  status: 'open' | 'closed';
+  strategy: string;
+}
+const tradeHistory: TradeRecord[] = [];
+
+// ── OANDA helpers ──
+const oandaBase = (process.env.OANDA_MODE === 'practice' || process.env.OANDA_ACCOUNT_ID?.startsWith('101-'))
+  ? 'https://api-fxpractice.oanda.com' : 'https://api-fxtrade.oanda.com';
+const oandaHeaders = { Authorization: `Bearer ${process.env.OANDA_API_KEY}` };
+const oandaAcct = process.env.OANDA_ACCOUNT_ID;
+
+// ═══════════════════════════════════════════════
+// ROUTES
+// ═══════════════════════════════════════════════
+
+// Health
+app.get('/api/forex/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'MTWM Forex Service v1.0',
+    port: PORT,
+    session: scanner.getActiveSession(),
+    configured: !!(process.env.OANDA_API_KEY && process.env.OANDA_ACCOUNT_ID),
+    quotesTracked: scanner.getQuotes().length,
+    uptime: process.uptime(),
+  });
+});
+
+// Account summary
+app.get('/api/forex/account', async (_req, res) => {
+  try {
+    const resp = await fetch(`${oandaBase}/v3/accounts/${oandaAcct}/summary`, { headers: oandaHeaders });
+    if (!resp.ok) return res.status(resp.status).json({ error: 'OANDA API error' });
+    const data = await resp.json() as any;
+    const a = data.account;
+    res.json({
+      balance: parseFloat(a.balance),
+      nav: parseFloat(a.NAV),
+      unrealizedPL: parseFloat(a.unrealizedPL),
+      realizedPL: parseFloat(a.pl),
+      openTradeCount: a.openTradeCount,
+      marginUsed: parseFloat(a.marginUsed),
+      marginAvailable: parseFloat(a.marginAvailable),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Available pairs
+app.get('/api/forex/pairs', (_req, res) => {
+  res.json({
+    pairs: [
+      { symbol: 'EUR/USD', category: 'major' },
+      { symbol: 'GBP/USD', category: 'major' },
+      { symbol: 'USD/JPY', category: 'major' },
+      { symbol: 'AUD/JPY', category: 'carry' },
+      { symbol: 'NZD/JPY', category: 'carry' },
+      { symbol: 'EUR/GBP', category: 'cross' },
+      { symbol: 'AUD/NZD', category: 'cross' },
+      { symbol: 'EUR/JPY', category: 'cross' },
+      { symbol: 'GBP/JPY', category: 'cross' },
+      { symbol: 'USD/CAD', category: 'major' },
+      { symbol: 'USD/CHF', category: 'major' },
+      { symbol: 'XAU/USD', category: 'commodity' },
+    ],
+  });
+});
+
+// Current quotes
+app.get('/api/forex/quotes', async (_req, res) => {
+  try {
+    const quotes = await scanner.fetchQuotes();
+    res.json({
+      session: scanner.getActiveSession(),
+      quotes,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Session info
+app.get('/api/forex/session', (_req, res) => {
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  const utcM = now.getUTCMinutes();
+  res.json({
+    active: scanner.getActiveSession(),
+    utcTime: `${utcH}:${String(utcM).padStart(2, '0')}`,
+    sessions: {
+      asian: scanner.isSessionOpen('asian'),
+      london: scanner.isSessionOpen('london'),
+      newyork: scanner.isSessionOpen('newyork'),
+      overlap: scanner.isSessionOpen('overlap'),
+    },
+  });
+});
+
+// Generate signals (scan)
+app.post('/api/forex/scan', async (_req, res) => {
+  try {
+    await scanner.fetchQuotes();
+    const momentum = scanner.evaluateSessionMomentum();
+    const carry = scanner.evaluateCarryTrades();
+    res.json({
+      session: scanner.getActiveSession(),
+      signals: [...momentum, ...carry],
+      total: momentum.length + carry.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Open positions
+app.get('/api/forex/positions', async (_req, res) => {
+  try {
+    const trades = await scanner.getOpenTrades();
+    const totalPL = trades.reduce((s: number, t: any) => s + parseFloat(t.unrealizedPL || '0'), 0);
+    res.json({
+      positions: trades.map((t: any) => ({
+        id: t.id,
+        instrument: t.instrument,
+        units: parseInt(t.currentUnits),
+        direction: parseInt(t.currentUnits) > 0 ? 'long' : 'short',
+        entryPrice: parseFloat(t.price),
+        unrealizedPL: parseFloat(t.unrealizedPL),
+        openTime: t.openTime,
+      })),
+      count: trades.length,
+      totalUnrealizedPL: totalPL,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Place order
+app.post('/api/forex/order', async (req, res) => {
+  try {
+    const { instrument, units, stopLoss, takeProfit, strategy } = req.body;
+    if (!instrument || !units) {
+      return res.status(400).json({ error: 'instrument and units required' });
+    }
+    const result = await scanner.placeOrder(instrument, units, stopLoss, takeProfit);
+    const fill = result.orderFillTransaction;
+
+    if (fill) {
+      tradeHistory.push({
+        id: fill.id,
+        instrument: fill.instrument,
+        units: parseInt(fill.units),
+        direction: parseInt(fill.units) > 0 ? 'long' : 'short',
+        entryPrice: parseFloat(fill.price),
+        openTime: fill.time,
+        status: 'open',
+        strategy: strategy || 'manual',
+      });
+    }
+
+    res.json({ success: true, fill: fill ? { id: fill.id, price: fill.price, units: fill.units } : null });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Close position
+app.post('/api/forex/position/:instrument/close', async (req, res) => {
+  try {
+    const instrument = req.params.instrument.replace('-', '/');
+    const result = await scanner.closePosition(instrument);
+    res.json({ success: true, result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Trade history
+app.get('/api/forex/history', async (_req, res) => {
+  try {
+    const resp = await fetch(
+      `${oandaBase}/v3/accounts/${oandaAcct}/trades?state=CLOSED&count=20`,
+      { headers: oandaHeaders },
+    );
+    if (!resp.ok) return res.status(resp.status).json({ error: 'OANDA API error' });
+    const data = await resp.json() as any;
+    const trades = (data.trades || []).map((t: any) => ({
+      id: t.id,
+      instrument: t.instrument,
+      units: parseInt(t.initialUnits),
+      direction: parseInt(t.initialUnits) > 0 ? 'long' : 'short',
+      entryPrice: parseFloat(t.price),
+      exitPrice: parseFloat(t.averageClosePrice || '0'),
+      realizedPL: parseFloat(t.realizedPL),
+      openTime: t.openTime,
+      closeTime: t.closeTime,
+      exitReason: t.stopLossOrder?.state === 'FILLED' ? 'stop_loss' : 'take_profit',
+    }));
+
+    const wins = trades.filter((t: any) => t.realizedPL >= 0);
+    const losses = trades.filter((t: any) => t.realizedPL < 0);
+
+    res.json({
+      trades,
+      stats: {
+        total: trades.length,
+        wins: wins.length,
+        losses: losses.length,
+        winRate: trades.length > 0 ? (wins.length / trades.length * 100).toFixed(0) + '%' : '0%',
+        grossWins: wins.reduce((s: number, t: any) => s + t.realizedPL, 0),
+        grossLosses: losses.reduce((s: number, t: any) => s + t.realizedPL, 0),
+        netPL: trades.reduce((s: number, t: any) => s + t.realizedPL, 0),
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Candle data for a pair
+app.get('/api/forex/candles/:instrument', async (req, res) => {
+  try {
+    const instrument = req.params.instrument.replace('-', '_').replace('/', '_');
+    const granularity = (req.query.granularity as string) || 'H1';
+    const count = parseInt((req.query.count as string) || '50');
+
+    const resp = await fetch(
+      `${oandaBase}/v3/instruments/${instrument}/candles?granularity=${granularity}&count=${count}`,
+      { headers: oandaHeaders },
+    );
+    if (!resp.ok) return res.status(resp.status).json({ error: 'OANDA API error' });
+    const data = await resp.json() as any;
+
+    const candles = (data.candles || []).filter((c: any) => c.complete).map((c: any) => ({
+      time: c.time,
+      open: parseFloat(c.mid.o),
+      high: parseFloat(c.mid.h),
+      low: parseFloat(c.mid.l),
+      close: parseFloat(c.mid.c),
+      volume: c.volume,
+    }));
+
+    res.json({ instrument, granularity, candles });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// P&L summary (for autonomy engine / dashboard)
+app.get('/api/forex/pnl', async (_req, res) => {
+  try {
+    // Get account summary
+    const acctResp = await fetch(`${oandaBase}/v3/accounts/${oandaAcct}/summary`, { headers: oandaHeaders });
+    const acctData = await acctResp.json() as any;
+    const account = acctData.account;
+
+    // Get open trades
+    const trades = await scanner.getOpenTrades();
+    const unrealized = trades.reduce((s: number, t: any) => s + parseFloat(t.unrealizedPL || '0'), 0);
+
+    // Get recent closed trades
+    const closedResp = await fetch(
+      `${oandaBase}/v3/accounts/${oandaAcct}/trades?state=CLOSED&count=10`,
+      { headers: oandaHeaders },
+    );
+    const closedData = await closedResp.json() as any;
+    const recentClosed = (closedData.trades || []).slice(0, 5);
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayTrades = recentClosed.filter((t: any) => new Date(t.closeTime) >= todayStart);
+    const todayPL = todayTrades.reduce((s: number, t: any) => s + parseFloat(t.realizedPL || '0'), 0);
+
+    res.json({
+      balance: parseFloat(account.balance),
+      nav: parseFloat(account.NAV),
+      totalPL: parseFloat(account.pl),
+      unrealizedPL: unrealized,
+      todayRealizedPL: todayPL,
+      openPositions: trades.length,
+      session: scanner.getActiveSession(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════
+// START
+// ═══════════════════════════════════════════════
+
+// Error handlers first
+scanner.on('error', (err) => console.error('[Forex] Error:', err.message));
+scanner.on('signal', (sig) => console.log(`[Forex] Signal: ${sig.direction.toUpperCase()} ${sig.symbol} (${sig.strategy}, conf: ${sig.confidence})`));
+process.on('uncaughtException', (err) => console.error('[Forex] Uncaught:', err.message));
+process.on('unhandledRejection', (err: any) => console.error('[Forex] Unhandled rejection:', err?.message || err));
+
+// Store server ref to anchor event loop
+const server = app.listen(PORT, () => {
+  console.log(`\n[Forex Service] Listening on http://localhost:${PORT}`);
+  console.log(`[Forex Service] OANDA: ${process.env.OANDA_ACCOUNT_ID ? 'configured' : 'NOT configured'}`);
+  console.log(`[Forex Service] Session: ${scanner.getActiveSession()}`);
+  console.log('[Forex Service] Ready.');
+});
+
+// Keep-alive: prevent Node from exiting if server handle gets GC'd
+const keepAlive = setInterval(() => {}, 60_000);
+process.on('SIGTERM', () => { clearInterval(keepAlive); server.close(); });
+process.on('SIGINT', () => { clearInterval(keepAlive); server.close(); });
