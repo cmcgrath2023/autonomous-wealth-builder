@@ -3287,6 +3287,21 @@ async function start() {
         detail: n.headline.substring(0, 100),
       }));
 
+    // Build strategy recommendation from news analysis
+    const bullishAlerts = newsSignals.filter(s => s.signal === 'BUY').length;
+    const bearishAlerts = newsSignals.filter(s => s.signal === 'SELL').length;
+    const newsStrategy = bullishAlerts > bearishAlerts
+      ? { action: `Bullish bias — ${bullishAlerts} buy signals. Monitor ${newsSignals.slice(0, 2).map(s => s.symbol).join(', ')} for entry.`,
+          rationale: `${bullishAlerts} bullish vs ${bearishAlerts} bearish headlines. Market sentiment tilts positive.`,
+          risk: 'Headlines can reverse quickly. Set tight stops on news-driven entries.' }
+      : bearishAlerts > bullishAlerts
+        ? { action: `Bearish caution — ${bearishAlerts} sell signals. Reduce exposure or hedge.`,
+            rationale: `${bearishAlerts} bearish vs ${bullishAlerts} bullish headlines. Negative sentiment dominant.`,
+            risk: 'Bearish sentiment can create oversold bounces. Watch for reversal signals.' }
+        : { action: 'Neutral — no clear directional bias from news. Hold current positions.',
+            rationale: 'Mixed or minimal actionable signals from news feeds.',
+            risk: 'Low-signal periods can precede major moves. Stay alert for breakouts.' };
+
     saveResearchReport({
       id: `news-${Date.now()}`,
       agent: 'news-desk',
@@ -3295,6 +3310,7 @@ async function start() {
       summary: `${newAlerts} actionable alerts from ${totalItems} headlines. ${alerts.length > 0 ? alerts[0].substring(0, 100) : 'Monitoring feeds.'}`,
       findings: [...alerts, ...newsFindings.slice(0, 15)],
       signals: newsSignals,
+      strategy: newsStrategy,
       meta: { totalItems, newAlerts, newTickers, cacheSize: newsCache.size },
     });
 
@@ -3551,6 +3567,12 @@ async function start() {
     summary: string;
     findings: string[];
     signals: Array<{ symbol: string; direction: string; signal: string; detail: string }>;
+    strategy: {
+      action: string;       // What will be done based on this research
+      rationale: string;    // Why this action makes sense
+      risk: string;         // Key risk to watch
+      result?: string;      // Outcome after execution (updated later)
+    };
     meta: Record<string, unknown>;
   }
   const researchReports: ResearchReport[] = [];
@@ -5039,6 +5061,20 @@ async function start() {
 
     insights.push(`CRYPTO UNIVERSE: ${movers.length} tracked, ${researchStars.size} total stars`);
 
+    // Build strategy from crypto analysis
+    const strongMovers = movers.filter(m => Math.abs(m.pct) >= 3);
+    const bullishCount = movers.filter(m => m.pct > 0).length;
+    const bearishCount = movers.filter(m => m.pct < 0).length;
+    const marketBias = bullishCount > bearishCount * 1.5 ? 'bullish' : bearishCount > bullishCount * 1.5 ? 'bearish' : 'mixed';
+
+    const cryptoStrategy = {
+      action: strongMovers.length > 0
+        ? `Target ${strongMovers.slice(0, 2).map(m => m.sym).join(', ')} — ${strongMovers[0].pct > 0 ? 'long momentum' : 'avoid/short'} plays. ${marketBias === 'bullish' ? 'Add to winners.' : marketBias === 'bearish' ? 'Tighten stops, reduce exposure.' : 'Selective entries only.'}`
+        : `No strong movers (3%+). Hold existing positions, monitor for breakouts.`,
+      rationale: `${movers.length} assets scanned. Market bias: ${marketBias} (${bullishCount} up / ${bearishCount} down). ${researchStars.size} research stars active.`,
+      risk: marketBias === 'bearish' ? 'Bearish market — high stop-loss risk. Position small.' : 'Crypto volatility can reverse intraday. Use trailing stops on winners.',
+    };
+
     // Save full report for human review
     saveResearchReport({
       id: `crypto-${Date.now()}`,
@@ -5053,7 +5089,8 @@ async function start() {
         signal: Math.abs(m.pct) >= 3 ? 'STRONG' : Math.abs(m.pct) >= 1 ? 'MODERATE' : 'WEAK',
         detail: `${m.pct > 0 ? '+' : ''}${m.pct.toFixed(2)}% @ $${m.price.toFixed(2)} | vol: ${m.vol.toFixed(0)}`,
       })),
-      meta: { moversCount: movers.length, starsCount: researchStars.size },
+      strategy: cryptoStrategy,
+      meta: { moversCount: movers.length, starsCount: researchStars.size, marketBias },
     });
 
     return { detail: insights.slice(0, 8).join(' | '), result: 'success' };
@@ -5186,13 +5223,27 @@ async function start() {
       insights.push(`OVERLAP: ${activeSessions.join('+')} — expect higher volatility and volume`);
     }
 
+    // Build forex strategy from analysis
+    const usdBias = usdLong > usdShort + 1 ? 'strong' : usdShort > usdLong + 1 ? 'weak' : 'mixed';
+    const buySignals = pairAnalyses.filter(pa => pa.trend === 'BULL' && pa.rangePos < 0.7);
+    const sellSignals = pairAnalyses.filter(pa => pa.trend === 'BEAR' && pa.rangePos > 0.3);
+    const preferredPairs = Array.from(adaptiveState.forexPreferPairs);
+
+    const forexStrategy = {
+      action: buySignals.length > 0 || sellSignals.length > 0
+        ? `${buySignals.length > 0 ? `BUY ${buySignals.slice(0, 2).map(p => p.pair.replace('_', '/')).join(', ')}` : ''}${buySignals.length > 0 && sellSignals.length > 0 ? ' | ' : ''}${sellSignals.length > 0 ? `SELL ${sellSignals.slice(0, 2).map(p => p.pair.replace('_', '/')).join(', ')}` : ''}. USD ${usdBias}. ${preferredPairs.length > 0 ? `Bayesian prefers: ${preferredPairs.join(', ')}.` : ''}`
+        : `No clear entries — all pairs at range extremes. Hold existing positions. ${activeSessions.length >= 2 ? 'Session overlap may create breakouts.' : ''}`,
+      rationale: `${activeSessions.join('+')} session${activeSessions.length > 1 ? 's' : ''}. USD ${usdBias} across ${pairAnalyses.length} pairs. ${buySignals.length} buy + ${sellSignals.length} sell setups identified.`,
+      risk: activeSessions.length >= 2 ? 'Session overlap = higher volatility. Use tighter stops.' : 'Single session = lower liquidity. Wider spreads possible.',
+    };
+
     // Save full report for human review
     saveResearchReport({
       id: `forex-${Date.now()}`,
       agent: 'forex-researcher',
       type: 'session_analysis',
       timestamp: new Date().toISOString(),
-      summary: `${activeSessions.join('+')} session${activeSessions.length > 1 ? 's' : ''} active. ${pairAnalyses.length} pairs analyzed. USD ${usdLong > usdShort + 1 ? 'STRONG' : usdShort > usdLong + 1 ? 'WEAK' : 'MIXED'}.`,
+      summary: `${activeSessions.join('+')} session${activeSessions.length > 1 ? 's' : ''} active. ${pairAnalyses.length} pairs analyzed. USD ${usdBias.toUpperCase()}.`,
       findings: insights,
       signals: pairAnalyses.slice(0, 8).map(pa => ({
         symbol: pa.pair.replace('_', '/'),
@@ -5200,7 +5251,8 @@ async function start() {
         signal: pa.trend === 'BULL' && pa.rangePos < 0.7 ? 'BUY' : pa.trend === 'BEAR' && pa.rangePos > 0.3 ? 'SELL' : 'WAIT',
         detail: `${pa.trend} | Range: ${(pa.rangePos * 100).toFixed(0)}% | ATR: ${pa.atr.toFixed(5)} | Move: ${pa.pctMove > 0 ? '+' : ''}${pa.pctMove.toFixed(3)}%`,
       })),
-      meta: { sessions: activeSessions, pairsAnalyzed: pairAnalyses.length, usdBias: usdLong > usdShort + 1 ? 'strong' : usdShort > usdLong + 1 ? 'weak' : 'mixed' },
+      strategy: forexStrategy,
+      meta: { sessions: activeSessions, pairsAnalyzed: pairAnalyses.length, usdBias },
     });
 
     return { detail: insights.slice(0, 8).join(' | '), result: 'success' };

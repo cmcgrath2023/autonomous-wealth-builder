@@ -10,6 +10,7 @@ import { Squeeze as Hamburger } from 'hamburger-react';
 const navItems = [
   { href: '/', label: 'Dashboard', icon: '◉' },
   { href: '/profit', label: 'Profit', icon: '⊹' },
+  { href: '/research', label: 'Research', icon: '⊙' },
   { href: '/trading', label: 'Trading', icon: '⟁' },
   { href: '/options', label: 'Options', icon: '⊘' },
   { href: '/forex', label: 'Forex', icon: '⇄' },

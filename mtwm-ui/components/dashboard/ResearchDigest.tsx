@@ -112,8 +112,15 @@ function DigestSnippet({ sectionKey, section, onViewAll }: { sectionKey: Section
   );
 }
 
+const SECTION_AGENTS: Record<SectionKey, string> = {
+  usMarkets: 'news-desk',
+  crypto: 'crypto-researcher',
+  forex: 'forex-researcher',
+};
+
 function DigestModal({ sectionKey, section, isOpen, onClose }: { sectionKey: SectionKey; section: DigestSection; isOpen: boolean; onClose: () => void }) {
   const label = SECTION_LABELS[sectionKey];
+  const agentFilter = SECTION_AGENTS[sectionKey];
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="2xl" scrollBehavior="inside" classNames={{ base: 'bg-[#111] border border-white/10', header: 'border-b border-white/5', body: 'py-4' }}>
@@ -185,6 +192,18 @@ function DigestModal({ sectionKey, section, isOpen, onClose }: { sectionKey: Sec
                 ))}
               </div>
             )}
+          </div>
+
+          {/* View Full Report CTA */}
+          <div className="mt-4 pt-4 border-t border-white/5">
+            <a
+              href={`/research?agent=${agentFilter}`}
+              className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-400 hover:bg-blue-500/20 transition-colors"
+              onClick={onClose}
+            >
+              View Full Report History
+              <span className="text-xs text-blue-400/50">{'\u2192'}</span>
+            </a>
           </div>
         </ModalBody>
       </ModalContent>
