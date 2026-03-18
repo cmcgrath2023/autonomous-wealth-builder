@@ -11,92 +11,137 @@ interface DailyTargetTrackerProps {
 
 const DAILY_GOAL = 500;
 
+// SVG circular progress bar
+function CircularProgress({ percent, size = 140, stroke = 10, color }: { percent: number; size?: number; stroke?: number; color: string }) {
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const clampedPct = Math.min(percent, 100);
+  const offset = circumference - (clampedPct / 100) * circumference;
+
+  return (
+    <svg width={size} height={size} className="transform -rotate-90">
+      {/* Background track */}
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke="rgba(255,255,255,0.06)"
+        strokeWidth={stroke}
+      />
+      {/* Progress arc */}
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke={color}
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+        className="transition-all duration-700 ease-out"
+      />
+    </svg>
+  );
+}
+
 export function DailyTargetTracker({ dayPnl, realizedPnl, unrealizedPnl }: DailyTargetTrackerProps) {
-  const progressPct = Math.max(0, Math.min(100, (dayPnl / DAILY_GOAL) * 100));
+  const progressPct = Math.max(0, (dayPnl / DAILY_GOAL) * 100);
   const goalMet = dayPnl >= DAILY_GOAL;
   const isPositive = dayPnl > 0;
+  const surplus = dayPnl - DAILY_GOAL;
   const remaining = Math.max(0, DAILY_GOAL - dayPnl);
 
-  // Color based on progress
-  const barColor = goalMet
-    ? 'bg-green-500'
+  // Ring color
+  const ringColor = goalMet
+    ? '#22c55e'
     : progressPct >= 50
-      ? 'bg-amber-500'
+      ? '#f59e0b'
       : isPositive
-        ? 'bg-blue-500'
-        : 'bg-red-500';
-
-  const statusText = goalMet
-    ? 'GOAL MET'
-    : dayPnl > 0
-      ? `$${remaining.toFixed(0)} to go`
-      : 'BEHIND';
-
-  const statusColor = goalMet
-    ? 'bg-green-500/20 text-green-400'
-    : dayPnl > 0
-      ? 'bg-amber-500/20 text-amber-400'
-      : 'bg-red-500/20 text-red-400';
+        ? '#3b82f6'
+        : '#ef4444';
 
   return (
     <Card className="bg-white/5 border border-white/5">
-      <CardBody className="p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-white/60">Daily Cash Goal</h3>
-          <span className={`text-xs font-mono px-2 py-0.5 rounded ${statusColor}`}>
-            {statusText}
-          </span>
-        </div>
+      <CardBody className="p-5">
+        <div className="flex items-start gap-6">
+          {/* Circular progress with center text */}
+          <div className="relative flex-shrink-0" style={{ width: 140, height: 140 }}>
+            <CircularProgress percent={progressPct} color={ringColor} />
+            {/* Center content overlaid */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              {goalMet ? (
+                <>
+                  <span className="text-[11px] font-semibold text-green-400 tracking-wide uppercase">At Goal</span>
+                  <span className="text-2xl font-mono font-bold text-green-400">
+                    {Math.round(progressPct)}%
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="text-2xl font-mono font-bold text-white/90">
+                    {Math.round(progressPct)}%
+                  </span>
+                  <span className="text-[10px] text-white/40 font-mono">
+                    ${remaining.toFixed(0)} to go
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
 
-        {/* Big number */}
-        <div className="flex items-baseline gap-2 mb-3">
-          <span className={`text-3xl font-mono font-bold ${isPositive ? 'text-green-400' : dayPnl < 0 ? 'text-red-400' : 'text-white/60'}`}>
-            {dayPnl >= 0 ? '+' : ''}{formatCurrency(dayPnl)}
-          </span>
-          <span className="text-sm text-white/30 font-mono">/ {formatCurrency(DAILY_GOAL)}</span>
-        </div>
+          {/* Right side: numbers */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-white/60">Daily Cash Goal</h3>
+              {goalMet && (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-green-500/20 text-green-400 uppercase tracking-wide">
+                  Goal Met
+                </span>
+              )}
+            </div>
 
-        {/* Progress bar */}
-        <div className="mb-4">
-          <div className="w-full h-4 bg-white/5 rounded-full overflow-hidden relative">
-            {/* Goal marker at 100% */}
-            <div className="absolute right-0 top-0 h-full w-0.5 bg-white/20 z-10" />
-            {/* Progress fill */}
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-              style={{ width: `${progressPct}%` }}
-            />
-            {/* Percentage label inside bar */}
-            {progressPct > 15 && (
-              <span className="absolute inset-0 flex items-center justify-center text-[10px] font-mono font-bold text-white/90">
-                {progressPct.toFixed(0)}%
+            {/* Day P&L — the big number */}
+            <div className="flex items-baseline gap-2 mb-3">
+              <span className={`text-3xl font-mono font-bold ${isPositive ? 'text-green-400' : dayPnl < 0 ? 'text-red-400' : 'text-white/60'}`}>
+                {dayPnl >= 0 ? '+' : ''}{formatCurrency(dayPnl)}
               </span>
-            )}
-          </div>
-          <div className="flex justify-between text-[10px] text-white/25 mt-1">
-            <span>$0</span>
-            <span>${DAILY_GOAL}</span>
-          </div>
-        </div>
+              <span className="text-sm text-white/30 font-mono">/ {formatCurrency(DAILY_GOAL)}</span>
+            </div>
 
-        {/* Breakdown */}
-        <div className="grid grid-cols-3 gap-3 text-sm">
-          <div>
-            <div className="text-white/40 text-xs">Today&apos;s P&L</div>
-            <div className={`font-mono font-medium ${dayPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {dayPnl >= 0 ? '+' : ''}{formatCurrency(dayPnl)}
-            </div>
-          </div>
-          <div>
-            <div className="text-white/40 text-xs">Realized</div>
-            <div className={`font-mono ${realizedPnl >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
-              {realizedPnl >= 0 ? '+' : ''}{formatCurrency(realizedPnl)}
-            </div>
-          </div>
-          <div>
-            <div className="text-white/40 text-xs">Unrealized</div>
-            <div className={`font-mono ${unrealizedPnl >= 0 ? 'text-blue-400/70' : 'text-red-400/70'}`}>
-              {unrealizedPnl >= 0 ? '+' : ''}{formatCurrency(unrealizedPnl)}
+            {/* Surplus banner when over goal */}
+            {goalMet && surplus > 0 && (
+              <div className="mb-3 px-3 py-1.5 rounded-lg bg-green-500/10 border border-green-500/20 inline-flex items-center gap-2">
+                <span className="text-xs text-green-400/70">Surplus</span>
+                <span className="text-sm font-mono font-bold text-green-400">+{formatCurrency(surplus)}</span>
+              </div>
+            )}
+
+            {/* Breakdown */}
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+              <div className="flex justify-between">
+                <span className="text-white/40 text-xs">Day P&L</span>
+                <span className={`font-mono text-xs ${dayPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {dayPnl >= 0 ? '+' : ''}{formatCurrency(dayPnl)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-white/40 text-xs">Unrealized</span>
+                <span className={`font-mono text-xs ${unrealizedPnl >= 0 ? 'text-blue-400/70' : 'text-red-400/70'}`}>
+                  {unrealizedPnl >= 0 ? '+' : ''}{formatCurrency(unrealizedPnl)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-white/40 text-xs">Realized</span>
+                <span className={`font-mono text-xs ${realizedPnl >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
+                  {realizedPnl >= 0 ? '+' : ''}{formatCurrency(realizedPnl)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-white/40 text-xs">Target</span>
+                <span className="font-mono text-xs text-white/50">{formatCurrency(DAILY_GOAL)}</span>
+              </div>
             </div>
           </div>
         </div>

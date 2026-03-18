@@ -104,7 +104,12 @@ export async function GET() {
     const unrealizedPnl = assets.reduce((sum: number, a: any) => sum + (a.change || 0), 0);
     const totalValue = account.portfolioValue || 0;
     const totalPnl = totalValue - INITIAL_BALANCE; // TRUE total P&L from starting balance
-    const realizedPnl = (closedData.trades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
+    // Realized P&L = total P&L minus what's still unrealized (from Alpaca's actual data)
+    const realizedFromAlpaca = totalPnl - unrealizedPnl;
+    // Also check internal closed trades as a cross-reference
+    const realizedFromTrades = (closedData.trades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
+    // Use the Alpaca-derived number (it's authoritative), but if internal tracking is higher, use that
+    const realizedPnl = Math.abs(realizedFromAlpaca) > Math.abs(realizedFromTrades) ? realizedFromAlpaca : realizedFromTrades;
     // Today's P&L from Alpaca (equity - last_equity from previous close)
     const dayPnl = account.dayPnl || 0;
     const dayPnlPercent = (account.lastEquity || 0) > 0 ? (dayPnl / account.lastEquity) * 100 : 0;

@@ -1934,14 +1934,19 @@ async function start() {
   }, 2000);
 
   // Helper: bootstrap tickers with historical data — batches up to 30 at a time
+  // Track already-bootstrapped tickers to avoid repeated fetches every heartbeat
+  const bootstrappedTickers = new Set<string>();
   const bootstrapQueue: string[] = [];
   let bootstrapFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let bootstrapInProgress = false;
 
   async function flushBootstrapQueue() {
     if (bootstrapQueue.length === 0) return;
+    if (bootstrapInProgress) return; // prevent concurrent flushes blocking event loop
+    bootstrapInProgress = true;
     const apiKey = (midstream as any).config.alpacaApiKey;
     const apiSecret = (midstream as any).config.alpacaApiSecret;
-    if (!apiKey || !apiSecret) return;
+    if (!apiKey || !apiSecret) { bootstrapInProgress = false; return; }
     const headers = { 'APCA-API-KEY-ID': apiKey, 'APCA-API-SECRET-KEY': apiSecret };
     const dataUrl = 'https://data.alpaca.markets';
     const end = new Date().toISOString();
@@ -1972,10 +1977,13 @@ async function start() {
                 lows: barArr.map((b: any) => b.l),
                 volumes: barArr.map((b: any) => b.v),
               });
+              bootstrappedTickers.add(ticker);
               loaded++;
             }
           }
           console.log(`[Bootstrap] Batch: ${loaded}/${stockTickers.slice(i, i + 30).length} stocks loaded`);
+          // Yield event loop between batches to prevent blocking HTTP requests
+          await new Promise(resolve => setTimeout(resolve, 50));
         }
       } catch { /* non-critical */ }
     }
@@ -1993,21 +2001,26 @@ async function start() {
           for (const [symbol, bars] of Object.entries(data.bars || {})) {
             const barArr = bars as any[];
             if (barArr.length > 0) {
-              neuralTrader.ingestHistoricalData(symbol.replace('/', '-'), {
+              const normalizedTicker = symbol.replace('/', '-');
+              neuralTrader.ingestHistoricalData(normalizedTicker, {
                 closes: barArr.map((b: any) => b.c),
                 highs: barArr.map((b: any) => b.h),
                 lows: barArr.map((b: any) => b.l),
                 volumes: barArr.map((b: any) => b.v),
               });
+              bootstrappedTickers.add(normalizedTicker);
             }
           }
           console.log(`[Bootstrap] Batch: ${cryptoTickers.length} crypto loaded`);
         }
       } catch { /* non-critical */ }
     }
+    bootstrapInProgress = false;
   }
 
   async function bootstrapTicker(ticker: string) {
+    // Skip if already bootstrapped this session — prevents repeated fetches every heartbeat
+    if (bootstrappedTickers.has(ticker)) return;
     bootstrapQueue.push(ticker);
     // Debounce: flush after 500ms of no new tickers, or when queue hits 30
     if (bootstrapFlushTimer) clearTimeout(bootstrapFlushTimer);
@@ -2177,11 +2190,15 @@ async function start() {
         // SPEC-005: Small Capital Strategy — position sizing
         // Paper phase: simulate $5K capital constraints on $100K account
         // This validates the strategy before deploying real $5K
-        const simulatedCapital = 4000; // Emulate $4K Alpaca deposit — crypto-first, swing equities
+        const simulatedCapital = 8000; // $4K deposit × 2x margin = $8K deployable
+        // Crypto-dominant: 90/10 split until $25K reached ($4K → $25K growth phase)
+        // Equity only for exceptional setups (score > 0.8). Crypto is the primary income engine.
+        const CRYPTO_BUDGET = simulatedCapital * 0.90; // $7,200
+        const EQUITY_BUDGET = simulatedCapital * 0.10; // $800 — only for standout plays
+        const isCryptoSignal = signal.ticker.includes('-');
         const deployable = simulatedCapital; // Full $4K deployed — every dollar working
         const maxPosition = simulatedCapital * 0.35; // $1,400 max per position
         const baseSize = simulatedCapital * 0.20; // $800 base allocation — concentrated bets
-        const isCryptoSignal = signal.ticker.includes('-');
         const existingPosition = positionMap.get(signal.ticker);
         let positionSize: number;
 
@@ -2214,6 +2231,31 @@ async function start() {
         if (budgetPosCount >= 5 && (signal.direction === 'buy' || signal.direction === 'short')) {
           details.push(`${signal.ticker} ${signal.direction.toUpperCase()} skipped — max 5 positions (star concentration)`);
           continue;
+        }
+
+        // Enforce hard capital split: crypto $2,800 / equity $1,200
+        // Prevent equity from eating crypto's budget
+        const cryptoBases = ['BTC','ETH','SOL','AVAX','DOGE','SHIB','LINK','UNI','DOT','MATIC','XRP','NEAR','ADA','AAVE','LTC','BCH','PEPE','BONK','RENDER'];
+        const isCryptoPos = (t: string) => cryptoBases.some(b => t.startsWith(b) && (t.endsWith('USD') || t.includes('-') || t.includes('/')));
+        const budgetPositions2 = currentPositions.filter(p => Math.abs(p.marketValue) <= 2500);
+        const cryptoDeployed = budgetPositions2.filter(p => isCryptoPos(p.ticker)).reduce((s, p) => s + Math.abs(p.marketValue), 0);
+        const equityDeployed = budgetPositions2.filter(p => !isCryptoPos(p.ticker)).reduce((s, p) => s + Math.abs(p.marketValue), 0);
+
+        if (signal.direction === 'buy' || signal.direction === 'short') {
+          if (isCryptoSignal && cryptoDeployed + positionSize > CRYPTO_BUDGET * 1.1) {
+            positionSize = Math.max(0, Math.round(CRYPTO_BUDGET - cryptoDeployed));
+            if (positionSize < 50) {
+              details.push(`${signal.ticker} skipped — crypto budget full ($${cryptoDeployed.toFixed(0)}/$${CRYPTO_BUDGET.toFixed(0)})`);
+              continue;
+            }
+          }
+          if (!isCryptoSignal && equityDeployed + positionSize > EQUITY_BUDGET * 1.1) {
+            positionSize = Math.max(0, Math.round(EQUITY_BUDGET - equityDeployed));
+            if (positionSize < 50) {
+              details.push(`${signal.ticker} skipped — equity budget full ($${equityDeployed.toFixed(0)}/$${EQUITY_BUDGET.toFixed(0)}), capital reserved for crypto`);
+              continue;
+            }
+          }
         }
 
         // For crypto, use fractional qty
@@ -2382,7 +2424,7 @@ async function start() {
     const realPortfolio = account?.portfolioValue || 0;
     // Simulate $3K Alpaca capital. Track P&L relative to paper start, report as $3K + P&L
     const totalPnl = realPortfolio - 100000; // Actual P&L from trading
-    const simulatedCapital = 4000 + totalPnl; // What $4K Alpaca would be with same P&L
+    const simulatedCapital = 8000 + totalPnl; // $4K deposit × 2x margin = $8K + accumulated P&L
     const perfStats = positionManager.getPerformanceStats();
     const daysSinceStart = Math.max(1, Math.floor((Date.now() - (plan.createdAt?.getTime?.() || Date.now())) / (24 * 60 * 60 * 1000)));
     const progress = strategicPlanner.evaluateProgress(simulatedCapital, perfStats.totalTrades, perfStats.winRate, daysSinceStart);
@@ -2654,7 +2696,7 @@ async function start() {
           positionTickers.add(p.ticker.replace('USD', '-USD'));     // ETH-USD
           positionTickers.add(p.ticker.replace('USD', '/USD'));     // ETH/USD
         }
-        const simulatedCap = 4000; // $4K Alpaca deposit — crypto unlimited, equities swing only
+        const simulatedCap = 8000; // $4K deposit × 2x Alpaca margin = $8K deployable
         const maxPos = 6; // More slots — crypto doesn't count against PDT
         // Count positions by simulated $3K budget — only positions under $1.5K each count
         // Legacy oversized positions from before the fix don't count against our slots
@@ -2855,27 +2897,31 @@ async function start() {
               }
             }
 
-            // Crypto-first allocation: reserve 70% of slots for crypto (primary income engine, no PDT, 24/7)
-            // Split candidates into crypto and equity, fill crypto first, then equity gets remaining slots
+            // Crypto-dominant: 90% crypto / 10% equity until $25K reached ($4K → $25K growth phase)
+            // Crypto = primary income engine (24/7, no PDT, high vol). Equity only for exceptional setups.
             const cryptoCandidates = candidates.filter(c => c.symbol.includes('-') || c.symbol.includes('/'));
             const equityCandidates = candidates.filter(c => !c.symbol.includes('-') && !c.symbol.includes('/'));
             cryptoCandidates.sort((a, b) => b.score - a.score);
             equityCandidates.sort((a, b) => b.score - a.score);
 
-            // Count existing crypto vs equity positions
+            // Crypto-dominant allocation: 90% crypto, 10% equity (only exceptional setups)
             const cryptoBases = ['BTC','ETH','SOL','AVAX','DOGE','SHIB','LINK','UNI','DOT','MATIC','XRP','NEAR','ADA','AAVE','LTC','BCH','PEPE','BONK','RENDER'];
             const isCryptoTicker = (t: string) => cryptoBases.some(b => t.startsWith(b) && (t.endsWith('USD') || t.includes('-') || t.includes('/')));
             const existingCrypto = budgetPositions.filter(p => isCryptoTicker(p.ticker)).length;
-            const cryptoSlots = Math.max(0, Math.ceil(maxPos * 0.7) - existingCrypto); // 70% reserved for crypto
-            const equitySlots = Math.max(0, slotsAvailable - cryptoSlots);
+            // Reserve 90% of slots for crypto — equity gets 1 slot max, only if score > 0.80
+            const cryptoSlots = Math.max(0, Math.ceil(maxPos * 0.9) - existingCrypto);
+            const equitySlots = Math.min(1, Math.max(0, slotsAvailable - cryptoSlots));
 
-            // Fill crypto first, then equity
+            // Equity gate: only truly exceptional setups (score > 0.80) — no routine blue-chip momentum
+            const exceptionalEquity = equityCandidates.filter(c => c.score >= 0.80);
+
+            // Fill crypto first, equity only gets leftovers AND only if exceptional
             const selectedCrypto = cryptoCandidates.slice(0, Math.min(cryptoSlots, slotsAvailable));
             const remainingSlots = slotsAvailable - selectedCrypto.length;
-            const selectedEquity = equityCandidates.slice(0, remainingSlots);
+            const selectedEquity = exceptionalEquity.slice(0, Math.min(equitySlots, remainingSlots));
             candidates.length = 0;
             candidates.push(...selectedCrypto, ...selectedEquity);
-            console.log(`[MomentumStar] Crypto-first: ${selectedCrypto.length} crypto (${cryptoSlots} slots), ${selectedEquity.length} equity (${equitySlots} slots)`);
+            console.log(`[MomentumStar] Crypto-dominant: ${selectedCrypto.length} crypto (${cryptoSlots} slots), ${selectedEquity.length} equity (${equitySlots} slots, ${equityCandidates.length} candidates, ${exceptionalEquity.length} exceptional)`);
 
             // SPEC-005: Total capital cap — don't deploy more than $4K simulated capital
             const totalDeployed = currentPositions.reduce((s, p) => s + Math.abs(p.marketValue), 0);
@@ -3454,6 +3500,41 @@ async function start() {
   //   5. Query GOAP planner for dynamic strategy adjustment
   // Shared research findings that momentum star uses for scoring
   const researchStars: Map<string, { symbol: string; sector: string; catalyst: string; score: number; timestamp: number }> = new Map();
+
+  // ── Research Report Store — persists full reports for human review ──
+  interface ResearchReport {
+    id: string;
+    agent: string;
+    type: string;
+    timestamp: string;
+    summary: string;
+    findings: string[];
+    signals: Array<{ symbol: string; direction: string; signal: string; detail: string }>;
+    meta: Record<string, unknown>;
+  }
+  const researchReports: ResearchReport[] = [];
+  const MAX_REPORTS = 100; // keep last 100 reports
+
+  function saveResearchReport(report: ResearchReport) {
+    researchReports.unshift(report); // newest first
+    if (researchReports.length > MAX_REPORTS) researchReports.length = MAX_REPORTS;
+  }
+
+  // API: Get research reports
+  app.get('/api/research/reports', (req, res) => {
+    const agent = req.query.agent as string;
+    const limit = parseInt(req.query.limit as string) || 20;
+    let reports = researchReports;
+    if (agent) reports = reports.filter(r => r.agent === agent);
+    res.json({ reports: reports.slice(0, limit), total: reports.length });
+  });
+
+  app.get('/api/research/latest', (_req, res) => {
+    const crypto = researchReports.find(r => r.agent === 'crypto-researcher');
+    const forex = researchReports.find(r => r.agent === 'forex-researcher');
+    const equity = researchReports.find(r => r.agent === 'research-agent');
+    res.json({ crypto: crypto || null, forex: forex || null, equity: equity || null });
+  });
 
   // adaptiveState is module-level — updated by bayesian-intel:sync_intelligence each cycle
 
@@ -4916,6 +4997,24 @@ async function start() {
     }
 
     insights.push(`CRYPTO UNIVERSE: ${movers.length} tracked, ${researchStars.size} total stars`);
+
+    // Save full report for human review
+    saveResearchReport({
+      id: `crypto-${Date.now()}`,
+      agent: 'crypto-researcher',
+      type: 'crypto_scan',
+      timestamp: new Date().toISOString(),
+      summary: `Scanned ${movers.length} crypto assets. Top movers: ${movers.slice(0, 3).map(m => `${m.sym} ${m.pct > 0 ? '+' : ''}${m.pct.toFixed(1)}%`).join(', ')}`,
+      findings: insights,
+      signals: movers.slice(0, 10).map(m => ({
+        symbol: m.sym,
+        direction: m.pct > 0 ? 'long' : 'short',
+        signal: Math.abs(m.pct) >= 3 ? 'STRONG' : Math.abs(m.pct) >= 1 ? 'MODERATE' : 'WEAK',
+        detail: `${m.pct > 0 ? '+' : ''}${m.pct.toFixed(2)}% @ $${m.price.toFixed(2)} | vol: ${m.vol.toFixed(0)}`,
+      })),
+      meta: { moversCount: movers.length, starsCount: researchStars.size },
+    });
+
     return { detail: insights.slice(0, 8).join(' | '), result: 'success' };
   });
 
@@ -5045,6 +5144,23 @@ async function start() {
     if (activeSessions.length >= 2) {
       insights.push(`OVERLAP: ${activeSessions.join('+')} — expect higher volatility and volume`);
     }
+
+    // Save full report for human review
+    saveResearchReport({
+      id: `forex-${Date.now()}`,
+      agent: 'forex-researcher',
+      type: 'session_analysis',
+      timestamp: new Date().toISOString(),
+      summary: `${activeSessions.join('+')} session${activeSessions.length > 1 ? 's' : ''} active. ${pairAnalyses.length} pairs analyzed. USD ${usdLong > usdShort + 1 ? 'STRONG' : usdShort > usdLong + 1 ? 'WEAK' : 'MIXED'}.`,
+      findings: insights,
+      signals: pairAnalyses.slice(0, 8).map(pa => ({
+        symbol: pa.pair.replace('_', '/'),
+        direction: pa.trend === 'BULL' ? 'long' : pa.trend === 'BEAR' ? 'short' : 'flat',
+        signal: pa.trend === 'BULL' && pa.rangePos < 0.7 ? 'BUY' : pa.trend === 'BEAR' && pa.rangePos > 0.3 ? 'SELL' : 'WAIT',
+        detail: `${pa.trend} | Range: ${(pa.rangePos * 100).toFixed(0)}% | ATR: ${pa.atr.toFixed(5)} | Move: ${pa.pctMove > 0 ? '+' : ''}${pa.pctMove.toFixed(3)}%`,
+      })),
+      meta: { sessions: activeSessions, pairsAnalyzed: pairAnalyses.length, usdBias: usdLong > usdShort + 1 ? 'strong' : usdShort > usdLong + 1 ? 'weak' : 'mixed' },
+    });
 
     return { detail: insights.slice(0, 8).join(' | '), result: 'success' };
   });
