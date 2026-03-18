@@ -113,8 +113,14 @@ export async function GET() {
     const realizedFromTrades = (closedData.trades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
     // Use the Alpaca-derived number (it's authoritative), but if internal tracking is higher, use that
     const realizedPnl = Math.abs(realizedFromAlpaca) > Math.abs(realizedFromTrades) ? realizedFromAlpaca : realizedFromTrades;
-    // Today's P&L from Alpaca (equity - last_equity)
-    const dayPnl = account.dayPnl || 0;
+    // Today's P&L — use Alpaca's dayPnl but reset after US market close (4 PM ET)
+    const now = new Date();
+    const etHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
+    const alpacaDayPnl = account.dayPnl || 0;
+    // After 4 PM ET and before midnight: Alpaca hasn't reset last_equity yet, so dayPnl is stale
+    // Show 0 for the new trading day until Alpaca resets (or until new trades generate P&L)
+    const isAfterClose = etHour >= 16;
+    const dayPnl = isAfterClose ? 0 : alpacaDayPnl;
     const dayPnlPercent = (account.lastEquity || 0) > 0 ? (dayPnl / account.lastEquity) * 100 : 0;
 
     // Performance stats

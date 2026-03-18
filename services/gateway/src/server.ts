@@ -2225,9 +2225,16 @@ async function start() {
           );
         }
 
-        // SPEC-005: Star Concentration — max 5 positions within $5K budget
-        // Only count positions under $2.5K (our budget positions, not legacy oversized ones)
-        const budgetPosCount = currentPositions.filter(p => Math.abs(p.marketValue) <= 2500).length;
+        // SPEC-005: Star Concentration — max 5 active positions
+        // Only count crypto positions outside market hours (equity pending liquidation)
+        const isCryptoPos2 = (t: string) => t.includes('USD') && t.length > 5;
+        const utcHour = new Date().getUTCHours();
+        const isUSMarketOpen = utcHour >= 14 && utcHour < 21; // 9:30 AM - 4 PM ET ≈ 14-21 UTC
+        const activeBudgetPositions = currentPositions.filter(p =>
+          Math.abs(p.marketValue) > 0 && Math.abs(p.marketValue) <= 2500
+          && (isUSMarketOpen || isCryptoPos2(p.ticker))
+        );
+        const budgetPosCount = activeBudgetPositions.length;
         if (budgetPosCount >= 5 && (signal.direction === 'buy' || signal.direction === 'short')) {
           details.push(`${signal.ticker} ${signal.direction.toUpperCase()} skipped — max 5 positions (star concentration)`);
           continue;
