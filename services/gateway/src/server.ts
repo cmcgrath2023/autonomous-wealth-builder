@@ -3398,6 +3398,139 @@ async function start() {
     };
   });
 
+  // ═══════════════════════════════════════════════════════════════════
+  // NEWS-DESK: EXECUTE CATALYSTS — turns intelligence into trades
+  // This is the action that closes the know-do gap.
+  // ═══════════════════════════════════════════════════════════════════
+  autonomyEngine.registerAction('news-desk', 'execute_catalysts', async () => {
+    // Read the latest news-desk report
+    const latestNews = researchReports.find(r => r.agent === 'news-desk');
+    if (!latestNews || !latestNews.findings || latestNews.findings.length === 0) {
+      return { detail: 'No news findings to act on', result: 'skipped' };
+    }
+
+    const actions: string[] = [];
+    const account = await executor.getAccount();
+    if (!account) return { detail: 'No broker connection', result: 'skipped' };
+
+    // Get current positions to avoid duplicates
+    const positions = await executor.getPositions();
+    const held = new Set(positions.map((p: any) => p.ticker));
+
+    // Catalyst → instrument mapping
+    const catalystPlays: Record<string, { symbols: string[]; reason: string }> = {
+      'oil': { symbols: ['XOM', 'HAL', 'CVX', 'KOS'], reason: 'Oil/energy catalyst' },
+      'crude': { symbols: ['USO', 'XOM'], reason: 'Crude oil move' },
+      'iran': { symbols: ['XOM', 'HAL', 'LMT', 'RTX'], reason: 'Iran geopolitical' },
+      'gold': { symbols: ['GLD', 'GDXJ'], reason: 'Gold catalyst' },
+      'aluminum': { symbols: ['AA'], reason: 'Aluminum catalyst' },
+      'copper': { symbols: ['FCX', 'COPX'], reason: 'Copper catalyst' },
+      'data center': { symbols: ['VRT', 'NRG', 'EQIX'], reason: 'Data center catalyst' },
+      'ai': { symbols: ['NVDA', 'NET', 'PLTR'], reason: 'AI catalyst' },
+      'defense': { symbols: ['LMT', 'RTX', 'NOC'], reason: 'Defense catalyst' },
+      'rare earth': { symbols: ['MP'], reason: 'Rare earth catalyst' },
+      'semiconductor': { symbols: ['MU', 'NVDA', 'AMD'], reason: 'Semiconductor catalyst' },
+      'cloudflare': { symbols: ['NET'], reason: 'Cloudflare specific catalyst' },
+      'micron': { symbols: ['MU'], reason: 'Micron specific catalyst' },
+    };
+
+    // Scan findings for catalysts
+    const toBuy = new Map<string, string>(); // symbol → reason
+    const allFindings = latestNews.findings.join(' ').toLowerCase();
+
+    for (const [keyword, play] of Object.entries(catalystPlays)) {
+      if (allFindings.includes(keyword)) {
+        for (const sym of play.symbols) {
+          if (!held.has(sym) && !toBuy.has(sym)) {
+            toBuy.set(sym, play.reason);
+          }
+        }
+      }
+    }
+
+    // Also check for BULLISH headlines with specific tickers
+    for (const finding of latestNews.findings) {
+      if (finding.includes('BULLISH')) {
+        const tickerMatch = finding.match(/\$([A-Z]{1,5})/g);
+        if (tickerMatch) {
+          for (const match of tickerMatch) {
+            const sym = match.replace('$', '');
+            if (sym.length >= 2 && sym.length <= 5 && !held.has(sym) && !toBuy.has(sym)) {
+              toBuy.set(sym, `Bullish headline: ${finding.substring(0, 60)}`);
+            }
+          }
+        }
+      }
+    }
+
+    if (toBuy.size === 0) {
+      return { detail: `Scanned ${latestNews.findings.length} findings — all catalyst plays already held or no actionable catalysts`, result: 'skipped' };
+    }
+
+    // Budget check: $8K simulated capital, don't exceed it
+    const currentDeployed = positions.reduce((s: number, p: any) => s + Math.abs(p.marketValue), 0);
+    const budget = 8000;
+    const remaining = Math.max(0, budget - currentDeployed);
+    if (remaining < 200) {
+      return { detail: `Budget full ($${currentDeployed.toFixed(0)}/$${budget} deployed) — ${toBuy.size} catalysts identified but no capital. Consider cutting losers.`, result: 'skipped' };
+    }
+
+    // Size positions proportionally to remaining budget, max 5 new per cycle
+    const maxNewPositions = Math.min(5, Math.floor(remaining / 200));
+    const positionSize = Math.min(800, Math.floor(remaining / Math.max(1, maxNewPositions)));
+    let placed = 0;
+
+    for (const [symbol, reason] of toBuy) {
+      if (placed >= maxNewPositions) break;
+
+      try {
+        // Get approximate price to calculate qty
+        const quote = midstream.getLatestQuote(symbol);
+        const price = quote?.price || 0;
+
+        if (price <= 0) {
+          // No price data — place a small market order and let Alpaca handle it
+          const qty = Math.max(1, Math.floor(positionSize / 100)); // estimate ~$100/share
+          const order = { ticker: symbol, direction: 'buy' as const, confidence: 0.7, pattern: 'catalyst', id: `catalyst-${symbol}-${Date.now()}` };
+          const result = await executor.execute(order, qty, positionSize);
+          actions.push(`BUY ${qty} ${symbol} (~$${positionSize}) — ${reason} [${result.status}]`);
+        } else {
+          const qty = Math.max(1, Math.floor(positionSize / price));
+          const order = { ticker: symbol, direction: 'buy' as const, confidence: 0.7, pattern: 'catalyst', id: `catalyst-${symbol}-${Date.now()}` };
+          const result = await executor.execute(order, qty, qty * price);
+          actions.push(`BUY ${qty} ${symbol} @ ~$${price.toFixed(2)} (~$${(qty * price).toFixed(0)}) — ${reason} [${result.status}]`);
+        }
+        placed++;
+      } catch (err: any) {
+        actions.push(`FAILED ${symbol}: ${err.message}`);
+      }
+    }
+
+    // Save what we did as a research report with strategy + result
+    saveResearchReport({
+      id: `catalyst-exec-${Date.now()}`,
+      agent: 'news-desk',
+      type: 'catalyst_execution',
+      timestamp: new Date().toISOString(),
+      summary: `Executed ${placed} catalyst trades from ${latestNews.findings.length} findings.`,
+      findings: actions,
+      signals: Array.from(toBuy.entries()).map(([sym, reason]) => ({
+        symbol: sym, direction: 'long', signal: 'BUY', detail: reason,
+      })),
+      strategy: {
+        action: `Deployed into ${placed} catalyst plays: ${Array.from(toBuy.keys()).slice(0, 5).join(', ')}`,
+        rationale: `News-desk identified ${toBuy.size} actionable catalysts from headlines. Auto-executing per macro events policy.`,
+        risk: 'Catalyst-driven entries can reverse if news narrative changes. Monitor positions.',
+      },
+      meta: { attempted: toBuy.size, placed, skippedAlreadyHeld: held.size },
+    });
+
+    return {
+      detail: `CATALYST TRADES: ${actions.join(' | ')}`,
+      result: placed > 0 ? 'success' : 'skipped',
+    };
+  });
+
   // Bayesian Intelligence — cross-agent shared learning
   autonomyEngine.registerAction('bayesian-intel', 'sync_intelligence', async () => {
     const tel = (step: string, data: Record<string, unknown> = {}) => {
@@ -4726,6 +4859,7 @@ async function start() {
   (autonomyEngine as any).actionPriority.set('forex-scanner:detect_closed_trades', 2);
   (autonomyEngine as any).actionPriority.set('forex-scanner:execute_forex', 5);
   (autonomyEngine as any).actionPriority.set('neural-trader:check_exits', 3);  // Bank crypto/equity profits early
+  (autonomyEngine as any).actionPriority.set('news-desk:execute_catalysts', 8); // After scan_feeds gathers intel, before scan_signals
   (autonomyEngine as any).actionPriority.set('neural-trader:scan_signals', 20);
 
   // RE Scout — scans for motivated seller listings every heartbeat
