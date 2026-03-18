@@ -2844,8 +2844,18 @@ async function start() {
                 // Unproven ticker penalty — require higher momentum to justify unknown risk
                 score -= 0.05;
               }
-              // Bayesian prefer bonus — tickers the system has learned are winners
-              if (adaptiveState.preferTickers.has(sym)) score += 0.10;
+              // Intelligence gate: with 84% stop-loss rate, only trade what the system KNOWS works
+              // Preferred tickers get a strong boost, non-preferred get a heavy penalty
+              if (adaptiveState.preferTickers.has(sym)) {
+                score += 0.15; // Strong boost for proven winners
+              } else if (prior && prior.observations >= 5 && prior.posterior < 0.45) {
+                // System has data and it's negative — hard block
+                console.log(`[Intelligence] ${sym} BLOCKED — Bayesian posterior ${(prior.posterior*100).toFixed(0)}% on ${prior.observations} obs`);
+                continue;
+              } else if (!prior || prior.observations < 3) {
+                // Unproven ticker — heavy penalty, require exceptional momentum
+                score -= 0.15;
+              }
 
               // ReasoningBank — proven patterns
               try {
@@ -2884,8 +2894,9 @@ async function start() {
               }
 
               // === ADAPTIVE THRESHOLD (learned from momentum_star domain outcomes) ===
-              const threshold = adaptiveState.momentumStarThreshold;
-              console.log(`[MomentumStar] ${sym} score=${score.toFixed(2)} (threshold ${threshold.toFixed(2)} [adaptive])`);
+              // Floor at 0.68 — with 40% win rate and 84% SL dominance, we need higher conviction
+              const threshold = Math.max(adaptiveState.momentumStarThreshold, 0.68);
+              console.log(`[MomentumStar] ${sym} score=${score.toFixed(2)} (threshold ${threshold.toFixed(2)} [adaptive, floor=0.68])`);
               if (score >= threshold) {
                 candidates.push({
                   symbol: sym,
@@ -3256,6 +3267,36 @@ async function start() {
     }
 
     tel('scan_complete', { totalItems, newAlerts, newTickers: newTickers.length, cacheSize: newsCache.size });
+
+    // Save full news digest as research report for human review + dashboard digest
+    const allCachedNews = Array.from(newsCache.values())
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 20);
+
+    const newsFindings = allCachedNews
+      .filter(n => n.sentiment !== 'neutral' || n.tickers.length > 0)
+      .map(n => `[${n.source}] ${n.sentiment.toUpperCase()}: ${n.headline.substring(0, 120)}${n.tickers.length > 0 ? ` | $${n.tickers.join(', $')}` : ''}`);
+
+    const newsSignals = allCachedNews
+      .filter(n => n.tickers.length > 0 && n.sentiment !== 'neutral')
+      .slice(0, 10)
+      .map(n => ({
+        symbol: n.tickers[0],
+        direction: n.sentiment === 'bullish' ? 'long' : 'short',
+        signal: n.sentiment === 'bullish' ? 'BUY' : 'SELL',
+        detail: n.headline.substring(0, 100),
+      }));
+
+    saveResearchReport({
+      id: `news-${Date.now()}`,
+      agent: 'news-desk',
+      type: 'market_intelligence',
+      timestamp: new Date().toISOString(),
+      summary: `${newAlerts} actionable alerts from ${totalItems} headlines. ${alerts.length > 0 ? alerts[0].substring(0, 100) : 'Monitoring feeds.'}`,
+      findings: [...alerts, ...newsFindings.slice(0, 15)],
+      signals: newsSignals,
+      meta: { totalItems, newAlerts, newTickers, cacheSize: newsCache.size },
+    });
 
     if (alerts.length === 0 && newTickers.length === 0) {
       return { detail: `Scanned ${totalItems} headlines across ${feeds.length} feeds — no new actionable signals`, result: 'skipped' };
@@ -4585,11 +4626,11 @@ async function start() {
   // Data feed first (5), Research (10), Closed-trade detection (12), Execution (15), Position management (16)
   (autonomyEngine as any).actionPriority.set('midstream-feed:refresh_quotes', 5);
   (autonomyEngine as any).actionPriority.set('research-agent:forex_strategic_research', 10);
-  (autonomyEngine as any).actionPriority.set('forex-scanner:detect_closed_trades', 12);
-  (autonomyEngine as any).actionPriority.set('forex-scanner:execute_forex', 15);
-  (autonomyEngine as any).actionPriority.set('forex-scanner:manage_positions', 16);
+  (autonomyEngine as any).actionPriority.set('forex-scanner:manage_positions', 1);  // HIGHEST: bank profits first
+  (autonomyEngine as any).actionPriority.set('forex-scanner:detect_closed_trades', 2);
+  (autonomyEngine as any).actionPriority.set('forex-scanner:execute_forex', 5);
+  (autonomyEngine as any).actionPriority.set('neural-trader:check_exits', 3);  // Bank crypto/equity profits early
   (autonomyEngine as any).actionPriority.set('neural-trader:scan_signals', 20);
-  (autonomyEngine as any).actionPriority.set('neural-trader:check_exits', 20);
 
   // RE Scout — scans for motivated seller listings every heartbeat
   autonomyEngine.registerAction('re-scout', 'scan_listings', async () => {

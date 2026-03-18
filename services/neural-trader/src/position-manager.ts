@@ -99,13 +99,15 @@ export class PositionManager {
 
   private getPressureThresholds(pressure: number) {
     return {
-      cryptoTrailActivation: lerp(0.03, 0.005, pressure),
-      cryptoTrailLow: lerp(0.015, 0.005, pressure),
-      cryptoTrailHigh: lerp(0.01, 0.003, pressure),
-      cryptoHighGainThreshold: lerp(0.06, 0.02, pressure),
-      cryptoHardCap: lerp(0.10, 0.04, pressure),
+      cryptoTrailActivation: lerp(0.03, 0.015, pressure), // Trail activates at 1.5-3%
+      cryptoTrailLow: lerp(0.015, 0.008, pressure),
+      cryptoTrailHigh: lerp(0.01, 0.005, pressure),
+      cryptoHighGainThreshold: lerp(0.06, 0.03, pressure),
+      cryptoHardCap: lerp(0.10, 0.05, pressure),           // Hard cap 5-10% (never below 5%)
       equityTakeProfit: lerp(0.08, 0.04, pressure),
-      microBankMin: pressure > 0.5 ? 10 : Infinity, // $10 min gain at high pressure
+      // Micro-bank disabled: $10 wins with $42 losses is inverted risk/reward.
+      // Let positions run to at least $30+ before considering early exit.
+      microBankMin: pressure > 0.8 ? 30 : Infinity,        // Only micro-bank at extreme pressure, min $30
     };
   }
 

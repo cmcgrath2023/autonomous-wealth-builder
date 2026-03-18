@@ -373,15 +373,35 @@ export class ForexScanner extends EventEmitter {
       throw new Error('OANDA not configured');
     }
 
+    const normalized = instrument.replace('/', '_');
+
+    // First check which direction the position is (long or short) to send the right close body
+    const posRes = await fetch(
+      `${this.oandaBaseUrl}/v3/accounts/${this.oandaAccountId}/positions/${normalized}`,
+      { headers: { Authorization: `Bearer ${this.oandaApiKey}` } }
+    );
+
+    let closeBody: Record<string, string> = { longUnits: 'ALL' }; // default to long
+    if (posRes.ok) {
+      const posData = await posRes.json() as any;
+      const longUnits = parseFloat(posData.position?.long?.units || '0');
+      const shortUnits = parseFloat(posData.position?.short?.units || '0');
+      if (Math.abs(shortUnits) > 0 && longUnits === 0) {
+        closeBody = { shortUnits: 'ALL' };
+      } else if (longUnits > 0 && Math.abs(shortUnits) > 0) {
+        closeBody = { longUnits: 'ALL', shortUnits: 'ALL' };
+      }
+    }
+
     const res = await fetch(
-      `${this.oandaBaseUrl}/v3/accounts/${this.oandaAccountId}/positions/${instrument.replace('/', '_')}/close`,
+      `${this.oandaBaseUrl}/v3/accounts/${this.oandaAccountId}/positions/${normalized}/close`,
       {
         method: 'PUT',
         headers: {
           Authorization: `Bearer ${this.oandaApiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ longUnits: 'ALL', shortUnits: 'ALL' }),
+        body: JSON.stringify(closeBody),
       }
     );
 

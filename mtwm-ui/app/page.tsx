@@ -13,6 +13,7 @@ import { SystemStatus } from '@/components/layout/SystemStatus';
 import { PortfolioTable } from '@/components/dashboard/PortfolioTable';
 import { DailyTargetTracker } from '@/components/dashboard/DailyTargetTracker';
 import { IntelligenceGrowth } from '@/components/dashboard/IntelligenceGrowth';
+import { ResearchDigest } from '@/components/dashboard/ResearchDigest';
 import { formatCurrency, formatPercent, formatRelativeTime } from '@/lib/utils/formatters';
 import { REFRESH_INTERVALS } from '@/lib/utils/constants';
 
@@ -152,12 +153,15 @@ export default function Dashboard() {
         unrealizedPnl={unrealizedPnl}
       />
 
-      {/* Decisions + Portfolio Table */}
+      {/* Research Digest + Decisions + Portfolio Table */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           <PortfolioTable assets={assets} />
         </div>
-        <DecisionQueue />
+        <div className="space-y-4">
+          <ResearchDigest />
+          <DecisionQueue />
+        </div>
       </div>
 
       {/* Intelligence Growth + Strategy */}
