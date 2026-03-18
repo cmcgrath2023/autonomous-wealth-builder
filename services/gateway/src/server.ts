@@ -3467,16 +3467,24 @@ async function start() {
       return { detail: `Scanned ${latestNews.findings.length} findings — all catalyst plays already held or no actionable catalysts`, result: 'skipped' };
     }
 
-    // Budget check: $8K simulated capital, don't exceed it
-    const currentDeployed = positions.reduce((s: number, p: any) => s + Math.abs(p.marketValue), 0);
+    // PANIC PROTOCOL: enforce hard limits before any trading
+    const activePositions = positions.filter((p: any) => Math.abs(p.marketValue) > 0);
+    const positionCount = activePositions.length;
+    const currentDeployed = activePositions.reduce((s: number, p: any) => s + Math.abs(p.marketValue), 0);
     const budget = 8000;
+    const maxPositions = 6;
+
+    if (positionCount >= maxPositions) {
+      return { detail: `Position limit (${positionCount}/${maxPositions}) — ${toBuy.size} catalysts identified but no slots. Cut losers first.`, result: 'skipped' };
+    }
     const remaining = Math.max(0, budget - currentDeployed);
     if (remaining < 200) {
-      return { detail: `Budget full ($${currentDeployed.toFixed(0)}/$${budget} deployed) — ${toBuy.size} catalysts identified but no capital. Consider cutting losers.`, result: 'skipped' };
+      return { detail: `Budget full ($${currentDeployed.toFixed(0)}/$${budget}) — ${toBuy.size} catalysts identified but no capital.`, result: 'skipped' };
     }
 
-    // Size positions proportionally to remaining budget, max 5 new per cycle
-    const maxNewPositions = Math.min(5, Math.floor(remaining / 200));
+    // Max 2 new positions per heartbeat, sized to remaining budget
+    const slotsAvailable = Math.min(2, maxPositions - positionCount);
+    const maxNewPositions = Math.min(slotsAvailable, Math.floor(remaining / 200));
     const positionSize = Math.min(800, Math.floor(remaining / Math.max(1, maxNewPositions)));
     let placed = 0;
 

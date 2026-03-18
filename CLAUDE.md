@@ -1,5 +1,32 @@
 # Claude Code Configuration - RuFlo V3
 
+## Trading Panic Protocol (ALWAYS CHECK BEFORE ANY TRADE)
+
+### Alpaca (US Equities + Crypto)
+- Max 6 positions. Count BEFORE buying.
+- Budget: $8K deployed max (2x margin on $4K). Check total deployed BEFORE every order.
+- SL dominance >70% → HALT all new entries
+- Only trade what Bayesian intelligence supports (prefer/avoid lists)
+- Catalysts required — no random momentum buys
+
+### OANDA (Forex)
+- Max 2 positions (adaptive intelligence limit)
+- Budget: $1K account, 25K units per trade at 25:1 leverage
+- Only trade Bayesian preferred pairs (currently EUR/JPY). Avoid blacklisted pairs (EUR/USD).
+- Bank profits at $50+ per position — manage_positions runs priority 1
+
+### When Things Go Wrong (STOP → ASSESS → ACT)
+1. **STOP** — Do NOT place more trades to "fix" the situation
+2. **ASSESS** — Count positions, total deployed vs budget, SL dominance, intelligence state
+3. **ACT** — Cut worst losers FIRST to get within budget. Only then consider new entries (max 2 per heartbeat).
+
+### NEVER
+- Place 10+ orders without checking results
+- Exceed budget "because we have buying power"
+- Let daily goal pressure override risk management
+- Sell winners to fund speculative losers
+- Buy without checking position count and budget first
+
 ## Behavioral Rules (Always Enforced)
 
 - Do what has been asked; nothing more, nothing less
