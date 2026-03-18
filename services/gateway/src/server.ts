@@ -3163,6 +3163,80 @@ async function start() {
       }
     }
 
+    // ===== ECONOMIC CALENDAR: Fed decisions, CPI, NFP, earnings =====
+    // Pull today's economic events so the system knows what's coming
+    try {
+      // Investing.com economic calendar RSS
+      const ecoResp = await fetch('https://www.investing.com/rss/economic_calendar.rss', {
+        headers: { 'User-Agent': 'MTWM-NewsDesk/1.0' },
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+
+      if (ecoResp?.ok) {
+        const ecoXml = await ecoResp.text();
+        const ecoItems = parseRSS(ecoXml).slice(0, 20);
+        const today = new Date().toISOString().split('T')[0];
+
+        for (const item of ecoItems) {
+          const isToday = item.pubDate && new Date(item.pubDate).toISOString().split('T')[0] === today;
+          if (!isToday) continue;
+
+          const isFed = /fed|fomc|powell|rate.?decision|dot.?plot/i.test(item.title);
+          const isCPI = /cpi|inflation|consumer.?price/i.test(item.title);
+          const isNFP = /nonfarm|payroll|employment|jobs/i.test(item.title);
+          const isOil = /oil|opec|crude|energy|iran|strait/i.test(item.title);
+          const isGold = /gold|precious|metals/i.test(item.title);
+
+          if (isFed || isCPI || isNFP || isOil || isGold) {
+            const priority = isFed ? 'CRITICAL' : 'HIGH';
+            alerts.unshift(`[ECON-${priority}] ${item.title.substring(0, 120)}`);
+          }
+        }
+      }
+    } catch {}
+
+    // Earnings calendar via Yahoo Finance
+    try {
+      const earningsResp = await fetch('https://feeds.finance.yahoo.com/rss/2.0/headline?s=earnings&region=US&lang=en-US', {
+        headers: { 'User-Agent': 'MTWM-NewsDesk/1.0' },
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+
+      if (earningsResp?.ok) {
+        const earningsXml = await earningsResp.text();
+        const earningsItems = parseRSS(earningsXml).slice(0, 15);
+        for (const item of earningsItems) {
+          const tickers = extractTickers(item.title + ' ' + item.description);
+          if (tickers.length > 0) {
+            const sentiment = detectSentiment(item.title);
+            const key = `earnings:${item.title.substring(0, 60)}`;
+            if (!newsCache.has(key)) {
+              newsCache.set(key, { headline: item.title, source: 'Earnings', tickers, sentiment, timestamp: Date.now() });
+              if (/beat|miss|surprise|guidance|outlook|record/i.test(item.title)) {
+                alerts.push(`[EARNINGS] ${sentiment.toUpperCase()}: ${item.title.substring(0, 100)} | $${tickers.join(', $')}`);
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+
+    // Hard-coded known events for today (backup if RSS feeds miss them)
+    const todayStr = new Date().toISOString().split('T')[0];
+    const knownEvents: Record<string, string[]> = {
+      '2026-03-18': [
+        '[ECON-CRITICAL] FOMC Rate Decision at 2:00 PM ET — Expected hold at 3.50-3.75%. Dot plot release.',
+        '[ECON-CRITICAL] Fed Chair Powell Press Conference at 2:30 PM ET — Watch for stagflation commentary.',
+        '[EARNINGS-HIGH] Micron (MU) Q2 earnings after close — stock up 92% in 90 days, options pricing 11% move.',
+        '[GEOPOLITICAL] Iran conflict: oil at $120, Strait of Hormuz disrupted. Watch USO, XOM, HAL.',
+      ],
+    };
+    for (const evt of (knownEvents[todayStr] || [])) {
+      if (!alerts.some(a => a.includes(evt.substring(20, 50)))) {
+        alerts.unshift(evt);
+      }
+    }
+
     // ===== PATTERN LEARNING: Scan top movers (5%+) and commit as training events =====
     // Any stock moving 5%+ today is a learning opportunity — store the catalyst + pattern in AgentDB
     try {
