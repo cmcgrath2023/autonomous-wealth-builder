@@ -3,50 +3,8 @@ import { NextResponse } from 'next/server';
 const GATEWAY = process.env.NEXT_PUBLIC_RUFLOW_URL || 'http://localhost:3001';
 const INITIAL_BALANCE = 100_000; // Paper account starting balance
 
-// Track equity at US market close (4 PM ET) for daily P&L reset
-// Stored in memory — resets on server restart, then recalibrates on next close
-let equityAtDayClose = 0;
-let lastCloseDate = '';
-
-function getUSMarketCloseEquity(currentEquity: number): { dayPnl: number; dayStart: number } {
-  const now = new Date();
-  // US market close = 4:00 PM ET = 20:00 UTC (21:00 during EDT)
-  // Determine if we're in EDT (March-November) or EST
-  const jan = new Date(now.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(now.getFullYear(), 6, 1).getTimezoneOffset();
-  const isDST = now.getTimezoneOffset() < Math.max(jan, jul);
-  const closeHourUTC = isDST ? 20 : 21; // 4 PM ET in UTC
-
-  // Build today's close time
-  const todayClose = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-    closeHourUTC, 0, 0
-  ));
-
-  // If we're past today's close, the "trading day" started at today's close
-  // If we're before today's close, the "trading day" started at yesterday's close
-  const isAfterClose = now >= todayClose;
-  const dayCloseDate = isAfterClose
-    ? todayClose.toISOString().split('T')[0]
-    : new Date(todayClose.getTime() - 86400000).toISOString().split('T')[0];
-
-  // If we just crossed a close boundary, snapshot current equity as the new day start
-  if (dayCloseDate !== lastCloseDate) {
-    if (equityAtDayClose > 0) {
-      // We had a previous snapshot — keep it as the reference for the new day
-      // The "new day" P&L = current equity - equity at last close
-    }
-    // First run or day rolled: use current equity as baseline
-    if (equityAtDayClose === 0) {
-      equityAtDayClose = currentEquity;
-    }
-    lastCloseDate = dayCloseDate;
-  }
-
-  // If close boundary just changed and we have Alpaca's last_equity, prefer that
-  const dayStart = equityAtDayClose > 0 ? equityAtDayClose : currentEquity;
-  return { dayPnl: currentEquity - dayStart, dayStart };
-}
+// Day P&L comes directly from Alpaca: equity - last_equity
+// Alpaca resets last_equity at their daily cycle. Simple and authoritative.
 
 const ASSET_META: Record<string, { name: string; category: string; lat: number; lng: number }> = {
   'AAPL': { name: 'Apple', category: 'equity', lat: 37.33, lng: -122.03 },
@@ -155,14 +113,9 @@ export async function GET() {
     const realizedFromTrades = (closedData.trades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
     // Use the Alpaca-derived number (it's authoritative), but if internal tracking is higher, use that
     const realizedPnl = Math.abs(realizedFromAlpaca) > Math.abs(realizedFromTrades) ? realizedFromAlpaca : realizedFromTrades;
-    // Today's P&L: reset at US market close (4 PM ET), not Alpaca's arbitrary last_equity
-    const equity = account.equity || totalValue;
-    const { dayPnl: computedDayPnl, dayStart } = getUSMarketCloseEquity(equity);
-    // Use our computed day P&L if we have a valid baseline, otherwise fall back to Alpaca
-    const dayPnl = dayStart > 0 && dayStart !== equity ? computedDayPnl : (account.dayPnl || 0);
-    const dayPnlPercent = dayStart > 0 ? (dayPnl / dayStart) * 100 : 0;
-    // Update close snapshot when equity changes (so next day reset is accurate)
-    equityAtDayClose = equity;
+    // Today's P&L from Alpaca (equity - last_equity)
+    const dayPnl = account.dayPnl || 0;
+    const dayPnlPercent = (account.lastEquity || 0) > 0 ? (dayPnl / account.lastEquity) * 100 : 0;
 
     // Performance stats
     const closedTrades = closedData.trades || [];
