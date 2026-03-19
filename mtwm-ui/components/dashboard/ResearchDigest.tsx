@@ -44,13 +44,13 @@ const SECTION_LABELS: Record<SectionKey, { title: string; icon: string }> = {
 
 function SignalBadge({ signal }: { signal: string }) {
   const color = signal === 'BUY' || signal === 'STRONG'
-    ? 'bg-green-500/20 text-green-400'
+    ? 'bg-green-500/20 text-green-400 border border-green-500/20'
     : signal === 'SELL'
-      ? 'bg-red-500/20 text-red-400'
+      ? 'bg-red-500/20 text-red-400 border border-red-500/20'
       : signal === 'MODERATE'
-        ? 'bg-amber-500/20 text-amber-400'
+        ? 'bg-amber-500/20 text-amber-400 border border-amber-500/20'
         : 'bg-white/10 text-white/40';
-  return <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${color}`}>{signal}</span>;
+  return <span className={`text-xs font-mono font-semibold px-2 py-0.5 rounded ${color}`}>{signal}</span>;
 }
 
 function timeAgo(ts: string | null): string {
@@ -63,13 +63,15 @@ function timeAgo(ts: string | null): string {
 
 function DigestSnippet({ sectionKey, section, onViewAll }: { sectionKey: SectionKey; section: DigestSection; onViewAll: () => void }) {
   const label = SECTION_LABELS[sectionKey];
-  const topSignals = section.signals.filter(s => s.signal !== 'WAIT' && s.signal !== 'WEAK').slice(0, 3);
+  // Show ALL actionable signals: BUY, SELL, STRONG, MODERATE
+  const topSignals = section.signals.filter(s => !['WAIT', 'WEAK', 'allocation'].includes(s.signal)).slice(0, 4);
   const hasContent = section.findings.length > 0 || section.signals.length > 0;
+  const actionableCount = topSignals.length;
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-white/50">{label.icon} {label.title}</span>
+        <span className="text-sm font-semibold text-white/60">{label.icon} {label.title}</span>
         {section.lastUpdated && (
           <span className="text-[10px] text-white/20">{timeAgo(section.lastUpdated)}</span>
         )}
@@ -77,21 +79,24 @@ function DigestSnippet({ sectionKey, section, onViewAll }: { sectionKey: Section
 
       {hasContent ? (
         <>
-          <p className="text-xs text-white/60 line-clamp-2">{section.summary}</p>
+          <p className="text-sm text-white/60 line-clamp-2">{section.summary}</p>
           {topSignals.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-2 mt-1">
               {topSignals.map((s, i) => (
-                <div key={i} className="flex items-center gap-1">
-                  <span className="text-[10px] font-mono text-white/50">{s.symbol}</span>
+                <div key={i} className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.03]">
+                  <span className="text-xs font-mono text-white/70">{s.symbol}</span>
                   <SignalBadge signal={s.signal} />
                 </div>
               ))}
+              {actionableCount > 0 && (
+                <span className="text-xs text-white/30 self-center">{actionableCount} actionable</span>
+              )}
             </div>
           )}
           {section.topPerformers.length > 0 && (
-            <div className="flex gap-2">
+            <div className="flex gap-3 mt-1">
               {section.topPerformers.slice(0, 2).map((p, i) => (
-                <span key={i} className="text-[10px] font-mono text-green-400/60">
+                <span key={i} className="text-xs font-mono text-green-400/60">
                   {p.ticker} {p.winRate}%W
                 </span>
               ))}
