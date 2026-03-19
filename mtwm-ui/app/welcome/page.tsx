@@ -1,20 +1,23 @@
 'use client';
 
+import { Button, Card, CardBody, Chip, Divider } from '@heroui/react';
+import Link from 'next/link';
+
 const features = [
   {
-    icon: '₿',
+    icon: '\u20BF',
     title: '24/7 Crypto Trading',
     description:
       'Autonomous crypto execution powered by Bayesian intelligence. Scans markets around the clock, enters and exits positions based on real-time signals.',
   },
   {
-    icon: '⇄',
+    icon: '\u21C4',
     title: 'Forex Automation',
     description:
       'Session-aware forex trading across major and minor pairs. Automatic take-profit, stop-loss management, and position sizing.',
   },
   {
-    icon: '⊙',
+    icon: '\u2299',
     title: 'AI Research & Intelligence',
     description:
       'Neural trader models, news-desk scanning, and deep research agents that continuously learn and adapt to market conditions.',
@@ -29,7 +32,7 @@ const plans = [
     description: 'Self-hosted, open source',
     cta: 'Self-Host on GitHub',
     ctaHref: 'https://github.com/mcgrath-trust/mtwm',
-    ctaStyle: 'outline' as const,
+    variant: 'bordered' as const,
     features: [
       'Full source code access',
       'Run on your own hardware',
@@ -45,7 +48,7 @@ const plans = [
     description: '3-day free trial',
     cta: 'Start Free Trial',
     ctaHref: '/signup',
-    ctaStyle: 'solid' as const,
+    variant: 'solid' as const,
     highlight: true,
     features: [
       'Managed cloud infrastructure',
@@ -63,7 +66,7 @@ const plans = [
     description: 'Coming soon',
     cta: 'Join Waitlist',
     ctaHref: '/signup',
-    ctaStyle: 'outline' as const,
+    variant: 'bordered' as const,
     features: [
       'Dedicated isolated instance',
       'Custom strategy configuration',
@@ -77,330 +80,113 @@ const plans = [
 
 export default function WelcomePage() {
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        background: '#0a0a0a',
-        color: '#fff',
-        fontFamily: '-apple-system, system-ui, sans-serif',
-      }}
-    >
+    <div className="min-h-screen bg-[#0a0a0a] text-white">
       {/* Nav */}
-      <header
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '20px 40px',
-          maxWidth: '1200px',
-          margin: '0 auto',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ color: '#60a5fa', fontSize: '22px', fontWeight: 700 }}>MTWM</span>
-        </div>
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-          <a
-            href="/login"
-            style={{
-              color: '#999',
-              textDecoration: 'none',
-              fontSize: '14px',
-            }}
-          >
+      <header className="flex items-center justify-between px-6 lg:px-10 py-5 max-w-[1200px] mx-auto">
+        <span className="text-blue-400 text-xl font-bold tracking-tight">MTWM</span>
+        <div className="flex items-center gap-3">
+          <Link href="/login" className="text-sm text-white/40 hover:text-white/70 transition-colors">
             Sign In
-          </a>
-          <a
-            href="/signup"
-            style={{
-              background: '#2563eb',
-              color: '#fff',
-              padding: '8px 20px',
-              borderRadius: '6px',
-              textDecoration: 'none',
-              fontSize: '14px',
-              fontWeight: 600,
-            }}
-          >
+          </Link>
+          <Button as={Link} href="/signup" color="primary" size="sm" radius="md">
             Start Free Trial
-          </a>
+          </Button>
         </div>
       </header>
 
       {/* Hero */}
-      <section
-        style={{
-          textAlign: 'center',
-          padding: '80px 24px 60px',
-          maxWidth: '800px',
-          margin: '0 auto',
-        }}
-      >
-        <h1
-          style={{
-            fontSize: '48px',
-            fontWeight: 700,
-            lineHeight: 1.1,
-            marginBottom: '16px',
-            letterSpacing: '-0.02em',
-          }}
-        >
-          <span style={{ color: '#60a5fa' }}>MTWM</span> — Autonomous{' '}
+      <section className="text-center px-6 pt-20 pb-16 max-w-[800px] mx-auto">
+        <h1 className="text-5xl lg:text-6xl font-bold leading-[1.1] tracking-tight mb-4">
+          <span className="text-blue-400">MTWM</span> — Autonomous
           <br />
           Wealth Engine
         </h1>
-        <p
-          style={{
-            fontSize: '18px',
-            color: '#888',
-            maxWidth: '560px',
-            margin: '0 auto 40px',
-            lineHeight: 1.6,
-          }}
-        >
+        <p className="text-lg text-white/40 max-w-[560px] mx-auto mb-10 leading-relaxed">
           AI-powered trading that runs 24/7. Crypto, forex, and equities managed
           by autonomous agents with Bayesian intelligence and neural models.
         </p>
-        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
-          <a
-            href="/signup"
-            style={{
-              background: '#2563eb',
-              color: '#fff',
-              padding: '14px 32px',
-              borderRadius: '8px',
-              textDecoration: 'none',
-              fontSize: '16px',
-              fontWeight: 600,
-            }}
-          >
+        <div className="flex gap-3 justify-center flex-wrap">
+          <Button as={Link} href="/signup" color="primary" size="lg" radius="md" className="font-semibold px-8">
             Start Free Trial
-          </a>
-          <a
-            href="https://github.com/mcgrath-trust/mtwm"
-            style={{
-              background: 'transparent',
-              color: '#ccc',
-              padding: '14px 32px',
-              borderRadius: '8px',
-              textDecoration: 'none',
-              fontSize: '16px',
-              fontWeight: 500,
-              border: '1px solid #333',
-            }}
-          >
+          </Button>
+          <Button as={Link} href="https://github.com/mcgrath-trust/mtwm" variant="bordered" size="lg" radius="md" className="font-medium px-8 text-white/60 border-white/10">
             Self-Host (Open Source)
-          </a>
+          </Button>
         </div>
       </section>
 
       {/* Features */}
-      <section
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: '24px',
-          maxWidth: '1000px',
-          margin: '0 auto',
-          padding: '40px 24px 80px',
-        }}
-      >
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-5 max-w-[1000px] mx-auto px-6 pb-20">
         {features.map((f) => (
-          <div
-            key={f.title}
-            style={{
-              background: '#111',
-              border: '1px solid #1a1a1a',
-              borderRadius: '12px',
-              padding: '28px',
-            }}
-          >
-            <div
-              style={{
-                fontSize: '28px',
-                marginBottom: '12px',
-              }}
-            >
-              {f.icon}
-            </div>
-            <h3
-              style={{
-                fontSize: '17px',
-                fontWeight: 600,
-                marginBottom: '8px',
-                color: '#e5e5e5',
-              }}
-            >
-              {f.title}
-            </h3>
-            <p style={{ fontSize: '14px', color: '#777', lineHeight: 1.6 }}>
-              {f.description}
-            </p>
-          </div>
+          <Card key={f.title} className="bg-white/5 border border-white/5">
+            <CardBody className="p-7">
+              <div className="text-3xl mb-3">{f.icon}</div>
+              <h3 className="text-base font-semibold text-white/90 mb-2">{f.title}</h3>
+              <p className="text-sm text-white/40 leading-relaxed">{f.description}</p>
+            </CardBody>
+          </Card>
         ))}
       </section>
 
+      <Divider className="max-w-[1100px] mx-auto bg-white/5" />
+
       {/* Pricing */}
-      <section
-        style={{
-          maxWidth: '1100px',
-          margin: '0 auto',
-          padding: '0 24px 100px',
-        }}
-      >
-        <h2
-          style={{
-            textAlign: 'center',
-            fontSize: '32px',
-            fontWeight: 700,
-            marginBottom: '12px',
-          }}
-        >
-          Pricing
-        </h2>
-        <p
-          style={{
-            textAlign: 'center',
-            color: '#777',
-            fontSize: '15px',
-            marginBottom: '48px',
-          }}
-        >
+      <section className="max-w-[1100px] mx-auto px-6 pt-16 pb-24">
+        <h2 className="text-center text-3xl font-bold mb-3">Pricing</h2>
+        <p className="text-center text-white/40 text-sm mb-12">
           Start free, upgrade when you need managed infrastructure.
         </p>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-            gap: '24px',
-          }}
-        >
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
           {plans.map((plan) => (
-            <div
+            <Card
               key={plan.name}
-              style={{
-                background: '#111',
-                border: plan.highlight ? '1px solid #2563eb' : '1px solid #1a1a1a',
-                borderRadius: '12px',
-                padding: '32px',
-                display: 'flex',
-                flexDirection: 'column',
-              }}
+              className={`bg-white/5 ${plan.highlight ? 'border-blue-500/50 border-2' : 'border border-white/5'}`}
             >
-              {plan.highlight && (
-                <div
-                  style={{
-                    color: '#60a5fa',
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                    marginBottom: '8px',
-                  }}
-                >
-                  Most Popular
+              <CardBody className="p-8 flex flex-col">
+                {plan.highlight && (
+                  <Chip size="sm" color="primary" variant="flat" className="mb-2 self-start">
+                    Most Popular
+                  </Chip>
+                )}
+                <h3 className="text-xl font-semibold text-white/90 mb-1">{plan.name}</h3>
+                <div className="mb-1">
+                  <span className="text-4xl font-bold">{plan.price}</span>
+                  <span className="text-sm text-white/40">{plan.period}</span>
                 </div>
-              )}
-              <h3
-                style={{
-                  fontSize: '20px',
-                  fontWeight: 600,
-                  marginBottom: '4px',
-                  color: '#e5e5e5',
-                }}
-              >
-                {plan.name}
-              </h3>
-              <div style={{ marginBottom: '4px' }}>
-                <span style={{ fontSize: '36px', fontWeight: 700 }}>{plan.price}</span>
-                <span style={{ fontSize: '14px', color: '#777' }}>{plan.period}</span>
-              </div>
-              <p
-                style={{
-                  fontSize: '13px',
-                  color: '#666',
-                  marginBottom: '24px',
-                }}
-              >
-                {plan.description}
-              </p>
-              <ul
-                style={{
-                  listStyle: 'none',
-                  padding: 0,
-                  margin: '0 0 28px',
-                  flex: 1,
-                }}
-              >
-                {plan.features.map((feat) => (
-                  <li
-                    key={feat}
-                    style={{
-                      fontSize: '14px',
-                      color: '#aaa',
-                      padding: '6px 0',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                    }}
-                  >
-                    <span style={{ color: '#2563eb', fontSize: '12px' }}>&#10003;</span>
-                    {feat}
-                  </li>
-                ))}
-              </ul>
-              <a
-                href={plan.ctaHref}
-                style={{
-                  display: 'block',
-                  textAlign: 'center',
-                  padding: '12px',
-                  borderRadius: '6px',
-                  textDecoration: 'none',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  background: plan.ctaStyle === 'solid' ? '#2563eb' : 'transparent',
-                  color: plan.ctaStyle === 'solid' ? '#fff' : '#ccc',
-                  border: plan.ctaStyle === 'solid' ? 'none' : '1px solid #333',
-                }}
-              >
-                {plan.cta}
-              </a>
-            </div>
+                <p className="text-xs text-white/30 mb-6">{plan.description}</p>
+                <ul className="space-y-2 flex-1 mb-7">
+                  {plan.features.map((feat) => (
+                    <li key={feat} className="flex items-center gap-2 text-sm text-white/50">
+                      <span className="text-blue-500 text-xs">{'\u2713'}</span>
+                      {feat}
+                    </li>
+                  ))}
+                </ul>
+                <Button
+                  as={Link}
+                  href={plan.ctaHref}
+                  color={plan.variant === 'solid' ? 'primary' : 'default'}
+                  variant={plan.variant === 'solid' ? 'solid' : 'bordered'}
+                  fullWidth
+                  radius="md"
+                  className={plan.variant !== 'solid' ? 'text-white/60 border-white/10' : 'font-semibold'}
+                >
+                  {plan.cta}
+                </Button>
+              </CardBody>
+            </Card>
           ))}
         </div>
       </section>
 
       {/* Footer */}
-      <footer
-        style={{
-          borderTop: '1px solid #1a1a1a',
-          padding: '32px 24px',
-          maxWidth: '1200px',
-          margin: '0 auto',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: '16px',
-        }}
-      >
-        <span style={{ color: '#444', fontSize: '13px' }}>
-          MTWM — McGrath Trust Wealth Management
-        </span>
-        <div style={{ display: 'flex', gap: '20px' }}>
-          <a href="/login" style={{ color: '#555', fontSize: '13px', textDecoration: 'none' }}>
-            Sign In
-          </a>
-          <a href="/signup" style={{ color: '#555', fontSize: '13px', textDecoration: 'none' }}>
-            Sign Up
-          </a>
-          <a
-            href="https://github.com/mcgrath-trust/mtwm"
-            style={{ color: '#555', fontSize: '13px', textDecoration: 'none' }}
-          >
-            GitHub
-          </a>
+      <Divider className="max-w-[1200px] mx-auto bg-white/5" />
+      <footer className="max-w-[1200px] mx-auto px-6 py-8 flex justify-between items-center flex-wrap gap-4">
+        <span className="text-xs text-white/20">MTWM — McGrath Trust Wealth Management</span>
+        <div className="flex gap-5">
+          <Link href="/login" className="text-xs text-white/25 hover:text-white/50 transition-colors">Sign In</Link>
+          <Link href="/signup" className="text-xs text-white/25 hover:text-white/50 transition-colors">Sign Up</Link>
+          <a href="https://github.com/mcgrath-trust/mtwm" className="text-xs text-white/25 hover:text-white/50 transition-colors">GitHub</a>
         </div>
       </footer>
     </div>
