@@ -9,7 +9,13 @@ export function middleware(request: NextRequest) {
   // Skip auth for login routes and static assets
   if (
     request.nextUrl.pathname === '/api/auth/login' ||
+    request.nextUrl.pathname === '/api/auth/signup' ||
+    request.nextUrl.pathname === '/api/auth/google' ||
+    request.nextUrl.pathname === '/api/auth/google/callback' ||
+    request.nextUrl.pathname === '/api/billing/webhook' ||
     request.nextUrl.pathname === '/login' ||
+    request.nextUrl.pathname === '/welcome' ||
+    request.nextUrl.pathname === '/signup' ||
     request.nextUrl.pathname.startsWith('/_next/') ||
     request.nextUrl.pathname.startsWith('/favicon') ||
     request.nextUrl.pathname.endsWith('.svg') ||

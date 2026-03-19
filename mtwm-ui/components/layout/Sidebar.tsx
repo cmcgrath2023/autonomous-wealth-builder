@@ -26,6 +26,8 @@ const navItems = [
   { href: '/agents', label: 'Agents', icon: '⬡' },
   { href: '/strategy', label: 'Strategy Guide', icon: '⧫' },
   { href: '/roadmap', label: 'Roadmap', icon: '⟿' },
+  { href: '/settings', label: 'Settings', icon: '⚙' },
+  { href: '/billing', label: 'Billing', icon: '⊞' },
 ];
 
 export function Sidebar() {
