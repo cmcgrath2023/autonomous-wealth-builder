@@ -2023,13 +2023,11 @@ async function start() {
     // Skip if already bootstrapped this session — prevents repeated fetches every heartbeat
     if (bootstrappedTickers.has(ticker)) return;
     bootstrapQueue.push(ticker);
-    // Debounce: flush after 500ms of no new tickers, or when queue hits 30
+    // NEVER await flush — always schedule it to avoid blocking HTTP server
+    // The gateway must stay responsive for trading operations (sell orders, position checks)
     if (bootstrapFlushTimer) clearTimeout(bootstrapFlushTimer);
-    if (bootstrapQueue.length >= 30) {
-      await flushBootstrapQueue();
-    } else {
-      bootstrapFlushTimer = setTimeout(() => flushBootstrapQueue(), 500);
-    }
+    const delay = bootstrapQueue.length >= 30 ? 10 : 500;
+    bootstrapFlushTimer = setTimeout(() => flushBootstrapQueue(), delay);
   }
   // Expose for use by analyst agent
   (app as any)._bootstrapTicker = bootstrapTicker;
