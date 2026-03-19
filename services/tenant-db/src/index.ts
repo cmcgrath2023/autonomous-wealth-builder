@@ -37,6 +37,8 @@ export interface CreateTenantInput {
   id: string;
   email: string;
   name: string;
+  password_hash?: string;
+  google_id?: string;
   tier?: 'free' | 'hosted' | 'pro';
   trialDays?: number;
 }
@@ -173,11 +175,26 @@ export class TenantDB {
     }
 
     this.db.prepare(`
-      INSERT INTO tenants (id, email, name, tier, trial_ends_at, subscription_status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(input.id, input.email, input.name, tier, trialEndsAt, subscriptionStatus, now, now);
+      INSERT INTO tenants (id, email, name, password_hash, google_id, tier, trial_ends_at, subscription_status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(input.id, input.email, input.name, input.password_hash || '', input.google_id || null, tier, trialEndsAt, subscriptionStatus, now, now);
 
     return this.getTenant(input.id)!;
+  }
+
+  updateTenant(id: string, updates: Partial<Pick<TenantRow, 'name' | 'tier' | 'trial_ends_at' | 'subscription_status' | 'password_hash' | 'google_id'>>): TenantRow | null {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    for (const [key, val] of Object.entries(updates)) {
+      fields.push(`${key} = ?`);
+      values.push(val);
+    }
+    if (fields.length === 0) return this.getTenant(id);
+    fields.push('updated_at = ?');
+    values.push(new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE tenants SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getTenant(id);
   }
 
   getTenant(id: string): TenantRow | null {
@@ -188,6 +205,15 @@ export class TenantDB {
   getTenantByEmail(email: string): TenantRow | null {
     const row = this.db.prepare('SELECT * FROM tenants WHERE email = ?').get(email) as TenantRow | undefined;
     return row ?? null;
+  }
+
+  getTenantByGoogleId(googleId: string): TenantRow | null {
+    const row = this.db.prepare('SELECT * FROM tenants WHERE google_id = ?').get(googleId) as TenantRow | undefined;
+    return row ?? null;
+  }
+
+  deleteTenantCredentials(tenantId: string, broker: string): void {
+    this.db.prepare('DELETE FROM tenant_credentials WHERE tenant_id = ? AND broker = ?').run(tenantId, broker);
   }
 
   getActiveTenants(): TenantRow[] {

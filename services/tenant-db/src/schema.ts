@@ -13,6 +13,8 @@ export interface TenantRow {
   id: string;
   email: string;
   name: string;
+  password_hash: string;
+  google_id: string | null;
   tier: 'free' | 'hosted' | 'pro';
   trial_ends_at: string | null;
   subscription_status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'none';
@@ -95,6 +97,8 @@ export const TABLE_TENANTS = `
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
+    password_hash TEXT NOT NULL DEFAULT '',
+    google_id TEXT,
     tier TEXT NOT NULL DEFAULT 'hosted',
     trial_ends_at TEXT,
     subscription_status TEXT NOT NULL DEFAULT 'trialing',
