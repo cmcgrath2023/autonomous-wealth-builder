@@ -23,6 +23,7 @@ import { AutonomyEngine } from './autonomy-engine.js';
 import { RealEstateEvaluator } from '../../realestate/src/evaluator.js';
 import { RE_AGENT_ROSTER } from '../../realestate/src/agent-roster.js';
 import { StrategicPlanner } from '../../mincut/src/strategic-planner.js';
+import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { initAgentMemory, queryPatterns, queryEpisodes, querySkills, getMemoryStats, getAgentDB, type TradingPattern } from '../../shared/intelligence/agent-memory.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
@@ -2441,6 +2442,108 @@ async function start() {
     };
   });
 
+  // ── Daily Strategy Optimizer — "What should we do TODAY to hit $500?" ──
+  const dailyOptimizer = new DailyOptimizer();
+  let currentDailyStrategy: ReturnType<DailyOptimizer['optimize']> | null = null;
+
+  autonomyEngine.registerAction('mincut-optimizer', 'daily_strategy', async () => {
+    const account = await executor.getAccount();
+    if (!account) return { detail: 'No broker connection', result: 'skipped' };
+
+    const positions = await executor.getPositions();
+    const forexPositions = await (async () => {
+      try {
+        const res = await fetch('http://localhost:3003/api/forex/positions');
+        if (!res.ok) return [];
+        const data = await res.json() as any;
+        return (data.positions || []).map((p: any) => ({
+          instrument: p.instrument,
+          pnl: p.unrealizedPL || 0,
+          direction: p.direction || 'long',
+        }));
+      } catch { return []; }
+    })();
+
+    // Determine market condition from crypto movers
+    const cryptoMovers: Array<{ pct: number }> = [];
+    try {
+      const latestCrypto = researchReports.find(r => r.agent === 'crypto-researcher');
+      if (latestCrypto?.signals) {
+        for (const s of latestCrypto.signals) {
+          const pct = parseFloat(s.detail.match(/([+-]?\d+\.?\d*)%/)?.[1] || '0');
+          if (pct !== 0) cryptoMovers.push({ pct });
+        }
+      }
+    } catch {}
+
+    const dayPnl = account.dayPnl || 0;
+    const utcH = new Date().getUTCHours();
+    const sessions: string[] = [];
+    if (utcH >= 0 && utcH < 9) sessions.push('TOKYO');
+    if (utcH >= 7 && utcH < 16) sessions.push('LONDON');
+    if (utcH >= 13 && utcH < 22) sessions.push('NEW_YORK');
+    if (utcH >= 21 || utcH < 6) sessions.push('SYDNEY');
+
+    const strategy = dailyOptimizer.optimize({
+      budget: 8000,
+      dailyGoal: 500,
+      currentDayPnl: dayPnl,
+      positions: positions.map((p: any) => ({
+        ticker: p.ticker,
+        value: Math.abs(p.marketValue),
+        pnl: p.unrealizedPnl,
+        pnlPct: p.unrealizedPnlPercent / 100,
+        isCrypto: p.ticker.includes('USD') && p.ticker.length > 5,
+      })),
+      forexPositions,
+      bayesianPrefer: Array.from(adaptiveState.preferTickers),
+      bayesianAvoid: Array.from(adaptiveState.avoidTickers),
+      slDominance: adaptiveState.stopLossDominance,
+      marketCondition: getMarketCondition(cryptoMovers),
+      activeSessions: sessions,
+      cryptoMarketBias: getMarketCondition(cryptoMovers),
+    });
+
+    currentDailyStrategy = strategy;
+
+    // Save strategy as research report for dashboard
+    saveResearchReport({
+      id: `strategy-${Date.now()}`,
+      agent: 'mincut-optimizer',
+      type: 'daily_strategy',
+      timestamp: strategy.timestamp,
+      summary: strategy.narrative,
+      findings: strategy.actions,
+      signals: Object.entries(strategy.allocations)
+        .filter(([, v]) => v.pct > 0)
+        .map(([k, v]) => ({
+          symbol: k.toUpperCase(),
+          direction: 'allocation',
+          signal: `${v.pct}%`,
+          detail: v.rationale,
+        })),
+      strategy: {
+        action: `${strategy.approach.toUpperCase()} mode. Remaining: $${strategy.remainingGoal.toFixed(0)}. Risk budget: $${strategy.riskBudget.toFixed(0)}.`,
+        rationale: strategy.narrative,
+        risk: `Max loss today: $${strategy.riskBudget.toFixed(0)}. Max ${strategy.maxNewPositions} new positions. TP target: $${strategy.takeProfitTarget.toFixed(0)}/pos.`,
+      },
+      meta: { approach: strategy.approach, allocations: strategy.allocations, remainingGoal: strategy.remainingGoal },
+    });
+
+    return {
+      detail: `DAILY STRATEGY: ${strategy.approach.toUpperCase()} | Goal: $${strategy.remainingGoal.toFixed(0)} remaining | ${strategy.actions.slice(0, 3).join(' | ')}`,
+      result: 'success',
+    };
+  });
+
+  // Expose daily strategy for neural trader to read
+  (app as any)._dailyStrategy = () => currentDailyStrategy;
+
+  // API endpoint for dashboard
+  app.get('/api/strategy/daily', (_req, res) => {
+    res.json(currentDailyStrategy || { approach: 'pending', narrative: 'Waiting for first heartbeat...' });
+  });
+
   // Analyst Agent — 24/7 BROAD market scanner
   // Scans hundreds of symbols across every asset class to find the best setups.
   // Sources: Alpaca screeners (most-active, top movers), sector ETFs, full commodity/metal/energy universe,
@@ -4741,6 +4844,7 @@ async function start() {
   (autonomyEngine as any).actionPriority.set('forex-scanner:execute_forex', 5);
   (autonomyEngine as any).actionPriority.set('neural-trader:check_exits', 3);  // Bank crypto/equity profits early
   // execute_catalysts removed — neural trader is the sole execution engine
+  (autonomyEngine as any).actionPriority.set('mincut-optimizer:daily_strategy', 6); // Optimize BEFORE scanning
   (autonomyEngine as any).actionPriority.set('neural-trader:scan_signals', 20);
 
   // RE Scout — scans for motivated seller listings every heartbeat
