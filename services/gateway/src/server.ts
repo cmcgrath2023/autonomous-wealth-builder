@@ -2963,8 +2963,14 @@ async function start() {
                 console.log(`[Intelligence] ${sym} BLOCKED — Bayesian posterior ${(prior.posterior*100).toFixed(0)}% on ${prior.observations} obs`);
                 continue;
               } else if (!prior || prior.observations < 3) {
-                // Unproven ticker — heavy penalty, require exceptional momentum
-                score -= 0.15;
+                // Unproven ticker — penalty unless backed by news catalyst (researchStars)
+                const hasNewsCatalyst = researchData?.catalyst?.startsWith('NEWS:') || researchData?.catalyst?.startsWith('BULLISH:');
+                if (hasNewsCatalyst) {
+                  // News-backed catalyst: no penalty, catalyst IS the evidence
+                  score += 0.05;
+                } else {
+                  score -= 0.15;
+                }
               }
 
               // ReasoningBank — proven patterns
