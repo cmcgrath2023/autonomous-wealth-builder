@@ -3259,6 +3259,51 @@ async function start() {
 
         if (isHighPriority) {
           alerts.push(`[${feed}] ${sentiment.toUpperCase()}: ${item.title.substring(0, 100)}${tickers.length > 0 ? ` | $${tickers.join(', $')}` : ''}`);
+
+          // PROMOTE catalyst tickers to research stars so neural trader acts on them
+          // This closes the know-do gap: news → stars → neural trader → trade
+          const catalystMap: Record<string, string[]> = {
+            oil: ['XOM', 'HAL', 'CVX', 'KOS', 'USO'],
+            crude: ['USO', 'XOM'],
+            iran: ['XOM', 'HAL', 'LMT', 'RTX'],
+            gold: ['GLD', 'GDXJ'],
+            aluminum: ['AA'],
+            copper: ['FCX'],
+            'data center': ['VRT', 'NRG', 'EQIX'],
+            semiconductor: ['MU', 'NVDA', 'AMD'],
+            defense: ['LMT', 'RTX', 'NOC'],
+          };
+          const lowerText = fullText.toLowerCase();
+          for (const [keyword, syms] of Object.entries(catalystMap)) {
+            if (lowerText.includes(keyword)) {
+              for (const sym of syms) {
+                if (!researchStars.has(sym)) {
+                  researchStars.set(sym, {
+                    symbol: sym,
+                    sector: keyword.includes('oil') || keyword.includes('crude') ? 'Energy' : keyword.includes('gold') ? 'Metals' : keyword.includes('defense') || keyword.includes('iran') ? 'Defense' : 'Catalyst',
+                    catalyst: `NEWS: ${item.title.substring(0, 80)}`,
+                    score: sentiment === 'bullish' ? 0.75 : 0.60,
+                    timestamp: Date.now(),
+                  });
+                }
+              }
+            }
+          }
+
+          // Also promote any directly mentioned tickers with bullish sentiment
+          if (sentiment === 'bullish') {
+            for (const ticker of tickers) {
+              if (ticker.length >= 2 && ticker.length <= 5 && !researchStars.has(ticker)) {
+                researchStars.set(ticker, {
+                  symbol: ticker,
+                  sector: 'News',
+                  catalyst: `BULLISH: ${item.title.substring(0, 80)}`,
+                  score: 0.70,
+                  timestamp: Date.now(),
+                });
+              }
+            }
+          }
         }
 
         // Add newly discovered tickers to watchlist
