@@ -3042,10 +3042,12 @@ async function start() {
             // Equity gate: only truly exceptional setups (score > 0.80) — no routine blue-chip momentum
             const exceptionalEquity = equityCandidates.filter(c => c.score >= 0.80);
 
-            // Fill crypto first, equity only gets leftovers AND only if exceptional
+            // Fill crypto first, then equity gets unfilled slots (if exceptional)
             const selectedCrypto = cryptoCandidates.slice(0, Math.min(cryptoSlots, slotsAvailable));
             const remainingSlots = slotsAvailable - selectedCrypto.length;
-            const selectedEquity = exceptionalEquity.slice(0, Math.min(equitySlots, remainingSlots));
+            // When crypto has no candidates, equity can use ALL remaining slots (not just 1)
+            const effectiveEquitySlots = selectedCrypto.length === 0 ? Math.min(3, remainingSlots) : Math.min(equitySlots, remainingSlots);
+            const selectedEquity = exceptionalEquity.slice(0, effectiveEquitySlots);
             candidates.length = 0;
             candidates.push(...selectedCrypto, ...selectedEquity);
             console.log(`[MomentumStar] Crypto-dominant: ${selectedCrypto.length} crypto (${cryptoSlots} slots), ${selectedEquity.length} equity (${equitySlots} slots, ${equityCandidates.length} candidates, ${exceptionalEquity.length} exceptional)`);
