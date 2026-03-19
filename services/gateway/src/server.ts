@@ -3039,8 +3039,8 @@ async function start() {
             const cryptoSlots = Math.max(0, Math.ceil(maxPos * 0.9) - existingCrypto);
             const equitySlots = Math.min(1, Math.max(0, slotsAvailable - cryptoSlots));
 
-            // Equity gate: only truly exceptional setups (score > 0.80) — no routine blue-chip momentum
-            const exceptionalEquity = equityCandidates.filter(c => c.score >= 0.80);
+            // Equity gate: solid setups with catalyst backing (score > 0.68, same as crypto threshold)
+            const exceptionalEquity = equityCandidates.filter(c => c.score >= 0.68);
 
             // Fill crypto first, then equity gets unfilled slots (if exceptional)
             const selectedCrypto = cryptoCandidates.slice(0, Math.min(cryptoSlots, slotsAvailable));
