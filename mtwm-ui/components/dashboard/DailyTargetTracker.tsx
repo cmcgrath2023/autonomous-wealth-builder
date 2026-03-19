@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect, useCallback } from 'react';
 import { Card, CardBody } from '@heroui/react';
 import { formatCurrency } from '@/lib/utils/formatters';
 
@@ -9,7 +10,21 @@ interface DailyTargetTrackerProps {
   unrealizedPnl: number;
 }
 
+type Period = 'today' | 'yesterday' | 'week' | 'month';
+
 const DAILY_GOAL = 500;
+const PERIOD_LABELS: Record<Period, string> = {
+  today: 'Today',
+  yesterday: 'Yesterday',
+  week: 'Last 7 Days',
+  month: 'Last 30 Days',
+};
+const PERIOD_GOALS: Record<Period, number> = {
+  today: 500,
+  yesterday: 500,
+  week: 3500,
+  month: 15000,
+};
 
 // SVG circular progress bar
 function CircularProgress({ percent, size = 140, stroke = 10, color }: { percent: number; size?: number; stroke?: number; color: string }) {
@@ -47,11 +62,41 @@ function CircularProgress({ percent, size = 140, stroke = 10, color }: { percent
 }
 
 export function DailyTargetTracker({ dayPnl, realizedPnl, unrealizedPnl }: DailyTargetTrackerProps) {
-  const progressPct = Math.max(0, (dayPnl / DAILY_GOAL) * 100);
-  const goalMet = dayPnl >= DAILY_GOAL;
-  const isPositive = dayPnl > 0;
-  const surplus = dayPnl - DAILY_GOAL;
-  const remaining = Math.max(0, DAILY_GOAL - dayPnl);
+  const [period, setPeriod] = useState<Period>('today');
+  const [historicalPnl, setHistoricalPnl] = useState<Record<string, number>>({});
+
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/profit');
+      if (!res.ok) return;
+      const data = await res.json();
+      const days = data.days || [];
+      const today = new Date().toISOString().split('T')[0];
+      const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+      const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+
+      const yesterdayPnl = days.find((d: any) => d.date === yesterday)?.pnl || 0;
+      const weekPnl = days.filter((d: any) => d.date >= weekAgo).reduce((s: number, d: any) => s + (d.pnl || 0), 0);
+      const monthPnl = days.filter((d: any) => d.date >= monthAgo).reduce((s: number, d: any) => s + (d.pnl || 0), 0);
+
+      setHistoricalPnl({ yesterday: yesterdayPnl, week: weekPnl, month: monthPnl });
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchHistory(); }, [fetchHistory]);
+
+  const goal = PERIOD_GOALS[period];
+  const displayPnl = period === 'today' ? dayPnl
+    : period === 'yesterday' ? historicalPnl.yesterday || 0
+    : period === 'week' ? historicalPnl.week || 0
+    : historicalPnl.month || 0;
+
+  const progressPct = Math.max(0, (displayPnl / goal) * 100);
+  const goalMet = displayPnl >= goal;
+  const isPositive = displayPnl > 0;
+  const surplus = displayPnl - goal;
+  const remaining = Math.max(0, goal - displayPnl);
 
   // Ring color
   const ringColor = goalMet
@@ -93,8 +138,23 @@ export function DailyTargetTracker({ dayPnl, realizedPnl, unrealizedPnl }: Daily
 
           {/* Right side: numbers */}
           <div className="flex-1 min-w-0">
+            {/* Period filter */}
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-semibold text-white/60">Daily Cash Goal</h3>
+              <div className="flex items-center gap-1.5">
+                {(['today', 'yesterday', 'week', 'month'] as Period[]).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setPeriod(p)}
+                    className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                      period === p
+                        ? 'bg-blue-500/20 text-blue-400'
+                        : 'text-white/30 hover:text-white/50'
+                    }`}
+                  >
+                    {PERIOD_LABELS[p]}
+                  </button>
+                ))}
+              </div>
               {goalMet && (
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-green-500/20 text-green-400 uppercase tracking-wide">
                   Goal Met
@@ -102,12 +162,12 @@ export function DailyTargetTracker({ dayPnl, realizedPnl, unrealizedPnl }: Daily
               )}
             </div>
 
-            {/* Day P&L — the big number */}
+            {/* P&L — the big number */}
             <div className="flex items-baseline gap-2 mb-3">
-              <span className={`text-3xl font-mono font-bold ${isPositive ? 'text-green-400' : dayPnl < 0 ? 'text-red-400' : 'text-white/60'}`}>
-                {dayPnl >= 0 ? '+' : ''}{formatCurrency(dayPnl)}
+              <span className={`text-3xl font-mono font-bold ${isPositive ? 'text-green-400' : displayPnl < 0 ? 'text-red-400' : 'text-white/60'}`}>
+                {displayPnl >= 0 ? '+' : ''}{formatCurrency(displayPnl)}
               </span>
-              <span className="text-sm text-white/30 font-mono">/ {formatCurrency(DAILY_GOAL)}</span>
+              <span className="text-sm text-white/30 font-mono">/ {formatCurrency(goal)}</span>
             </div>
 
             {/* Surplus banner when over goal */}
