@@ -2966,9 +2966,13 @@ async function start() {
                 // Unproven ticker — penalty unless backed by news catalyst (researchStars)
                 const hasNewsCatalyst = researchData?.catalyst?.startsWith('NEWS:') || researchData?.catalyst?.startsWith('BULLISH:');
                 if (hasNewsCatalyst) {
-                  // News-backed catalyst: no penalty, catalyst IS the evidence
+                  // News-backed catalyst: boost to ensure they rank above random momentum
+                  score += 0.15;
+                } else if (researchData) {
+                  // Has research backing but not news — small boost
                   score += 0.05;
                 } else {
+                  // Truly unproven random ticker — penalize
                   score -= 0.15;
                 }
               }
@@ -3290,7 +3294,7 @@ async function start() {
                     symbol: sym,
                     sector: keyword.includes('oil') || keyword.includes('crude') ? 'Energy' : keyword.includes('gold') ? 'Metals' : keyword.includes('defense') || keyword.includes('iran') ? 'Defense' : 'Catalyst',
                     catalyst: `NEWS: ${item.title.substring(0, 80)}`,
-                    score: sentiment === 'bullish' ? 0.75 : 0.60,
+                    score: sentiment === 'bullish' ? 0.85 : 0.70,
                     timestamp: Date.now(),
                   });
                 }
