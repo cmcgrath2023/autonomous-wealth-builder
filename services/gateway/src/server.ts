@@ -4602,8 +4602,8 @@ async function start() {
   //   4. Record star patterns in ReasoningBank so we find more of them
   autonomyEngine.registerAction('forex-scanner', 'manage_positions', async () => {
     const openTrades = await forexScanner.getOpenTrades();
-    if (openTrades.length < 2) {
-      return { detail: `Position mgmt: ${openTrades.length} positions — no management needed`, result: 'skipped' };
+    if (openTrades.length === 0) {
+      return { detail: 'No forex positions to manage', result: 'skipped' };
     }
 
     // Classify each position
@@ -4615,6 +4615,34 @@ async function start() {
       pl: parseFloat(t.unrealizedPL || '0'),
       openTime: t.openTime,
     }));
+
+    // Single position management — cut solo losers that exceed threshold
+    if (positions.length === 1) {
+      const solo = positions[0];
+      // Cut if losing more than $20 (clear loser, free capital for better entry)
+      if (solo.pl < -20) {
+        try {
+          const symbol = solo.instrument.replace('_', '/');
+          await forexScanner.closePosition(symbol);
+          bayesianIntel.recordOutcome(`forex_pair_${symbol}_${solo.units > 0 ? 'long' : 'short'}`, { domain: 'forex_pair', subject: symbol, tags: ['forex', 'cut_loser'], contributors: ['position-mgmt'] }, false, solo.pl);
+          return { detail: `CUT solo loser ${symbol} at $${solo.pl.toFixed(2)} — freeing capital for better setup`, result: 'success' };
+        } catch (err: any) {
+          return { detail: `Failed to cut ${solo.instrument}: ${err.message}`, result: 'error' };
+        }
+      }
+      // Bank if winning $50+
+      if (solo.pl >= 50) {
+        try {
+          const symbol = solo.instrument.replace('_', '/');
+          await forexScanner.closePosition(symbol);
+          bayesianIntel.recordOutcome(`forex_pair_${symbol}_${solo.units > 0 ? 'long' : 'short'}`, { domain: 'forex_pair', subject: symbol, tags: ['forex', 'take_profit'], contributors: ['position-mgmt'] }, true, solo.pl);
+          return { detail: `BANKED solo winner ${symbol} at +$${solo.pl.toFixed(2)}`, result: 'success' };
+        } catch (err: any) {
+          return { detail: `Failed to bank ${solo.instrument}: ${err.message}`, result: 'error' };
+        }
+      }
+      return { detail: `Solo position ${solo.instrument.replace('_', '/')} at $${solo.pl.toFixed(2)} — holding (cut at -$20, bank at +$50)`, result: 'skipped' };
+    }
 
     // Find the star (best P&L) and dogs (negative P&L)
     positions.sort((a, b) => b.pl - a.pl);
