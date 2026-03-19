@@ -24,6 +24,8 @@ import { RealEstateEvaluator } from '../../realestate/src/evaluator.js';
 import { RE_AGENT_ROSTER } from '../../realestate/src/agent-roster.js';
 import { StrategicPlanner } from '../../mincut/src/strategic-planner.js';
 import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
+import { MarketFACTCache } from '../../shared/src/fact-cache.js';
+import { createSectorResearchActions } from './sector-research.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { initAgentMemory, queryPatterns, queryEpisodes, querySkills, getMemoryStats, getAgentDB, type TradingPattern } from '../../shared/intelligence/agent-memory.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
@@ -4926,6 +4928,22 @@ async function start() {
   (autonomyEngine as any).actionPriority.set('forex-scanner:detect_closed_trades', 2);
   (autonomyEngine as any).actionPriority.set('forex-scanner:execute_forex', 5);
   (autonomyEngine as any).actionPriority.set('neural-trader:check_exits', 3);  // Bank crypto/equity profits early
+  // FACT Cache + Sector Research — focused scanning for Energy, Defense, Metals, AI, Crypto
+  const marketFACTCache = new MarketFACTCache();
+  const sectorActions = createSectorResearchActions({
+    factCache: marketFACTCache,
+    researchStars,
+    midstream,
+    bayesianIntel,
+    saveResearchReport,
+  });
+  for (const [actionKey, actionFn] of Object.entries(sectorActions)) {
+    const [agentId, actionName] = actionKey.split(':');
+    autonomyEngine.registerAction(agentId, actionName, actionFn);
+    (autonomyEngine as any).actionPriority.set(actionKey, 7); // After exits, before scanning
+  }
+  console.log(`[✓] Sector Research — ${Object.keys(sectorActions).length} sector actions registered with FACT cache`);
+
   // execute_catalysts removed — neural trader is the sole execution engine
   (autonomyEngine as any).actionPriority.set('mincut-optimizer:daily_strategy', 6); // Optimize BEFORE scanning
   (autonomyEngine as any).actionPriority.set('neural-trader:scan_signals', 20);
