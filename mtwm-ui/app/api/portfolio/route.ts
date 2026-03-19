@@ -53,12 +53,13 @@ const ASSET_META: Record<string, { name: string; category: string; lat: number; 
 
 export async function GET() {
   try {
-    const [accountRes, positionsRes, closedRes, autonomyRes, perfRes] = await Promise.all([
+    const [accountRes, positionsRes, closedRes, autonomyRes, perfRes, forexRes] = await Promise.all([
       fetch(`${GATEWAY}/api/broker/account`),
       fetch(`${GATEWAY}/api/broker/positions`),
       fetch(`${GATEWAY}/api/positions/closed?limit=100`).catch(() => null),
       fetch(`${GATEWAY}/api/autonomy/status`).catch(() => null),
       fetch(`${GATEWAY}/api/positions/performance`).catch(() => null),
+      fetch('http://localhost:3003/api/forex/positions').catch(() => null),
     ]);
 
     const account = await accountRes.json();
@@ -66,6 +67,7 @@ export async function GET() {
     const closedData = closedRes?.ok ? await closedRes.json() : { trades: [] };
     const autonomyData = autonomyRes?.ok ? await autonomyRes.json() : null;
     const perfData = perfRes?.ok ? await perfRes.json() : null;
+    const forexData = forexRes?.ok ? await forexRes.json() : { positions: [], totalUnrealizedPL: 0 };
 
     const assets = (positions || []).map((p: any) => {
       const meta = ASSET_META[p.ticker] || { name: p.ticker, category: 'equity', lat: 0, lng: 0 };
@@ -85,6 +87,28 @@ export async function GET() {
       };
     });
 
+    // Add forex positions from OANDA
+    const forexPositions = forexData.positions || [];
+    const forexUnrealizedPL = forexData.totalUnrealizedPL || 0;
+    for (const fp of forexPositions) {
+      const instrument = fp.instrument || '';
+      const pair = instrument.replace('_', '/');
+      assets.push({
+        id: `fx-${instrument.toLowerCase()}`,
+        name: pair,
+        ticker: pair,
+        value: Math.round(Math.abs(fp.units || 25000) * (fp.entryPrice || 0) / 25), // approximate value
+        change: fp.unrealizedPL || 0,
+        changePercent: 0,
+        category: 'forex',
+        lat: 51.51, // London
+        lng: -0.13,
+        shares: fp.units || 0,
+        avgPrice: fp.entryPrice || 0,
+        currentPrice: 0,
+      });
+    }
+
     // Add cash as an asset
     if (account.cash > 0) {
       assets.push({
@@ -103,7 +127,7 @@ export async function GET() {
       });
     }
 
-    // P&L calculations
+    // P&L calculations (includes forex positions added above)
     const unrealizedPnl = assets.reduce((sum: number, a: any) => sum + (a.change || 0), 0);
     const totalValue = account.portfolioValue || 0;
     const totalPnl = totalValue - INITIAL_BALANCE; // TRUE total P&L from starting balance
@@ -113,14 +137,13 @@ export async function GET() {
     const realizedFromTrades = (closedData.trades || []).reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
     // Use the Alpaca-derived number (it's authoritative), but if internal tracking is higher, use that
     const realizedPnl = Math.abs(realizedFromAlpaca) > Math.abs(realizedFromTrades) ? realizedFromAlpaca : realizedFromTrades;
-    // Today's P&L — use Alpaca's dayPnl but reset after US market close (4 PM ET)
+    // Today's P&L — Alpaca + OANDA combined
     const now = new Date();
-    const etHour = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
-    const alpacaDayPnl = account.dayPnl || 0;
-    // After 4 PM ET and before midnight: Alpaca hasn't reset last_equity yet, so dayPnl is stale
-    // Show 0 for the new trading day until Alpaca resets (or until new trades generate P&L)
-    const isAfterClose = etHour >= 16;
-    const dayPnl = isAfterClose ? 0 : alpacaDayPnl;
+    const utcHour = now.getUTCHours();
+    const isAfterUSClose = utcHour >= 21 || utcHour < 5; // ~4PM ET to midnight
+    const alpacaDayPnl = isAfterUSClose ? 0 : (account.dayPnl || 0);
+    // Combined day P&L: Alpaca equity/crypto + OANDA forex unrealized
+    const dayPnl = alpacaDayPnl + forexUnrealizedPL;
     const dayPnlPercent = (account.lastEquity || 0) > 0 ? (dayPnl / account.lastEquity) * 100 : 0;
 
     // Performance stats
