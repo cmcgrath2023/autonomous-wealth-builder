@@ -28,7 +28,9 @@ export class CommsWorker {
   private store: GatewayStateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastProcessed = '';
-  private lastPostTime = Date.now(); // Start counting from now — don't post immediately on restart
+  private lastPostTime = Date.now();
+  private _lastEventSig = '';
+  private _lastTradeSig = '';
   private running = false;
   private sentMessages = new Set<string>(); // dedup
 
@@ -105,30 +107,37 @@ export class CommsWorker {
       }
     } catch {}
 
-    // Critical events from Liza
+    // Critical events from Liza — only post ONCE when new events appear
     try {
       const events = this.store.get('critical_events');
       if (events) {
-        const parsed = JSON.parse(events);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          messages.push({
-            agent: 'liza',
-            content: `CRITICAL EVENTS: ${parsed.join(' | ')}`,
-            type: 'alert',
-            priority: 'critical',
-            timestamp: now,
+        const eventSig = events.substring(0, 100); // signature from first 100 chars
+        if (eventSig !== this._lastEventSig) {
+          this._lastEventSig = eventSig;
+          const parsed = JSON.parse(events);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            messages.push({
+              agent: 'liza',
+              content: `CRITICAL EVENTS: ${parsed.slice(0, 3).join(' | ')}`,
+              type: 'alert',
+              priority: 'critical',
+              timestamp: now,
           });
         }
       }
     } catch {}
 
-    // Trade executions from trade engine
+    // Trade executions — only post NEW trades (compare signature)
     try {
       const status = this.store.get('trade_engine_status');
       if (status) {
         const parsed = JSON.parse(status);
         const actions = parsed.recentActivity || [];
         const trades = actions.filter((a: any) => a.detail?.includes('BUY') || a.detail?.includes('SELL') || a.detail?.includes('BANKED'));
+        const tradeSig = trades.map((t: any) => t.detail?.substring(0, 30)).join('|');
+        if (tradeSig === this._lastTradeSig || trades.length === 0) { /* skip */ }
+        else {
+          this._lastTradeSig = tradeSig;
         for (const trade of trades.slice(0, 3)) {
           messages.push({
             agent: 'fin',
@@ -137,6 +146,7 @@ export class CommsWorker {
             priority: 'high',
             timestamp: trade.timestamp || now,
           });
+        }
         }
       }
     } catch {}
