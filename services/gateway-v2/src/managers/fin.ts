@@ -75,7 +75,19 @@ export class Fin {
       // 3. Adjust urgency based on goal progress
       this.writeUrgency(goalProgress);
 
-      // 4. Check positions for trailing stop tightening and outsized winners
+      // 4. Read Warren's directive and ACT on it
+      const directive = this.store.get('fin:directive') || 'steady_as_she_goes';
+      const urgency = this.store.get('warren:urgency') || 'normal';
+
+      if (urgency === 'critical') {
+        // CRITICAL: market is losing money — tighten everything, consider cutting losers
+        actions.push(`URGENCY: ${urgency} — tightening stops, cutting losers`);
+        await this.emergencyCuts(actions);
+      } else if (urgency === 'elevated') {
+        actions.push(`URGENCY: ${urgency} — watching closely`);
+      }
+
+      // 5. Check positions for trailing stop tightening and outsized winners
       await this.monitorPositions(actions);
 
       // 5. Write status to state store
@@ -173,6 +185,36 @@ export class Fin {
       }
     } catch (e: any) {
       actions.push(`Position monitor error: ${e.message}`);
+    }
+  }
+
+  private async emergencyCuts(actions: string[]): Promise<void> {
+    // CRITICAL urgency: cut any position losing more than $30
+    const headers = getAlpacaHeaders();
+    if (!headers) return;
+    const creds = loadCredentials();
+    const baseUrl = creds.alpaca?.baseUrl || ALPACA_TRADE_URL;
+
+    try {
+      const res = await fetch(`${baseUrl}/v2/positions`, {
+        headers, signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) return;
+      const positions = (await res.json()) as any[];
+
+      for (const pos of positions) {
+        const pnl = parseFloat(pos.unrealized_pl || '0');
+        const symbol = pos.symbol;
+        const qty = Math.abs(parseFloat(pos.qty || '0'));
+
+        if (pnl < -30) {
+          console.log(`[Fin] EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
+          await this.sellPosition(baseUrl, headers, symbol, qty, actions);
+          actions.push(`EMERGENCY CUT ${symbol} ($${pnl.toFixed(2)})`);
+        }
+      }
+    } catch (e: any) {
+      actions.push(`Emergency cuts error: ${e.message}`);
     }
   }
 

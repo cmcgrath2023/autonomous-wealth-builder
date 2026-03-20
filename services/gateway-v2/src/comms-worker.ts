@@ -28,6 +28,7 @@ export class CommsWorker {
   private store: GatewayStateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastProcessed = '';
+  private lastPostTime = 0;
   private running = false;
   private sentMessages = new Set<string>(); // dedup
 
@@ -80,13 +81,17 @@ export class CommsWorker {
     const messages: CommsMessage[] = [];
     const now = new Date().toISOString();
 
-    // Warren's briefing
+    // Warren's briefing — only post when urgency CHANGES or every 10 minutes
     try {
       const briefingRaw = this.store.get('warren:briefing');
       if (briefingRaw) {
         const briefing = JSON.parse(briefingRaw);
-        if (briefing.timestamp !== this.lastProcessed) {
-          this.lastProcessed = briefing.timestamp;
+        const urgencyChanged = briefing.urgency !== this.lastProcessed;
+        const tenMinSinceLastPost = !this.lastPostTime || (Date.now() - this.lastPostTime) > 10 * 60 * 1000;
+
+        if (urgencyChanged || tenMinSinceLastPost) {
+          this.lastProcessed = briefing.urgency;
+          this.lastPostTime = Date.now();
           messages.push({
             agent: 'warren',
             content: briefing.narrative,
