@@ -1,0 +1,226 @@
+/**
+ * Gateway V2 — Process Orchestrator
+ *
+ * Main entry point that starts the API server in-process and spawns
+ * trade-engine, data-feed, and research-worker as child processes.
+ * Monitors workers, auto-restarts on crash with backoff, and handles
+ * graceful shutdown on SIGINT/SIGTERM.
+ */
+
+import { fork, ChildProcess } from 'child_process';
+import { resolve, dirname, join } from 'path';
+import { existsSync } from 'fs';
+import { GatewayStateStore } from '../../gateway/src/state-store.js';
+import { start as startApiServer } from './api-server.js';
+
+const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
+
+// ---------------------------------------------------------------------------
+// Worker configuration
+// ---------------------------------------------------------------------------
+
+interface WorkerConfig {
+  name: string;
+  script: string;
+  restartDelay: number;   // ms between restart attempts
+  maxRestarts: number;     // max restarts per hour
+  optional: boolean;       // skip if script file doesn't exist
+}
+
+interface WorkerState {
+  config: WorkerConfig;
+  process: ChildProcess | null;
+  restartTimestamps: number[];   // timestamps of recent restarts (within 1h)
+  stopped: boolean;              // true when orchestrator is shutting down
+}
+
+const SRC_DIR = dirname(new URL(import.meta.url).pathname);
+
+const WORKER_CONFIGS: WorkerConfig[] = [
+  { name: 'trade-engine',    script: resolve(SRC_DIR, 'trade-engine.ts'),    restartDelay: 5000,  maxRestarts: 10, optional: false },
+  { name: 'data-feed',       script: resolve(SRC_DIR, 'data-feed.ts'),       restartDelay: 3000,  maxRestarts: 20, optional: true },
+  { name: 'research-worker', script: resolve(SRC_DIR, 'research-worker.ts'), restartDelay: 5000,  maxRestarts: 10, optional: true },
+];
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+function log(msg: string): void {
+  console.log(`[orchestrator] ${new Date().toISOString()} ${msg}`);
+}
+
+// ---------------------------------------------------------------------------
+// Worker management
+// ---------------------------------------------------------------------------
+
+const workers: WorkerState[] = [];
+let stateStore: GatewayStateStore;
+let shuttingDown = false;
+
+function pruneOldRestarts(state: WorkerState): void {
+  const oneHourAgo = Date.now() - 3_600_000;
+  state.restartTimestamps = state.restartTimestamps.filter(ts => ts > oneHourAgo);
+}
+
+function writeWorkerHealth(name: string, status: string, pid?: number): void {
+  try {
+    stateStore.set(`worker:${name}`, JSON.stringify({
+      status,
+      pid: pid ?? null,
+      updatedAt: new Date().toISOString(),
+    }));
+  } catch { /* state store write is best-effort */ }
+}
+
+function spawnWorker(state: WorkerState): void {
+  if (state.stopped || shuttingDown) return;
+
+  const { config } = state;
+
+  const child = fork(config.script, [], {
+    execArgv: ['--import', 'tsx'],
+    env: {
+      ...process.env,
+      GATEWAY_DB_PATH: DB_PATH,
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+
+  state.process = child;
+  const pid = child.pid ?? 0;
+  log(`${config.name} started (pid ${pid})`);
+  writeWorkerHealth(config.name, 'running', pid);
+
+  // Pipe stdout/stderr with worker name prefix
+  child.stdout?.on('data', (data: Buffer) => {
+    const lines = data.toString().trimEnd().split('\n');
+    for (const line of lines) console.log(`[${config.name}] ${line}`);
+  });
+
+  child.stderr?.on('data', (data: Buffer) => {
+    const lines = data.toString().trimEnd().split('\n');
+    for (const line of lines) console.error(`[${config.name}] ${line}`);
+  });
+
+  child.on('exit', (code, signal) => {
+    state.process = null;
+
+    if (state.stopped || shuttingDown) {
+      log(`${config.name} exited (shutdown)`);
+      writeWorkerHealth(config.name, 'stopped');
+      return;
+    }
+
+    log(`${config.name} exited — code=${code} signal=${signal}`);
+    writeWorkerHealth(config.name, 'crashed');
+
+    // Rate-limit restarts
+    pruneOldRestarts(state);
+    if (state.restartTimestamps.length >= config.maxRestarts) {
+      log(`${config.name} exceeded ${config.maxRestarts} restarts/hour — giving up`);
+      writeWorkerHealth(config.name, 'abandoned');
+      return;
+    }
+
+    state.restartTimestamps.push(Date.now());
+    const attempt = state.restartTimestamps.length;
+    const delay = config.restartDelay * Math.min(attempt, 5); // backoff up to 5x
+
+    log(`${config.name} restarting in ${delay}ms (attempt ${attempt}/${config.maxRestarts})`);
+    setTimeout(() => spawnWorker(state), delay);
+  });
+
+  child.on('error', (err) => {
+    log(`${config.name} spawn error: ${err.message}`);
+    writeWorkerHealth(config.name, 'error');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`${signal} received — shutting down workers`);
+
+  // Mark all workers as stopped so exit handlers don't restart
+  for (const w of workers) w.stopped = true;
+
+  // Send SIGTERM to all live workers
+  const killPromises = workers.map(w => {
+    if (!w.process) return Promise.resolve();
+    return new Promise<void>(resolve => {
+      const child = w.process!;
+      const timeout = setTimeout(() => {
+        log(`${w.config.name} did not exit — sending SIGKILL`);
+        child.kill('SIGKILL');
+        resolve();
+      }, 5000);
+
+      child.on('exit', () => { clearTimeout(timeout); resolve(); });
+      child.kill('SIGTERM');
+    });
+  });
+
+  await Promise.all(killPromises);
+
+  try { stateStore.close(); } catch { /* ignore */ }
+  log('All workers stopped — exiting');
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main(): Promise<void> {
+  log('Gateway V2 starting');
+
+  // 1. Create shared state store
+  stateStore = new GatewayStateStore(DB_PATH);
+  log(`State store ready (${DB_PATH})`);
+
+  // 2. Start API server in-process (lightweight, no need for separate process)
+  await startApiServer(stateStore);
+
+  // 3. Spawn worker processes
+  for (const config of WORKER_CONFIGS) {
+    if (config.optional && !existsSync(config.script)) {
+      log(`${config.name} skipped (${config.script} not found)`);
+      writeWorkerHealth(config.name, 'skipped');
+      continue;
+    }
+
+    const state: WorkerState = {
+      config,
+      process: null,
+      restartTimestamps: [],
+      stopped: false,
+    };
+    workers.push(state);
+    spawnWorker(state);
+  }
+
+  log(`Orchestrator ready — ${workers.length} worker(s) spawned`);
+}
+
+// Signal handlers
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// Crash protection — log but don't exit
+process.on('uncaughtException', (err) => {
+  console.error('[orchestrator] uncaughtException:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[orchestrator] unhandledRejection:', reason);
+});
+
+main().catch((err) => {
+  console.error('[orchestrator] Fatal:', err);
+  process.exit(1);
+});
