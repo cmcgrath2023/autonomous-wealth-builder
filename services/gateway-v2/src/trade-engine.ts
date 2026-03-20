@@ -63,15 +63,17 @@ function totalDeployed(positions: Array<{ ticker: string; marketValue: number }>
 function slDominant(store: GatewayStateStore): boolean {
   try {
     const trades = store.getTodayTrades();
-    if (trades.length < 5) return false;
-    const slCount = trades.filter((t) => t.reason === 'stop_loss').length;
-    const ratio = slCount / trades.length;
+    // Only count actual entry-level stop losses, not star concentration cuts
+    // Star concentration uses reason 'stop_loss' but they're position management, not bad entries
+    const realEntries = trades.filter((t) => t.pnl < -30); // Only significant losses count
+    if (realEntries.length < 5) return false;
+    const slCount = realEntries.filter((t) => t.reason === 'stop_loss').length;
+    const ratio = slCount / realEntries.length;
     if (ratio > SL_DOMINANCE_HALT) {
-      console.log(`[TradeEngine] SL dominance: ${(ratio * 100).toFixed(0)}% (${slCount}/${trades.length} trades)`);
+      console.log(`[TradeEngine] SL dominance: ${(ratio * 100).toFixed(0)}% (${slCount}/${realEntries.length} real losses)`);
     }
     return ratio > SL_DOMINANCE_HALT;
   } catch (e: any) {
-    // If state store fails, DON'T halt trading
     console.log(`[TradeEngine] SL check error: ${e.message} — allowing trades`);
     return false;
   }
