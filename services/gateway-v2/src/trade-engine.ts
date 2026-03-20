@@ -12,6 +12,7 @@
  *   5. Write autonomy status to state store
  */
 
+import { join } from 'path';
 import { TradeExecutor } from '../../neural-trader/src/executor.js';
 import { PositionManager } from '../../neural-trader/src/position-manager.js';
 import { ForexScanner } from '../../forex-scanner/src/index.js';
@@ -130,7 +131,8 @@ export class TradeEngine {
       });
       console.log('[TradeEngine] Forex: proxying via forex service on :3003');
     }
-    this.store = new GatewayStateStore();
+    const dbPath = process.env.GATEWAY_DB_PATH || join(process.cwd(), '..', 'data', 'gateway-state.db');
+    this.store = new GatewayStateStore(dbPath);
   }
 
   // ── Action 1: Forex Position Management (Priority 1) ──────────────────
@@ -262,6 +264,7 @@ export class TradeEngine {
         .filter((s) => !owned.has(s.symbol))
         .filter((s) => mkt.isMarketOpen || isCrypto(s.symbol))
         .slice(0, 3);
+      if (stars.length > 0) console.log(`  [scan] ${stars.length} stars, ${eligibleStars.length} eligible, owned: ${[...owned].join(',')}, market: ${mkt.isMarketOpen ? 'open' : 'closed'}`);
 
       for (const star of eligibleStars) {
         const fresh = await this.executor.getPositions();
@@ -346,7 +349,7 @@ export class TradeEngine {
     let strategy = {};
     try { const raw = this.store.get('daily_strategy'); if (raw) strategy = JSON.parse(raw); } catch {}
     let stars: Array<{ symbol: string; sector: string; score: number; catalyst: string }> = [];
-    try { this.store.clearExpiredStars(4); stars = this.store.getResearchStars(); } catch {}
+    try { this.store.clearExpiredStars(4); stars = this.store.getResearchStars(); console.log(`  [4] ${stars.length} research stars loaded`); } catch (e: any) { console.log(`  [4] Stars error: ${e.message}`); }
     if (stars.length > 0) console.log(`  [3-4] ${stars.length} research stars loaded`);
 
     // 5. Scan signals (priority 3)
