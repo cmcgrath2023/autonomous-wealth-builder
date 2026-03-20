@@ -17,6 +17,7 @@ import { PositionManager } from '../../neural-trader/src/position-manager.js';
 import { ForexScanner } from '../../forex-scanner/src/index.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
+import { loadCredentials, getAlpacaHeaders, ALPACA_DATA_URL, FOREX_SERVICE_URL } from './config-bus.js';
 
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
@@ -92,36 +93,19 @@ export class TradeEngine {
   private recent: HeartbeatResult[] = [];
 
   constructor() {
-    // Load credentials: vault first, then env var fallback
-    let alpacaKey = process.env.ALPACA_API_KEY || '';
-    let alpacaSec = process.env.ALPACA_API_SECRET || '';
-    let alpacaMode = 'paper';
-    let oandaKey = process.env.OANDA_API_KEY || '';
-    let oandaAcct = process.env.OANDA_ACCOUNT_ID || '';
+    // Single credential source — config bus loads from vault + env
+    const creds = loadCredentials();
 
-    try {
-      const vault = new CredentialVault(process.env.MTWM_VAULT_KEY || 'mtwm-local-dev-key');
-      const vk = vault.retrieve('alpaca-api-key');
-      const vs = vault.retrieve('alpaca-api-secret');
-      const vm = vault.retrieve('alpaca-mode');
-      if (vk && vs) { alpacaKey = vk; alpacaSec = vs; alpacaMode = vm || 'paper'; console.log(`[TradeEngine] Vault: Alpaca ${alpacaMode}`); }
-      const ok = vault.retrieve('oanda-api-key');
-      const oa = vault.retrieve('oanda-account-id');
-      if (ok && oa) { oandaKey = ok; oandaAcct = oa; console.log('[TradeEngine] Vault: OANDA loaded'); }
-    } catch { console.log('[TradeEngine] Vault unavailable, using env vars'); }
-
-    const baseUrl = alpacaMode === 'live' ? 'https://api.alpaca.markets' : 'https://paper-api.alpaca.markets';
     this.executor = new TradeExecutor({
-      apiKey: alpacaKey,
-      apiSecret: alpacaSec,
-      baseUrl,
-      paperTrading: alpacaMode !== 'live',
+      apiKey: creds.alpaca?.apiKey || '',
+      apiSecret: creds.alpaca?.apiSecret || '',
+      baseUrl: creds.alpaca?.baseUrl || 'https://paper-api.alpaca.markets',
+      paperTrading: creds.alpaca?.mode !== 'live',
     });
     this.pm = new PositionManager();
-    // Forex: use the dedicated forex service on port 3003 (it has OANDA credentials)
-    // Create ForexScanner with vault/env creds, OR proxy via HTTP if no creds
-    if (oandaKey && oandaAcct) {
-      this.forex = new ForexScanner({ oandaApiKey: oandaKey, oandaAccountId: oandaAcct });
+    // Forex: use dedicated forex service on port 3003, or direct OANDA if creds available
+    if (creds.oanda) {
+      this.forex = new ForexScanner({ oandaApiKey: creds.oanda.apiKey, oandaAccountId: creds.oanda.accountId });
       console.log('[TradeEngine] Forex: direct OANDA connection');
     } else {
       // Proxy through forex service — create a minimal scanner that calls HTTP
@@ -254,7 +238,8 @@ export class TradeEngine {
       const owned = new Set(positions.map((p) => p.ticker));
 
       // Forex signals
-      if (process.env.OANDA_API_KEY && process.env.OANDA_ACCOUNT_ID) {
+      const fxCreds = loadCredentials();
+      if (fxCreds.oanda || true) { // Always try forex via proxy
         try {
           await this.forex.fetchQuotes();
           const sigs = [...this.forex.evaluateSessionMomentum(), ...this.forex.evaluateCarryTrades()];
@@ -314,19 +299,10 @@ export class TradeEngine {
     } catch (e: any) { return ar('error', e.message); }
   }
 
-  private _alpacaKey = '';
-  private _alpacaSec = '';
-
   private async fetchPrice(ticker: string): Promise<number | null> {
-    // Use cached creds from constructor (vault-loaded), not env vars
-    if (!this._alpacaKey) {
-      try {
-        const vault = new CredentialVault(process.env.MTWM_VAULT_KEY || 'mtwm-local-dev-key');
-        this._alpacaKey = vault.retrieve('alpaca-api-key') || process.env.ALPACA_API_KEY || '';
-        this._alpacaSec = vault.retrieve('alpaca-api-secret') || process.env.ALPACA_API_SECRET || '';
-      } catch { /* use env */ }
-    }
-    const key = this._alpacaKey, sec = this._alpacaSec;
+    const headers = getAlpacaHeaders();
+    if (!headers) return null;
+    const key = headers['APCA-API-KEY-ID'], sec = headers['APCA-API-SECRET-KEY'];
     if (!key || !sec) return null;
     try {
       const c = ticker.includes('-');
