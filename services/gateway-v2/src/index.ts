@@ -14,6 +14,7 @@ import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { start as startApiServer } from './api-server.js';
 import { startManagers, stopManagers } from './managers/index.js';
 import { CommsWorker } from './comms-worker.js';
+import { OpenClawEngine } from './openclaw.js';
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
 
@@ -190,9 +191,33 @@ async function main(): Promise<void> {
   // 2. Start API server in-process (lightweight, no need for separate process)
   await startApiServer(stateStore);
 
-  // 3. Start OpenClaw managers (Warren → Fin, Liza, Ferd)
+  // 3. Start OpenClaw Engine + managers (Warren → Fin, Liza, Ferd)
+  const openClaw = new OpenClawEngine(stateStore, 30_000);
   const managers = startManagers(DB_PATH);
-  log('Family Office online — Warren (MD), Fin, Liza, Ferd');
+
+  // Register manager cycles as OpenClaw actions with autonomy levels
+  openClaw.registerAction('warren', 'briefing', async () => {
+    const briefing = stateStore.get('warren:briefing');
+    return { detail: briefing ? JSON.parse(briefing).narrative : 'No briefing yet', result: briefing ? 'success' : 'skipped' };
+  }, 'act', 1);
+
+  openClaw.registerAction('fin', 'monitor_positions', async () => {
+    const status = stateStore.get('manager_fin_status');
+    return { detail: status ? JSON.parse(status).actions?.join('; ') || 'monitoring' : 'offline', result: status ? 'success' : 'error' };
+  }, 'act', 2);
+
+  openClaw.registerAction('liza', 'scan_news', async () => {
+    const status = stateStore.get('manager_liza_status');
+    return { detail: status ? JSON.parse(status).lastAction || 'scanning' : 'offline', result: status ? 'success' : 'error' };
+  }, 'act', 3);
+
+  openClaw.registerAction('ferd', 'analyze_sectors', async () => {
+    const status = stateStore.get('manager_ferd_status');
+    return { detail: status ? JSON.parse(status).lastAction || 'analyzing' : 'offline', result: status ? 'success' : 'error' };
+  }, 'act', 4);
+
+  openClaw.start();
+  log('OpenClaw Engine started — Family Office online (Warren, Fin, Liza, Ferd)');
 
   // 4. Start Comms Worker (Discord/Telegram/Slack notifications)
   const comms = new CommsWorker(DB_PATH);
