@@ -132,6 +132,7 @@ export class TradeEngine {
       console.log('[TradeEngine] Forex: proxying via forex service on :3003');
     }
     const dbPath = process.env.GATEWAY_DB_PATH || join(process.cwd(), '..', 'data', 'gateway-state.db');
+    console.log(`[TradeEngine] DB: ${dbPath} (env=${!!process.env.GATEWAY_DB_PATH}, cwd=${process.cwd()})`);
     this.store = new GatewayStateStore(dbPath);
   }
 
