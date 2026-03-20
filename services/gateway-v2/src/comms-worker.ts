@@ -111,7 +111,7 @@ export class CommsWorker {
     try {
       const events = this.store.get('critical_events');
       if (events) {
-        const eventSig = events.substring(0, 100); // signature from first 100 chars
+        const eventSig = events.substring(0, 100);
         if (eventSig !== this._lastEventSig) {
           this._lastEventSig = eventSig;
           const parsed = JSON.parse(events);
@@ -122,7 +122,8 @@ export class CommsWorker {
               type: 'alert',
               priority: 'critical',
               timestamp: now,
-          });
+            });
+          }
         }
       }
     } catch {}
