@@ -39,7 +39,7 @@ export class Ops {
 
   start(): void {
     this.running = true;
-    console.log('[Ops] SRE agent online -- 15s cycle');
+    console.log('[Tara] SRE agent online -- 15s cycle');
     this.cycle();
     this.timer = setInterval(() => this.cycle(), CYCLE_MS);
   }
@@ -48,7 +48,7 @@ export class Ops {
     this.running = false;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     try { this.store.close(); } catch {}
-    console.log('[Ops] Offline');
+    console.log('[Tara] Offline');
   }
 
   getStatus(): OpsStatus | null {
@@ -142,10 +142,10 @@ export class Ops {
       if (this.cycleCount % 20 === 1) {
         const healthyCount = [apiServer, tradeEngine, researchWorker, forexService, ui, tunnel, stateStore]
           .filter(c => c.healthy).length;
-        console.log(`[Ops] #${this.cycleCount} | ${healthyCount}/7 components healthy | ${incidents.length} incidents`);
+        console.log(`[Tara] #${this.cycleCount} | ${healthyCount}/7 components healthy | ${incidents.length} incidents`);
       }
     } catch (e: any) {
-      console.error(`[Ops] Cycle error (non-fatal): ${e.message}`);
+      console.error(`[Tara] Cycle error (non-fatal): ${e.message}`);
     }
   }
 
@@ -217,7 +217,6 @@ export class Ops {
     }
   }
 
-  // -- State store DB accessibility --
   private checkStateStore(): ComponentHealth {
     const now = new Date().toISOString();
     try {
@@ -229,7 +228,6 @@ export class Ops {
     }
   }
 
-  // -- Manager health (Warren, Fin, Liza, Ferd) --
   private checkManagers(): { warren: boolean; fin: boolean; liza: boolean; ferd: boolean } {
     const result: Record<string, boolean> = {};
     for (const name of ['warren', 'fin', 'liza', 'ferd']) {
@@ -249,7 +247,6 @@ export class Ops {
     return result as any;
   }
 
-  // -- Discord notification (once per incident) --
   private async notifyDiscord(incident: Incident): Promise<void> {
     const key = `${incident.component}:${incident.issue}`;
     if (this.notifiedIncidents.has(key)) return;
@@ -274,12 +271,11 @@ export class Ops {
     } catch {}
   }
 
-  // -- Record learning --
   private recordLearning(observation: string, action: string, outcome: string, score: number): void {
     try {
       this.store.saveReport({
         id: `ops-learning-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        agent: 'ops',
+        agent: 'tara',
         type: 'learning',
         timestamp: new Date().toISOString(),
         summary: observation,
