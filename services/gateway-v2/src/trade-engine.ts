@@ -105,10 +105,34 @@ export class TradeEngine {
       paperTrading: alpacaMode !== 'live',
     });
     this.pm = new PositionManager();
-    this.forex = new ForexScanner({
-      oandaApiKey: oandaKey || undefined,
-      oandaAccountId: oandaAcct || undefined,
-    });
+    // Forex: use the dedicated forex service on port 3003 (it has OANDA credentials)
+    // Create ForexScanner with vault/env creds, OR proxy via HTTP if no creds
+    if (oandaKey && oandaAcct) {
+      this.forex = new ForexScanner({ oandaApiKey: oandaKey, oandaAccountId: oandaAcct });
+      console.log('[TradeEngine] Forex: direct OANDA connection');
+    } else {
+      // Proxy through forex service — create a minimal scanner that calls HTTP
+      this.forex = new Proxy({} as any, {
+        get: (_target, prop) => {
+          if (prop === 'getOpenTrades') return async () => {
+            try { const r = await fetch('http://localhost:3003/api/forex/positions'); const d = await r.json() as any; return d.positions || []; } catch { return []; }
+          };
+          if (prop === 'closePosition') return async (sym: string) => {
+            const inst = sym.replace('/', '_');
+            const r = await fetch(`http://localhost:3003/api/forex/position/${inst}/close`, { method: 'POST' });
+            return r.json();
+          };
+          if (prop === 'evaluateSessionMomentum') return async () => [];
+          if (prop === 'evaluateCarryTrades') return async () => [];
+          if (prop === 'placeOrder') return async (inst: string, units: number, sl?: number, tp?: number) => {
+            const r = await fetch('http://localhost:3003/api/forex/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instrument: inst, units, stopLoss: sl, takeProfit: tp }) });
+            return r.json();
+          };
+          return () => {};
+        }
+      });
+      console.log('[TradeEngine] Forex: proxying via forex service on :3003');
+    }
     this.store = new GatewayStateStore();
   }
 
