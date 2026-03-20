@@ -13,6 +13,7 @@ import { existsSync } from 'fs';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { start as startApiServer } from './api-server.js';
 import { startManagers, stopManagers } from './managers/index.js';
+import { CommsWorker } from './comms-worker.js';
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
 
@@ -193,7 +194,22 @@ async function main(): Promise<void> {
   const managers = startManagers(DB_PATH);
   log('Family Office online — Warren (MD), Fin, Liza, Ferd');
 
-  // 4. Spawn worker processes
+  // 4. Start Comms Worker (Discord/Telegram/Slack notifications)
+  const comms = new CommsWorker(DB_PATH);
+  comms.start();
+
+  // 5. Start Discord Bot (two-way conversation)
+  if (process.env.DISCORD_BOT_TOKEN) {
+    try {
+      const { start: startBot } = await import('./discord-bot.js');
+      await startBot(DB_PATH);
+      log('Discord bot connected');
+    } catch (e: any) {
+      log(`Discord bot failed: ${e.message} — webhook-only mode`);
+    }
+  }
+
+  // 6. Spawn worker processes
   for (const config of WORKER_CONFIGS) {
     if (config.optional && !existsSync(config.script)) {
       log(`${config.name} skipped (${config.script} not found)`);
