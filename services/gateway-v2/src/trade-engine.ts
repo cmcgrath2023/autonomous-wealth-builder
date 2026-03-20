@@ -314,8 +314,19 @@ export class TradeEngine {
     } catch (e: any) { return ar('error', e.message); }
   }
 
+  private _alpacaKey = '';
+  private _alpacaSec = '';
+
   private async fetchPrice(ticker: string): Promise<number | null> {
-    const key = process.env.ALPACA_API_KEY, sec = process.env.ALPACA_API_SECRET;
+    // Use cached creds from constructor (vault-loaded), not env vars
+    if (!this._alpacaKey) {
+      try {
+        const vault = new CredentialVault(process.env.MTWM_VAULT_KEY || 'mtwm-local-dev-key');
+        this._alpacaKey = vault.retrieve('alpaca-api-key') || process.env.ALPACA_API_KEY || '';
+        this._alpacaSec = vault.retrieve('alpaca-api-secret') || process.env.ALPACA_API_SECRET || '';
+      } catch { /* use env */ }
+    }
+    const key = this._alpacaKey, sec = this._alpacaSec;
     if (!key || !sec) return null;
     try {
       const c = ticker.includes('-');
