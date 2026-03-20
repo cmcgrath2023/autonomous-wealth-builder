@@ -12,6 +12,7 @@ import { resolve, dirname, join } from 'path';
 import { existsSync } from 'fs';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { start as startApiServer } from './api-server.js';
+import { startManagers, stopManagers } from './managers/index.js';
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
 
@@ -188,7 +189,11 @@ async function main(): Promise<void> {
   // 2. Start API server in-process (lightweight, no need for separate process)
   await startApiServer(stateStore);
 
-  // 3. Spawn worker processes
+  // 3. Start OpenClaw managers (Warren → Fin, Liza, Ferd)
+  const managers = startManagers(DB_PATH);
+  log('Family Office online — Warren (MD), Fin, Liza, Ferd');
+
+  // 4. Spawn worker processes
   for (const config of WORKER_CONFIGS) {
     if (config.optional && !existsSync(config.script)) {
       log(`${config.name} skipped (${config.script} not found)`);
