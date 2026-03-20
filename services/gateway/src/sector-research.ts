@@ -49,6 +49,12 @@ const SECTORS: Record<string, SectorConfig> = {
     etfs: ['SMH'],
     catalystKeywords: ['ai', 'data center', 'gpu', 'semiconductor', 'cloud', 'nvidia', 'chip'],
   },
+  renewables: {
+    name: 'Renewables & Clean Energy',
+    tickers: ['SEDG', 'ENPH', 'FSLR', 'RUN', 'NOVA', 'MAXN', 'ARRY', 'BE', 'PLUG', 'NEE'],
+    etfs: ['TAN', 'ICLN', 'QCLN'],
+    catalystKeywords: ['solar', 'renewable', 'clean energy', 'wind', 'hydrogen', 'ev charging', 'battery', 'green energy', 'ira', 'climate'],
+  },
   crypto_macro: {
     name: 'Crypto Macro',
     tickers: ['BTC-USD', 'ETH-USD', 'SOL-USD', 'AVAX-USD', 'LINK-USD', 'DOT-USD'],

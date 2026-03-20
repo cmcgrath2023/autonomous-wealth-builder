@@ -381,11 +381,14 @@ export class PositionManager {
     const star = sorted[0];
 
     // Only concentrate if the star is actually winning meaningfully
-    if (star.unrealizedPnl < 10) return [];
+    if (star.unrealizedPnl < 25) return []; // Need a strong star, not just slightly green
 
-    // Cut all positions that are losing while star is winning
+    // Cut positions losing more than $25 OR more than 2% — give new entries room to breathe
+    // Don't cut positions opened in the last 30 minutes (they need time)
     for (const pos of sorted.slice(1)) {
-      if (pos.unrealizedPnl < -5) { // Losing more than $5
+      const pctLoss = Math.abs(pos.unrealizedPnlPercent || 0);
+      const isNewPosition = !this.entryTimes.has(pos.ticker) || (Date.now() - (this.entryTimes.get(pos.ticker) || 0)) < 30 * 60 * 1000;
+      if (!isNewPosition && (pos.unrealizedPnl < -25 || pctLoss > 2)) {
         const result = await this.closePosition(executor, pos, 'stop_loss');
         if (result) actions.push(`CUT DOG: ${result} → freeing capital for star ${star.ticker}`);
       }
