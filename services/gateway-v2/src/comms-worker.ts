@@ -81,20 +81,22 @@ export class CommsWorker {
     const messages: CommsMessage[] = [];
     const now = new Date().toISOString();
 
-    // Warren's briefing — only post when urgency CHANGES or every 10 minutes
+    // Warren's briefing — only post when content meaningfully changes
     try {
       const briefingRaw = this.store.get('warren:briefing');
       if (briefingRaw) {
         const briefing = JSON.parse(briefingRaw);
-        const urgencyChanged = briefing.urgency !== this.lastProcessed;
-        const tenMinSinceLastPost = !this.lastPostTime || (Date.now() - this.lastPostTime) > 10 * 60 * 1000;
+        // Create a signature from the key metrics — only post if these change
+        const sig = `${briefing.urgency}|${Math.round(briefing.dailyPnl / 50) * 50}|${briefing.positions}`;
+        const changed = sig !== this.lastProcessed;
 
-        if (urgencyChanged || tenMinSinceLastPost) {
-          this.lastProcessed = briefing.urgency;
+        if (changed) {
+          this.lastProcessed = sig;
           this.lastPostTime = Date.now();
+          const time = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
           messages.push({
             agent: 'warren',
-            content: briefing.narrative,
+            content: `[${time} ET] ${briefing.narrative}`,
             type: 'briefing',
             priority: briefing.urgency === 'critical' ? 'critical' : briefing.urgency === 'elevated' ? 'high' : 'normal',
             timestamp: briefing.timestamp,
