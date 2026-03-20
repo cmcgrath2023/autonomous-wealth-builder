@@ -1,24 +1,39 @@
 import express, { Request, Response } from 'express';
-import { GatewayStateStore } from './state-store.js';
+import { GatewayStateStore } from '../../gateway/src/state-store.js';
+import { CredentialVault } from '../../qudag/src/vault.js';
 
 // ---------------------------------------------------------------------------
-// Alpaca proxy config
+// Alpaca proxy config — vault first, env fallback
 // ---------------------------------------------------------------------------
-const ALPACA_BASE = 'https://paper-api.alpaca.markets';
+let _alpacaKey = process.env.ALPACA_API_KEY || '';
+let _alpacaSec = process.env.ALPACA_API_SECRET || '';
+let _alpacaBase = 'https://paper-api.alpaca.markets';
+
+try {
+  const vault = new CredentialVault(process.env.MTWM_VAULT_KEY || 'mtwm-local-dev-key');
+  const vk = vault.retrieve('alpaca-api-key');
+  const vs = vault.retrieve('alpaca-api-secret');
+  const vm = vault.retrieve('alpaca-mode');
+  if (vk && vs) {
+    _alpacaKey = vk; _alpacaSec = vs;
+    _alpacaBase = vm === 'live' ? 'https://api.alpaca.markets' : 'https://paper-api.alpaca.markets';
+    console.log(`[API] Vault: Alpaca ${vm || 'paper'}`);
+  }
+} catch { /* vault unavailable */ }
 
 function alpacaHeaders(): Record<string, string> {
-  const key = process.env.ALPACA_API_KEY || '';
-  const secret = process.env.ALPACA_API_SECRET || '';
   return {
-    'APCA-API-KEY-ID': key,
-    'APCA-API-SECRET-KEY': secret,
+    'APCA-API-KEY-ID': _alpacaKey,
+    'APCA-API-SECRET-KEY': _alpacaSec,
     'Content-Type': 'application/json',
   };
 }
 
 function hasAlpacaCreds(): boolean {
-  return !!(process.env.ALPACA_API_KEY && process.env.ALPACA_API_SECRET);
+  return !!(_alpacaKey && _alpacaSec);
 }
+
+const ALPACA_BASE = _alpacaBase;
 
 // ---------------------------------------------------------------------------
 // Response cache — stores last successful Alpaca response per endpoint key
@@ -80,7 +95,7 @@ app.get('/api/status', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     uptime: process.uptime(),
-    workers: stateStore.getWorkerStatuses?.() ?? {},
+    workers: JSON.parse(stateStore.get('worker_statuses') || '{}') ?? {},
   });
 });
 
@@ -181,7 +196,7 @@ app.get('/api/positions/closed', (req: Request, res: Response) => {
 });
 
 app.get('/api/positions/performance', (_req: Request, res: Response) => {
-  const stats = stateStore.getPerformanceStats();
+  const stats = { totalTrades: stateStore.getClosedTrades(1000).length, ...(() => { const t = stateStore.getClosedTrades(1000); const w = t.filter(x => x.pnl > 0); return { wins: w.length, losses: t.length - w.length, winRate: t.length > 0 ? (w.length/t.length)*100 : 0 }; })() };
   res.json(stats);
 });
 
@@ -190,14 +205,14 @@ app.get('/api/positions/performance', (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 app.get('/api/autonomy/status', (_req: Request, res: Response) => {
-  const status = stateStore.getAutonomyStatus();
+  const status = JSON.parse(stateStore.get('trade_engine_status') || '{"enabled":true,"autonomyLevel":"act","heartbeatCount":0}');
   res.json(status);
 });
 
 app.post('/api/autonomy/toggle', (_req: Request, res: Response) => {
-  const current = stateStore.getConfig('autonomy_enabled');
+  const current = stateStore.get('autonomy_enabled');
   const next = current === 'true' ? 'false' : 'true';
-  stateStore.setConfig('autonomy_enabled', next);
+  stateStore.set('autonomy_enabled', next);
   res.json({ enabled: next === 'true' });
 });
 
@@ -206,7 +221,7 @@ app.post('/api/autonomy/toggle', (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 app.get('/api/intelligence', (_req: Request, res: Response) => {
-  const beliefs = stateStore.getBeliefs();
+  const beliefs = stateStore.getBeliefsByDomain('');
   res.json(beliefs);
 });
 
@@ -237,14 +252,14 @@ app.post('/api/intelligence/reset', (_req: Request, res: Response) => {
 app.get('/api/research/reports', (req: Request, res: Response) => {
   const agent = req.query.agent as string | undefined;
   const limit = parseInt(req.query.limit as string) || 20;
-  const reports = stateStore.getResearchReports({ agent, limit });
+  const reports = stateStore.getReports(agent || undefined, limit);
   res.json({ reports, total: reports.length });
 });
 
 app.get('/api/research/latest', (_req: Request, res: Response) => {
-  const crypto = stateStore.getLatestReport('crypto-researcher');
-  const forex = stateStore.getLatestReport('forex-researcher');
-  const equity = stateStore.getLatestReport('research-agent');
+  const crypto = stateStore.getLatestByAgent('crypto-researcher');
+  const forex = stateStore.getLatestByAgent('forex-researcher');
+  const equity = stateStore.getLatestByAgent('research-agent');
   res.json({ crypto: crypto || null, forex: forex || null, equity: equity || null });
 });
 
@@ -253,7 +268,7 @@ app.get('/api/research/latest', (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 app.get('/api/strategy/daily', (_req: Request, res: Response) => {
-  const strategy = stateStore.getDailyStrategy();
+  const strategy = JSON.parse(stateStore.get('daily_strategy') || '{"approach":"pending","narrative":"Waiting for heartbeat..."}');
   res.json(strategy || { approach: 'pending', narrative: 'Waiting for first heartbeat...' });
 });
 

@@ -16,6 +16,7 @@ import { TradeExecutor } from '../../neural-trader/src/executor.js';
 import { PositionManager } from '../../neural-trader/src/position-manager.js';
 import { ForexScanner } from '../../forex-scanner/src/index.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
+import { CredentialVault } from '../../qudag/src/vault.js';
 
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
@@ -78,16 +79,35 @@ export class TradeEngine {
   private recent: HeartbeatResult[] = [];
 
   constructor() {
+    // Load credentials: vault first, then env var fallback
+    let alpacaKey = process.env.ALPACA_API_KEY || '';
+    let alpacaSec = process.env.ALPACA_API_SECRET || '';
+    let alpacaMode = 'paper';
+    let oandaKey = process.env.OANDA_API_KEY || '';
+    let oandaAcct = process.env.OANDA_ACCOUNT_ID || '';
+
+    try {
+      const vault = new CredentialVault(process.env.MTWM_VAULT_KEY || 'mtwm-local-dev-key');
+      const vk = vault.retrieve('alpaca-api-key');
+      const vs = vault.retrieve('alpaca-api-secret');
+      const vm = vault.retrieve('alpaca-mode');
+      if (vk && vs) { alpacaKey = vk; alpacaSec = vs; alpacaMode = vm || 'paper'; console.log(`[TradeEngine] Vault: Alpaca ${alpacaMode}`); }
+      const ok = vault.retrieve('oanda-api-key');
+      const oa = vault.retrieve('oanda-account-id');
+      if (ok && oa) { oandaKey = ok; oandaAcct = oa; console.log('[TradeEngine] Vault: OANDA loaded'); }
+    } catch { console.log('[TradeEngine] Vault unavailable, using env vars'); }
+
+    const baseUrl = alpacaMode === 'live' ? 'https://api.alpaca.markets' : 'https://paper-api.alpaca.markets';
     this.executor = new TradeExecutor({
-      apiKey: process.env.ALPACA_API_KEY || '',
-      apiSecret: process.env.ALPACA_API_SECRET || '',
-      baseUrl: process.env.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets',
-      paperTrading: true,
+      apiKey: alpacaKey,
+      apiSecret: alpacaSec,
+      baseUrl,
+      paperTrading: alpacaMode !== 'live',
     });
     this.pm = new PositionManager();
     this.forex = new ForexScanner({
-      oandaApiKey: process.env.OANDA_API_KEY,
-      oandaAccountId: process.env.OANDA_ACCOUNT_ID,
+      oandaApiKey: oandaKey || undefined,
+      oandaAccountId: oandaAcct || undefined,
     });
     this.store = new GatewayStateStore();
   }
