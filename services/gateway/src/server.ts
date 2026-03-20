@@ -3056,9 +3056,14 @@ async function start() {
             candidates.push(...selectedCrypto, ...selectedEquity);
             console.log(`[MomentumStar] Crypto-dominant: ${selectedCrypto.length} crypto (${cryptoSlots} slots), ${selectedEquity.length} equity (${equitySlots} slots, ${equityCandidates.length} candidates, ${exceptionalEquity.length} exceptional)`);
 
-            // SPEC-005: Total capital cap — don't deploy more than $4K simulated capital
+            // SPEC-005: Total capital cap
+            // After US market close, only count crypto toward budget (equity is frozen)
+            const isCryptoPos3 = (t: string) => t.includes('USD') && t.length > 5;
+            const utcH2 = new Date().getUTCHours();
+            const isMarketOpen2 = utcH2 >= 14 && utcH2 < 21;
+            const activeBudget = budgetPositions.filter(p => isMarketOpen2 || isCryptoPos3(p.ticker));
+            const budgetDeployed = activeBudget.reduce((s, p) => s + Math.abs(p.marketValue), 0);
             const totalDeployed = currentPositions.reduce((s, p) => s + Math.abs(p.marketValue), 0);
-            const budgetDeployed = budgetPositions.reduce((s, p) => s + Math.abs(p.marketValue), 0);
             const capitalRemaining = Math.max(0, simulatedCap - budgetDeployed);
             console.log(`[MomentumStar] ${candidates.length} candidates, ${slotsAvailable} slots, capital: $${budgetDeployed.toFixed(0)}/$${simulatedCap} deployed, $${capitalRemaining.toFixed(0)} remaining`);
             if (capitalRemaining < 100) {
