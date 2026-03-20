@@ -88,9 +88,12 @@ export class CommsWorker {
       const briefingRaw = this.store.get('warren:briefing');
       if (briefingRaw) {
         const briefing = JSON.parse(briefingRaw);
-        // Create a signature from the key metrics — only post if these change
-        const sig = `${briefing.urgency}|${Math.round(briefing.dailyPnl / 50) * 50}|${briefing.positions}`;
-        const changed = sig !== this.lastProcessed;
+        // Only post when urgency changes OR P&L moves by $100+ OR positions change
+        // AND minimum 30 minutes between posts
+        const sig = `${briefing.urgency}|${Math.round(briefing.dailyPnl / 100) * 100}|${briefing.positions}`;
+        const minInterval = 30 * 60 * 1000; // 30 minutes
+        const timeSincePost = Date.now() - this.lastPostTime;
+        const changed = sig !== this.lastProcessed && timeSincePost > minInterval;
 
         if (changed) {
           this.lastProcessed = sig;
