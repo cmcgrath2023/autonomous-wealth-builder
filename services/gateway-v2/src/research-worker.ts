@@ -100,7 +100,7 @@ function getAlpacaHeaders(): Record<string, string> | null {
   const secret = process.env.ALPACA_API_SECRET || process.env.APCA_API_SECRET_KEY;
   if (key && secret) return { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret };
   try {
-    const pw = process.env.VAULT_MASTER_PASSWORD;
+    const pw = process.env.MTWM_VAULT_KEY || process.env.VAULT_MASTER_PASSWORD || 'mtwm-local-dev-key';
     if (!pw) return null;
     const v = new CredentialVault(pw);
     const k = v.retrieve('alpaca-api-key'), s = v.retrieve('alpaca-api-secret');
