@@ -28,7 +28,7 @@ export class CommsWorker {
   private store: GatewayStateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastProcessed = '';
-  private lastPostTime = 0;
+  private lastPostTime = Date.now(); // Start counting from now — don't post immediately on restart
   private running = false;
   private sentMessages = new Set<string>(); // dedup
 
