@@ -78,8 +78,10 @@ function spawnWorker(state: WorkerState): void {
 
   const { config } = state;
 
+  // tsx is installed at services/node_modules/tsx — set cwd accordingly
   const child = fork(config.script, [], {
-    execArgv: ['--import', 'tsx'],
+    execArgv: ['--import', 'tsx/esm'],
+    cwd: resolve(SRC_DIR, '../..'), // services/ dir where node_modules/tsx lives
     env: {
       ...process.env,
       GATEWAY_DB_PATH: DB_PATH,
