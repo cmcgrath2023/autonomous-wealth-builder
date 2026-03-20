@@ -61,9 +61,20 @@ function totalDeployed(positions: Array<{ ticker: string; marketValue: number }>
 }
 
 function slDominant(store: GatewayStateStore): boolean {
-  const trades = store.getTodayTrades();
-  if (trades.length < 5) return false;
-  return trades.filter((t) => t.reason === 'stop_loss').length / trades.length > SL_DOMINANCE_HALT;
+  try {
+    const trades = store.getTodayTrades();
+    if (trades.length < 5) return false;
+    const slCount = trades.filter((t) => t.reason === 'stop_loss').length;
+    const ratio = slCount / trades.length;
+    if (ratio > SL_DOMINANCE_HALT) {
+      console.log(`[TradeEngine] SL dominance: ${(ratio * 100).toFixed(0)}% (${slCount}/${trades.length} trades)`);
+    }
+    return ratio > SL_DOMINANCE_HALT;
+  } catch (e: any) {
+    // If state store fails, DON'T halt trading
+    console.log(`[TradeEngine] SL check error: ${e.message} — allowing trades`);
+    return false;
+  }
 }
 
 // ─── Trade Engine ────────────────────────────────────────────────────────────
