@@ -108,14 +108,26 @@ export class Ops {
 
       if (!forexService.healthy && !this._activeIncidents.has('forex_service')) {
         this._activeIncidents.add('forex_service');
-        this.store.set('restart_request:forex_service', now);
-        incidents.push({ component: 'forex_service', issue: 'Forex unreachable', action: 'restart_requested', timestamp: now });
+        try {
+          execSync('lsof -ti:3003 2>/dev/null | xargs kill -9 2>/dev/null', { timeout: 3000 });
+          execSync('cd /Users/cmcgrath/Documents/mtwm/services && nohup npx tsx forex-scanner/src/server.ts >> /tmp/mtwm-forex-service.log 2>&1 &', { timeout: 5000 });
+          incidents.push({ component: 'forex_service', issue: 'Forex unreachable', action: 'RESTARTED by Tara', timestamp: now });
+          console.log('[Tara] RESTARTED forex service on :3003');
+        } catch {
+          incidents.push({ component: 'forex_service', issue: 'Forex unreachable', action: 'restart FAILED', timestamp: now });
+        }
       } else if (forexService.healthy) { this._activeIncidents.delete('forex_service'); }
 
       if (!ui.healthy && !this._activeIncidents.has('ui')) {
         this._activeIncidents.add('ui');
-        this.store.set('restart_request:ui', now);
-        incidents.push({ component: 'ui', issue: 'UI unreachable', action: 'restart_requested', timestamp: now });
+        try {
+          execSync('lsof -ti:3000 2>/dev/null | xargs kill -9 2>/dev/null', { timeout: 3000 });
+          execSync('cd /Users/cmcgrath/Documents/mtwm/mtwm-ui && nohup npm run dev > /tmp/mtwm-ui.log 2>&1 &', { timeout: 5000 });
+          incidents.push({ component: 'ui', issue: 'UI unreachable', action: 'RESTARTED by Tara', timestamp: now });
+          console.log('[Tara] RESTARTED UI on :3000');
+        } catch {
+          incidents.push({ component: 'ui', issue: 'UI unreachable', action: 'restart FAILED', timestamp: now });
+        }
       } else if (ui.healthy) { this._activeIncidents.delete('ui'); }
 
       const allHealthy = apiServer.healthy && tradeEngine.healthy && researchWorker.healthy
