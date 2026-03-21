@@ -255,7 +255,8 @@ export class Ops {
   }
 
   private async notifyDiscord(incident: Incident): Promise<void> {
-    const key = `${incident.component}:${incident.issue}`;
+    // Dedup by component only — not the changing issue text
+    const key = incident.component;
     if (this.notifiedIncidents.has(key)) return;
 
     const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
