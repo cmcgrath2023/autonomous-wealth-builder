@@ -28,6 +28,7 @@ interface OpsStatus {
 export class Ops {
   private store: GatewayStateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private _activeIncidents = new Set<string>();
   private cycleCount = 0;
   private running = false;
   private lastStatus: OpsStatus | null = null;
@@ -86,30 +87,36 @@ export class Ops {
       const stateStore = this.checkStateStore();
       const managers = this.checkManagers();
 
-      // -- Autonomous actions --
-      if (!tradeEngine.healthy) {
-        const issue = `Trade engine stale (${tradeEngine.staleSecs}s)`;
+      // -- Autonomous actions (write ONCE per incident, not every cycle) --
+      if (!tradeEngine.healthy && !this._activeIncidents.has('trade_engine')) {
+        this._activeIncidents.add('trade_engine');
         this.store.set('restart_request:trade_engine', now);
-        incidents.push({ component: 'trade_engine', issue, action: 'restart_requested', timestamp: now });
-      }
-      if (!researchWorker.healthy) {
-        const issue = `Research worker stale -- no stars in 10 min`;
+        incidents.push({ component: 'trade_engine', issue: `Trade engine stale (${tradeEngine.staleSecs}s)`, action: 'restart_requested', timestamp: now });
+      } else if (tradeEngine.healthy) { this._activeIncidents.delete('trade_engine'); }
+
+      if (!researchWorker.healthy && !this._activeIncidents.has('research_worker')) {
+        this._activeIncidents.add('research_worker');
         this.store.set('restart_request:research_worker', now);
-        incidents.push({ component: 'research_worker', issue, action: 'restart_requested', timestamp: now });
-      }
-      if (!apiServer.healthy) {
-        const issue = `API server down or slow (${apiServer.responseMs ?? 'timeout'}ms)`;
+        incidents.push({ component: 'research_worker', issue: 'Research worker stale', action: 'restart_requested', timestamp: now });
+      } else if (researchWorker.healthy) { this._activeIncidents.delete('research_worker'); }
+
+      if (!apiServer.healthy && !this._activeIncidents.has('api_server')) {
+        this._activeIncidents.add('api_server');
         this.store.set('ops:critical:api_server', now);
-        incidents.push({ component: 'api_server', issue, action: 'CRITICAL alert written for Warren', timestamp: now });
-      }
-      if (!forexService.healthy) {
+        incidents.push({ component: 'api_server', issue: `API slow (${apiServer.responseMs}ms)`, action: 'CRITICAL', timestamp: now });
+      } else if (apiServer.healthy) { this._activeIncidents.delete('api_server'); }
+
+      if (!forexService.healthy && !this._activeIncidents.has('forex_service')) {
+        this._activeIncidents.add('forex_service');
         this.store.set('restart_request:forex_service', now);
-        incidents.push({ component: 'forex_service', issue: 'Forex service unreachable', action: 'restart_requested', timestamp: now });
-      }
-      if (!ui.healthy) {
+        incidents.push({ component: 'forex_service', issue: 'Forex unreachable', action: 'restart_requested', timestamp: now });
+      } else if (forexService.healthy) { this._activeIncidents.delete('forex_service'); }
+
+      if (!ui.healthy && !this._activeIncidents.has('ui')) {
+        this._activeIncidents.add('ui');
         this.store.set('restart_request:ui', now);
         incidents.push({ component: 'ui', issue: 'UI unreachable', action: 'restart_requested', timestamp: now });
-      }
+      } else if (ui.healthy) { this._activeIncidents.delete('ui'); }
 
       const allHealthy = apiServer.healthy && tradeEngine.healthy && researchWorker.healthy
         && forexService.healthy && ui.healthy && tunnel.healthy && stateStore.healthy

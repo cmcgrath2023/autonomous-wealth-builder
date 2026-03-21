@@ -6,6 +6,7 @@
 
 import { MidStream } from '../../midstream/src/index.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
+import { loadCredentials } from './config-bus.js';
 
 const QUOTE_INTERVAL_MS = 60_000;
 const BOOTSTRAP_BATCH_SIZE = 5;
@@ -45,7 +46,8 @@ async function refreshQuotes(): Promise<void> {
 // --- Historical bootstrap (non-blocking batches) ---
 
 function getAlpacaHeaders(): Record<string, string> | null {
-  const key = process.env.ALPACA_API_KEY || process.env.APCA_API_KEY_ID;
+  const creds = loadCredentials();
+  const key = creds.alpaca?.apiKey || process.env.ALPACA_API_KEY || process.env.APCA_API_KEY_ID;
   const secret = process.env.ALPACA_API_SECRET || process.env.APCA_API_SECRET_KEY;
   if (!key || !secret) return null;
   return { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret };
