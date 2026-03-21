@@ -68,3 +68,30 @@ No futures trading (oil, gold, natgas, copper, S&P futures). Currently using sto
 - [IBKR Trading API](https://www.interactivebrokers.com/en/trading/ib-api.php)
 - [IBKR Python API Guide](https://algotrading101.com/learn/interactive-brokers-python-api-native-guide/)
 - [CME Futures on Robinhood](https://www.cmegroup.com/media-room/press-releases/2025/1/29/cme_group_futurestolaunchonrobinhoodbringingnewtradingopportunit.html)
+
+## Detailed Cost Comparison
+
+### Margin Rates
+- Alpaca: 3.75%
+- IBKR: 1.75% (half the cost)
+- OANDA: varies by leverage
+
+### Forex Spreads (EUR/USD)
+- OANDA: 1.61 pips average
+- IBKR: 0.59 pips all-in (62% cheaper)
+
+### Crypto
+- Alpaca: commission-free
+- IBKR: commission-based (Alpaca wins here)
+
+### IBKR Account Setup
+- No minimum deposit
+- Paper trading: available immediately after approval
+- Futures: requires separate margin approval
+- API: free with any account, TWS + REST + WebSocket
+- Languages: Python, C#, C++, Java
+
+## Final Recommendation
+Add IBKR for futures/commodities. Keep Alpaca + OANDA.
+Three brokers = full market coverage + no single point of failure.
+IBKR as Deep Canyon premium feature.
