@@ -24,9 +24,11 @@ import { start as startApiServer } from './api-server.js';
 import { startManagers, stopManagers } from './managers/index.js';
 import { CommsWorker } from './comms-worker.js';
 import { OpenClawEngine } from './openclaw.js';
+import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 // Nanobot loaded dynamically in main()
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
+const BAYESIAN_KEY = 'bayesian_intelligence_state';
 
 // ---------------------------------------------------------------------------
 // Worker configuration
@@ -198,7 +200,35 @@ async function main(): Promise<void> {
   stateStore = new GatewayStateStore(DB_PATH);
   log(`State store ready (${DB_PATH})`);
 
-  // 2. Start API server in-process (lightweight, no need for separate process)
+  // 2. Initialize Bayesian Intelligence with persistence
+  const bayesianIntel = new BayesianIntelligence();
+  try {
+    const saved = stateStore.get(BAYESIAN_KEY);
+    if (saved) {
+      bayesianIntel.fromJSON(JSON.parse(saved));
+      const stats = bayesianIntel.getCollectiveIntelligence();
+      log(`Bayesian Intelligence restored: ${stats.totalBeliefs} beliefs, ${stats.totalObservations} observations`);
+    }
+  } catch (e: any) { log(`Bayesian restore failed: ${e.message} — starting fresh`); }
+
+  // Persist Bayesian state every 60 seconds
+  setInterval(() => {
+    try {
+      stateStore.set(BAYESIAN_KEY, JSON.stringify(bayesianIntel.toJSON()));
+      bayesianIntel.snapshotLearning();
+    } catch {}
+  }, 60_000);
+
+  // Expose Bayesian intel on the status endpoint
+  const origGet = stateStore.get.bind(stateStore);
+  const patchedGet = (key: string) => {
+    if (key === '__bayesian_intel__') return JSON.stringify(bayesianIntel.getCollectiveIntelligence());
+    if (key === '__bayesian_metrics__') return JSON.stringify(bayesianIntel.getIntelligenceMetrics());
+    return origGet(key);
+  };
+  (stateStore as any).get = patchedGet;
+
+  // 3. Start API server in-process (lightweight, no need for separate process)
   await startApiServer(stateStore);
 
   // 3. Start OpenClaw Engine + managers (Warren → Fin, Liza, Ferd)

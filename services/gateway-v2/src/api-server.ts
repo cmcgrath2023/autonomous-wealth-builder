@@ -92,10 +92,18 @@ let stateStore: GatewayStateStore;
 // GET /api/status
 // ---------------------------------------------------------------------------
 app.get('/api/status', (_req: Request, res: Response) => {
+  // Bayesian intelligence — read from patched stateStore.get
+  let bayesianIntel = {};
+  try { bayesianIntel = JSON.parse(stateStore.get('__bayesian_intel__') || '{}'); } catch {}
+  let intelligenceMetrics = {};
+  try { intelligenceMetrics = JSON.parse(stateStore.get('__bayesian_metrics__') || '{}'); } catch {}
+
   res.json({
     status: 'ok',
     uptime: process.uptime(),
     workers: JSON.parse(stateStore.get('worker_statuses') || '{}') ?? {},
+    bayesianIntel,
+    intelligenceMetrics,
   });
 });
 

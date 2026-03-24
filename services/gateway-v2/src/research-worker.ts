@@ -238,7 +238,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
       // Top gainers — these are TODAY's actual movers
       if (moversRes.status === 'fulfilled' && moversRes.value.ok) {
         const data = await moversRes.value.json() as any;
-        const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 3 && m.price > 3 && m.price < 500);
+        const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 3 && m.percent_change < 15 && m.price > 5 && m.price < 500);
         for (const g of gainers.slice(0, 10)) {
           const score = Math.min(0.90 + g.percent_change / 100, 0.99);
           store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, score);
@@ -264,24 +264,29 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     } catch (e) { errors.push(`Discovery: ${e}`); }
   }
 
-  // 4. Sector analysis (existing sectors as supplementary context)
-  for (const sector of SECTORS) {
-    try {
-      const r = analyzeSector(sector, prices, news, factCache);
-      for (const t of r.instruments) {
-        const sc = r.scores.get(t) || 0;
-        if (sc >= MIN_USEFUL_SCORE) { store.saveResearchStar(t, sector.name, `${r.catalyst} | ${r.condition}`, sc); starsWritten++; }
-      }
-      store.saveReport({
-        id: `research-${sector.key}-${Date.now()}`, agent: 'research-worker', type: `sector_${sector.key}`,
-        timestamp: new Date().toISOString(), summary: r.narrative,
-        findings: [r.narrative, `Instruments: ${r.instruments.join(', ') || 'none'}`,
-          ...r.instruments.map((t) => { const s = prices.get(t); return s ? `${t}: $${s.price.toFixed(2)} (${s.changePercent > 0 ? '+' : ''}${s.changePercent.toFixed(1)}%)` : t; })],
-        signals: r.instruments.map((t) => ({ symbol: t, direction: r.condition === 'bearish' ? 'short' : 'long', score: r.scores.get(t) || 0 })),
-      });
-      reportsWritten++;
-      console.log(`[Research] ${sector.name}: ${r.condition} | ${r.instruments.length} instruments`);
-    } catch (e) { errors.push(`${sector.name}: ${e}`); console.error(`[Research] ${sector.name} failed:`, e); }
+  // 4. Sector analysis — dynamic from movers + supplementary from predefined sectors
+  // Only run predefined sectors if we found fewer than 10 movers (movers take priority)
+  if (starsWritten < 10) {
+    for (const sector of SECTORS) {
+      try {
+        const r = analyzeSector(sector, prices, news, factCache);
+        for (const t of r.instruments) {
+          const sc = r.scores.get(t) || 0;
+          if (sc >= MIN_USEFUL_SCORE) { store.saveResearchStar(t, sector.name, `${r.catalyst} | ${r.condition}`, sc); starsWritten++; }
+        }
+        store.saveReport({
+          id: `research-${sector.key}-${Date.now()}`, agent: 'research-worker', type: `sector_${sector.key}`,
+          timestamp: new Date().toISOString(), summary: r.narrative,
+          findings: [r.narrative, `Instruments: ${r.instruments.join(', ') || 'none'}`,
+            ...r.instruments.map((t) => { const s = prices.get(t); return s ? `${t}: $${s.price.toFixed(2)} (${s.changePercent > 0 ? '+' : ''}${s.changePercent.toFixed(1)}%)` : t; })],
+          signals: r.instruments.map((t) => ({ symbol: t, direction: r.condition === 'bearish' ? 'short' : 'long', score: r.scores.get(t) || 0 })),
+        });
+        reportsWritten++;
+        console.log(`[Research] ${sector.name}: ${r.condition} | ${r.instruments.length} instruments`);
+      } catch (e) { errors.push(`${sector.name}: ${e}`); console.error(`[Research] ${sector.name} failed:`, e); }
+    }
+  } else {
+    console.log(`[Research] Skipping predefined sectors — ${starsWritten} movers already discovered`);
   }
 
   // 5. Promote high-conviction direct news hits (expand beyond known tickers)

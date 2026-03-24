@@ -246,7 +246,7 @@ export class TradeEngine {
             const moversData = await moversRes.json() as any;
             const ownedSet = new Set(positions.map(p => p.ticker));
             const gainers = (moversData.gainers || [])
-              .filter((m: any) => m.percent_change > 3 && m.price > 5 && m.price < 500)
+              .filter((m: any) => m.percent_change > 3 && m.percent_change < 15 && m.price > 5 && m.price < 500)
               .filter((m: any) => !ownedSet.has(m.symbol))
               .slice(0, 5);
             for (const mover of gainers) {
@@ -268,10 +268,9 @@ export class TradeEngine {
           .filter(p => Math.abs(p.marketValue) > 0)
           .sort((a, b) => a.unrealizedPnl - b.unrealizedPnl)[0];
         const bestStar = stars.filter(s => !new Set(positions.map(p => p.ticker)).has(s.symbol))[0];
-        // Only rotate if the best candidate scores significantly higher than what we'd sell
-        // And don't churn positions bought in the last 10 minutes
-        const weakestAge = Date.now() - new Date(weakest?.sector || 0).getTime();
-        const worthRotating = weakest && bestStar && weakest.unrealizedPnl < 0 && bestStar.score > 0.8;
+        // Only rotate if the weakest position is losing >$10 (not just spread)
+        // This prevents churning movers that were just bought
+        const worthRotating = weakest && bestStar && weakest.unrealizedPnl < -10 && bestStar.score > 0.9;
         if (worthRotating) {
           // Rotate: sell weakest, then let the scan buy the star
           const isCrypto2 = isCrypto(weakest.ticker);
