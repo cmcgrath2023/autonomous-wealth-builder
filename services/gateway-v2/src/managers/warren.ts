@@ -11,6 +11,19 @@
 import { GatewayStateStore } from '../../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from '../config-bus.js';
 
+async function postToDiscord(text: string): Promise<void> {
+  const webhook = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhook) return;
+  try {
+    await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {}
+}
+
 const CYCLE_MS = 30_000;
 const DAILY_GOAL = 500;
 const WEEKLY_GOAL = 3500;
@@ -98,6 +111,34 @@ export class Warren {
       if (this.cycleCount % 10 === 0) { // Log every 5 minutes
         console.log(`[Warren] #${this.cycleCount} | P&L: $${dailyPnl.toFixed(0)}/${DAILY_GOAL} | ${positions} pos | ${urgency} | ${managers.filter(m => m.healthy).length}/${managers.length} healthy`);
       }
+
+      // Post to Discord on urgency changes + hourly heartbeat during market hours
+      if (this.cycleCount > 3) {
+        const prevUrgency = this.store.get('warren:prev_urgency') || '';
+        const unhealthyManagers = managers.filter(m => !m.healthy);
+
+        // Urgency change
+        if (urgency !== prevUrgency) {
+          this.store.set('warren:prev_urgency', urgency);
+          await postToDiscord(`👔 **Warren** ${urgency === 'critical' ? '🚨' : urgency === 'elevated' ? '⚡' : ''}\n${briefing.narrative}`);
+        }
+
+        // Hourly heartbeat during market hours (every 120 cycles = ~60 min at 30s cycle)
+        const mkt = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false });
+        const etHour = parseInt(mkt);
+        const isMarketHours = etHour >= 9 && etHour < 17;
+        if (isMarketHours && this.cycleCount % 120 === 0) {
+          const time = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+          await postToDiscord(`👔 **Warren** [${time} ET]\n${briefing.narrative}`);
+        }
+
+        // Manager health alerts
+        if (unhealthyManagers.length > 0 && this.cycleCount % 60 === 0) {
+          await postToDiscord(`👔 **Warren** ⚠️\nManagers down: ${unhealthyManagers.map(m => m.name).join(', ')} — restarting`);
+        }
+      } else {
+        this.store.set('warren:prev_urgency', urgency);
+      }
     } catch (e: any) {
       console.error(`[Warren] Cycle error: ${e.message}`);
     }
@@ -108,7 +149,7 @@ export class Warren {
     const managers: ManagerHealth[] = [];
 
     for (const name of ['fin', 'liza', 'ferd']) {
-      const raw = this.store.get(`manager:${name}:status`);
+      const raw = this.store.get(`manager_${name}_status`) || this.store.get(`manager:${name}:status`);
       let lastReport: string | null = null;
       let lastAction = 'unknown';
       let healthy = false;
@@ -116,8 +157,8 @@ export class Warren {
       if (raw) {
         try {
           const status = JSON.parse(raw);
-          lastReport = status.timestamp;
-          lastAction = status.action || 'idle';
+          lastReport = status.lastCycle || status.lastScan || status.timestamp || null;
+          lastAction = status.action || status.actions?.[0] || 'idle';
           healthy = lastReport ? (now - new Date(lastReport).getTime()) < MANAGER_TIMEOUT_MS : false;
         } catch {}
       }
@@ -204,6 +245,7 @@ export class Warren {
         // Bank outsized winners immediately — don't let $500+ slip away
         if (pnl >= 500) {
           console.log(`[Warren] BANKING outsized winner: ${ticker} +$${pnl.toFixed(0)}`);
+          await postToDiscord(`👔 **Warren** 💰\nBANKING outsized winner: ${ticker} +$${pnl.toFixed(0)}`);
           try {
             const qty = pos.qty;
             const side = parseFloat(pos.qty) > 0 ? 'sell' : 'buy';

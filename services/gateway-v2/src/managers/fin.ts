@@ -9,6 +9,19 @@
 import { GatewayStateStore } from '../../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from '../config-bus.js';
 
+async function postToDiscord(text: string): Promise<void> {
+  const webhook = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhook) return;
+  try {
+    await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: `📊 **Fin** ⚡\n${text}` }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {}
+}
+
 const LOOP_MS = 60_000;
 const ENGINE_STALE_MS = 5 * 60_000;
 const DAILY_GOAL = 500;
@@ -209,6 +222,7 @@ export class Fin {
 
         if (pnl < -30) {
           console.log(`[Fin] EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
+          await postToDiscord(`🚨 EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
           await this.sellPosition(baseUrl, headers, symbol, qty, actions);
           actions.push(`EMERGENCY CUT ${symbol} ($${pnl.toFixed(2)})`);
         }
@@ -223,20 +237,28 @@ export class Fin {
     symbol: string, qty: number, actions: string[],
   ): Promise<void> {
     try {
+      // Crypto symbols: position API returns "AVAXUSD" but orders need "AVAX/USD"
+      // Crypto also needs time_in_force: gtc (not day)
+      const isCrypto = symbol.endsWith('USD') && !['SQQQ','TQQQ','SLV','GLD','GDX','DIA','DBO'].includes(symbol) && symbol.length > 4;
+      const orderSymbol = isCrypto ? symbol.replace(/USD$/, '/USD') : symbol;
+      const tif = isCrypto ? 'gtc' : 'day';
       const res = await fetch(`${baseUrl}/v2/orders`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, qty: String(qty), side: 'sell', type: 'market', time_in_force: 'day' }),
+        body: JSON.stringify({ symbol: orderSymbol, qty: String(qty), side: 'sell', type: 'market', time_in_force: tif }),
         signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) {
         actions.push(`SOLD ${symbol} x${qty}`);
+        await postToDiscord(`SOLD ${orderSymbol} x${qty} (${tif})`);
       } else {
         const body = await res.text();
         actions.push(`SELL FAILED ${symbol}: ${res.status} ${body}`);
+        await postToDiscord(`⚠️ SELL FAILED ${orderSymbol}: ${res.status} ${body.substring(0, 100)}`);
       }
     } catch (e: any) {
       actions.push(`SELL ERROR ${symbol}: ${e.message}`);
+      await postToDiscord(`❌ SELL ERROR ${symbol}: ${e.message}`);
     }
   }
 }

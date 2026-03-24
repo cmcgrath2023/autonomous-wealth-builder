@@ -227,7 +227,44 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     catch (e) { errors.push(`Prices: ${e}`); console.error('[Research] Price fetch failed:', e); }
   } else { console.warn('[Research] No Alpaca credentials -- skipping prices'); }
 
-  // 3. Sectors (each independent -- one failure does not stop others)
+  // 3. Dynamic discovery — scan Alpaca top movers and most actives
+  if (headers) {
+    try {
+      const [moversRes, activesRes] = await Promise.allSettled([
+        fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=20', { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT) }),
+        fetch('https://data.alpaca.markets/v1beta1/screener/stocks/most-actives?top=20&by=volume', { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT) }),
+      ]);
+
+      // Top gainers — these are TODAY's actual movers
+      if (moversRes.status === 'fulfilled' && moversRes.value.ok) {
+        const data = await moversRes.value.json() as any;
+        const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 3 && m.price > 3 && m.price < 500);
+        for (const g of gainers.slice(0, 10)) {
+          const score = Math.min(0.90 + g.percent_change / 100, 0.99);
+          store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, score);
+          starsWritten++;
+          // Also fetch the price so it's in our snapshot map
+          if (!prices.has(g.symbol)) prices.set(g.symbol, { price: g.price, changePercent: g.percent_change });
+        }
+        console.log(`[Research] Movers: ${gainers.length} gainers (top: ${gainers.slice(0, 3).map((g: any) => `${g.symbol} +${g.percent_change.toFixed(0)}%`).join(', ')})`);
+      }
+
+      // Most actives by volume — high volume = institutional interest
+      if (activesRes.status === 'fulfilled' && activesRes.value.ok) {
+        const data = await activesRes.value.json() as any;
+        const actives = (data.most_actives || []).filter((m: any) => m.price > 5 && m.price < 500 && m.trade_count > 10000);
+        for (const a of actives.slice(0, 5)) {
+          if (!prices.has(a.symbol)) {
+            const score = 0.75; // active but unknown direction — lower than movers
+            store.saveResearchStar(a.symbol, 'volume', `MOST ACTIVE | Vol: ${(a.trade_count || 0).toLocaleString()} | $${a.price.toFixed(2)}`, score);
+            starsWritten++;
+          }
+        }
+      }
+    } catch (e) { errors.push(`Discovery: ${e}`); }
+  }
+
+  // 4. Sector analysis (existing sectors as supplementary context)
   for (const sector of SECTORS) {
     try {
       const r = analyzeSector(sector, prices, news, factCache);
@@ -247,12 +284,14 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     } catch (e) { errors.push(`${sector.name}: ${e}`); console.error(`[Research] ${sector.name} failed:`, e); }
   }
 
-  // 4. Promote high-conviction direct news hits
+  // 5. Promote high-conviction direct news hits (expand beyond known tickers)
+  const ALL_STOCK_RE = /\b([A-Z]{2,5})\b/g;
   for (const item of news) {
-    if (item.sentiment === 'bullish' && item.tickers.length > 0) {
-      for (const t of item.tickers) {
+    if (item.sentiment === 'bullish') {
+      const mentioned = [...new Set((item.title.match(ALL_STOCK_RE) || []).filter(t => t.length >= 2 && t.length <= 5 && !['THE','AND','FOR','INC','NEW','CEO','IPO','ETF','SEC','FED','GDP','CPI','ECB'].includes(t)))];
+      for (const t of mentioned) {
         const s = prices.get(t);
-        if (s && s.changePercent > 0.5) { store.saveResearchStar(t, 'news', `NEWS: ${item.title.substring(0, 80)}`, 0.85); starsWritten++; }
+        if (s && s.changePercent > 2) { store.saveResearchStar(t, 'news', `NEWS: ${item.title.substring(0, 80)}`, 0.85); starsWritten++; }
       }
     }
   }

@@ -20,6 +20,7 @@
     "eventemitter3": "^5.0.1",
     "express": "^5.1.0",
     "goalie": "^1.3.1",
+    "node-cron": "^4.2.1",
     "ruv-swarm": "^1.0.20",
     "sublinear-time-solver": "^1.5.0",
     "uuid": "^11.0.0",

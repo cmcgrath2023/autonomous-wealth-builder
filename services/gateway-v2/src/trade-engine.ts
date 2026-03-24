@@ -233,8 +233,66 @@ export class TradeEngine {
       const positions = await this.executor.getPositions();
       const maxPos = strategy.maxPositions || MAX_POSITIONS;
       const budget = strategy.budgetMax || BUDGET_MAX;
-      if (budgetPositionCount(positions, mkt.isMarketOpen) >= maxPos)
-        return ar('skipped', `Max positions (${positions.length}/${maxPos})`);
+
+      // Scan top movers FIRST so they're available for rotation decisions
+      if (mkt.isMarketOpen) {
+        try {
+          const creds2 = loadCredentials();
+          const moversRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=10', {
+            headers: { 'APCA-API-KEY-ID': creds2.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds2.alpaca!.apiSecret },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (moversRes.ok) {
+            const moversData = await moversRes.json() as any;
+            const ownedSet = new Set(positions.map(p => p.ticker));
+            const gainers = (moversData.gainers || [])
+              .filter((m: any) => m.percent_change > 3 && m.price > 5 && m.price < 500)
+              .filter((m: any) => !ownedSet.has(m.symbol))
+              .slice(0, 5);
+            for (const mover of gainers) {
+              const moverScore = Math.min(0.96 + mover.percent_change / 500, 0.99);
+              stars.push({ symbol: mover.symbol, sector: 'momentum', score: moverScore, catalyst: `+${mover.percent_change.toFixed(1)}% today` });
+            }
+            if (gainers.length > 0) details.push(`Top movers: ${gainers.map((g: any) => `${g.symbol} +${g.percent_change.toFixed(1)}%`).join(', ')}`);
+          }
+        } catch (e: any) { details.push(`Movers scan: ${e.message}`); }
+      }
+
+      // Sort all candidates by score — movers (0.96-0.99) rank above research stars (0.85-0.95)
+      stars.sort((a, b) => b.score - a.score);
+
+      const currentCount = budgetPositionCount(positions, mkt.isMarketOpen);
+      if (currentCount >= maxPos) {
+        // At max positions — rotate weakest for highest-scored candidate
+        const weakest = positions
+          .filter(p => Math.abs(p.marketValue) > 0)
+          .sort((a, b) => a.unrealizedPnl - b.unrealizedPnl)[0];
+        const bestStar = stars.filter(s => !new Set(positions.map(p => p.ticker)).has(s.symbol))[0];
+        // Only rotate if the best candidate scores significantly higher than what we'd sell
+        // And don't churn positions bought in the last 10 minutes
+        const weakestAge = Date.now() - new Date(weakest?.sector || 0).getTime();
+        const worthRotating = weakest && bestStar && weakest.unrealizedPnl < 0 && bestStar.score > 0.8;
+        if (worthRotating) {
+          // Rotate: sell weakest, then let the scan buy the star
+          const isCrypto2 = isCrypto(weakest.ticker);
+          const sellSymbol = isCrypto2 ? weakest.ticker.replace(/USD$/, '/USD') : weakest.ticker;
+          const tif = isCrypto2 ? 'gtc' : 'day';
+          try {
+            const creds = loadCredentials();
+            const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret, 'Content-Type': 'application/json' };
+            await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
+              method: 'POST', headers,
+              body: JSON.stringify({ symbol: sellSymbol, qty: String(Math.abs(weakest.shares)), side: 'sell', type: 'market', time_in_force: tif }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            details.push(`ROTATED OUT ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) for ${bestStar.symbol}`);
+            console.log(`[TradeEngine] ROTATION: sold ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) to make room for ${bestStar.symbol} (score: ${bestStar.score})`);
+          } catch (e: any) { details.push(`Rotation failed: ${e.message}`); }
+          // Continue to scan — position freed
+        } else {
+          return ar('skipped', `Max positions (${positions.length}/${maxPos})`);
+        }
+      }
       if (totalDeployed(positions, mkt.isMarketOpen) >= budget)
         return ar('skipped', `Budget deployed ($${totalDeployed(positions, mkt.isMarketOpen).toFixed(0)}/${budget})`);
 
@@ -245,7 +303,11 @@ export class TradeEngine {
       if (fxCreds.oanda || true) { // Always try forex via proxy
         try {
           await this.forex.fetchQuotes();
-          const sigs = [...this.forex.evaluateSessionMomentum(), ...this.forex.evaluateCarryTrades()];
+          const [momentumSigs, carrySigs] = await Promise.all([
+            Promise.resolve(this.forex.evaluateSessionMomentum()),
+            Promise.resolve(this.forex.evaluateCarryTrades()),
+          ]);
+          const sigs = [...momentumSigs, ...carrySigs];
           if (sigs.length > 0) {
             sigs.sort((a, b) => b.confidence - a.confidence);
             const top = sigs[0];
@@ -260,11 +322,12 @@ export class TradeEngine {
         } catch (e: any) { details.push(`Forex error: ${e.message}`); }
       }
 
-      // Equity/Crypto from research stars
+      // Equity/Crypto from research stars + movers (already sorted by score)
       const eligibleStars = stars
         .filter((s) => !owned.has(s.symbol))
         .filter((s) => mkt.isMarketOpen || isCrypto(s.symbol))
-        .slice(0, 3);
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
       if (stars.length > 0) console.log(`  [scan] ${stars.length} stars, ${eligibleStars.length} eligible, owned: ${[...owned].join(',')}, market: ${mkt.isMarketOpen ? 'open' : 'closed'}`);
 
       for (const star of eligibleStars) {

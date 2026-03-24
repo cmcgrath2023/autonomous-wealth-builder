@@ -10,11 +10,21 @@
 import { fork, ChildProcess } from 'child_process';
 import { resolve, dirname, join } from 'path';
 import { existsSync } from 'fs';
+import { config } from 'dotenv';
+
+// Load env from gateway/.env.local (same file the old gateway used — has Discord tokens etc.)
+const envLocal = resolve(dirname(new URL(import.meta.url).pathname), '../../gateway/.env.local');
+if (existsSync(envLocal)) config({ path: envLocal });
+// Also load services/.env.webhook if present
+const envWebhook = resolve(dirname(new URL(import.meta.url).pathname), '../../.env.webhook');
+if (existsSync(envWebhook)) config({ path: envWebhook });
+
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { start as startApiServer } from './api-server.js';
 import { startManagers, stopManagers } from './managers/index.js';
 import { CommsWorker } from './comms-worker.js';
 import { OpenClawEngine } from './openclaw.js';
+// Nanobot loaded dynamically in main()
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
 
@@ -234,7 +244,30 @@ async function main(): Promise<void> {
     }
   }
 
-  // 6. Spawn worker processes
+  // 6. Start Nanobot Bridge + Scheduler (always-on sub-agent oversight)
+  try {
+    const { NanobotBridge } = await import('./nanobot-bridge.js');
+    const { NanobotScheduler } = await import('./nanobot-scheduler.js');
+    const { nanobotRoutes } = await import('./nanobot-routes.js');
+
+    const nanobotBridge = new NanobotBridge((key: string, val: string) => stateStore.set(key, val));
+    const nanobotScheduler = new NanobotScheduler(nanobotBridge);
+    nanobotScheduler.start();
+
+    const { app: expressApp } = await import('./api-server.js');
+    expressApp.use('/api', nanobotRoutes(nanobotBridge));
+
+    openClaw.registerAction('nanobot-bridge', 'monitor_tasks', async () => {
+      const active = nanobotBridge.getActiveTaskIds();
+      return { detail: `${active.length} active tasks`, result: active.length > 0 ? 'success' : 'skipped' };
+    }, 'observe', 5);
+
+    log('Nanobot Bridge online — scheduler active');
+  } catch (e: any) {
+    log(`Nanobot Bridge failed: ${e.message} — running without sub-agents`);
+  }
+
+  // 7. Spawn worker processes
   for (const config of WORKER_CONFIGS) {
     if (config.optional && !existsSync(config.script)) {
       log(`${config.name} skipped (${config.script} not found)`);

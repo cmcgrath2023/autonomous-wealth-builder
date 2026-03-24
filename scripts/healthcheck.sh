@@ -54,11 +54,13 @@ if [ "$GW_CODE" = "000" ] || [ -z "$GW_CODE" ]; then
   echo "$GW_FAILS" > "$GW_FAIL_FILE"
   if [ "$GW_FAILS" -ge 2 ]; then
     log "GATEWAY DOWN ($GW_FAILS failures, last code=$GW_CODE) — restarting"
+    /usr/sbin/lsof -ti:3001 | /usr/bin/xargs kill 2>/dev/null
+    sleep 3
     /usr/sbin/lsof -ti:3001 | /usr/bin/xargs kill -9 2>/dev/null
-    sleep 2
+    sleep 1
     cd /Users/cmcgrath/Documents/mtwm/services
-    nohup /opt/homebrew/bin/node --import tsx/esm gateway/src/server.ts >> /tmp/mtwm-gateway.log 2>&1 &
-    sleep 8
+    nohup /opt/homebrew/bin/node --import tsx/esm gateway-v2/src/index.ts >> /tmp/mtwm-gateway.log 2>&1 &
+    sleep 15
     GW_VERIFY=$(http_code "http://localhost:3001/api/status")
     [ "$GW_VERIFY" != "000" ] && [ -n "$GW_VERIFY" ] && log "GATEWAY RESTORED (HTTP $GW_VERIFY)" || log "GATEWAY STARTING"
     echo "0" > "$GW_FAIL_FILE"

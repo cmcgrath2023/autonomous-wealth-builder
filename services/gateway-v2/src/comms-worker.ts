@@ -11,10 +11,11 @@
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 
 const CYCLE_MS = 30_000;
-const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || '';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
-const SLACK_WEBHOOK = process.env.SLACK_WEBHOOK_URL || '';
+// Read env lazily — dotenv may not have run yet at module import time
+function getDiscordWebhook() { return process.env.DISCORD_WEBHOOK_URL || ''; }
+function getTelegramToken() { return process.env.TELEGRAM_BOT_TOKEN || ''; }
+function getTelegramChat() { return process.env.TELEGRAM_CHAT_ID || ''; }
+function getSlackWebhook() { return process.env.SLACK_WEBHOOK_URL || ''; }
 
 interface CommsMessage {
   agent: string;        // warren, fin, liza, ferd, system
@@ -41,9 +42,9 @@ export class CommsWorker {
   start(): void {
     this.running = true;
     const channels: string[] = [];
-    if (DISCORD_WEBHOOK) channels.push('Discord');
-    if (TELEGRAM_BOT_TOKEN) channels.push('Telegram');
-    if (SLACK_WEBHOOK) channels.push('Slack');
+    if (getDiscordWebhook()) channels.push('Discord');
+    if (getTelegramToken()) channels.push('Telegram');
+    if (getSlackWebhook()) channels.push('Slack');
     console.log(`[Comms] Worker online — channels: ${channels.length > 0 ? channels.join(', ') : 'NONE (set DISCORD_WEBHOOK_URL, TELEGRAM_BOT_TOKEN, or SLACK_WEBHOOK_URL)'}`);
 
     this.cycle();
@@ -161,9 +162,9 @@ export class CommsWorker {
   private async dispatch(msg: CommsMessage): Promise<void> {
     const formatted = this.formatMessage(msg);
 
-    if (DISCORD_WEBHOOK) await this.sendDiscord(formatted, msg);
-    if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) await this.sendTelegram(formatted);
-    if (SLACK_WEBHOOK) await this.sendSlack(formatted, msg);
+    if (getDiscordWebhook()) await this.sendDiscord(formatted, msg);
+    if (getTelegramToken() && getTelegramChat()) await this.sendTelegram(formatted);
+    if (getSlackWebhook()) await this.sendSlack(formatted, msg);
   }
 
   private formatMessage(msg: CommsMessage): string {
@@ -175,7 +176,7 @@ export class CommsWorker {
 
   private async sendDiscord(text: string, msg: CommsMessage): Promise<void> {
     try {
-      await fetch(DISCORD_WEBHOOK, {
+      await fetch(getDiscordWebhook(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -191,11 +192,11 @@ export class CommsWorker {
 
   private async sendTelegram(text: string): Promise<void> {
     try {
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      await fetch(`https://api.telegram.org/bot${getTelegramToken()}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
+          chat_id: getTelegramChat(),
           text: text.replace(/\*\*/g, '*'), // Telegram uses single * for bold
           parse_mode: 'Markdown',
         }),
@@ -208,7 +209,7 @@ export class CommsWorker {
 
   private async sendSlack(text: string, msg: CommsMessage): Promise<void> {
     try {
-      await fetch(SLACK_WEBHOOK, {
+      await fetch(getSlackWebhook(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -224,9 +225,9 @@ export class CommsWorker {
 
   getStatus(): { running: boolean; channels: string[] } {
     const channels: string[] = [];
-    if (DISCORD_WEBHOOK) channels.push('discord');
-    if (TELEGRAM_BOT_TOKEN) channels.push('telegram');
-    if (SLACK_WEBHOOK) channels.push('slack');
+    if (getDiscordWebhook()) channels.push('discord');
+    if (getTelegramToken()) channels.push('telegram');
+    if (getSlackWebhook()) channels.push('slack');
     return { running: this.running, channels };
   }
 }

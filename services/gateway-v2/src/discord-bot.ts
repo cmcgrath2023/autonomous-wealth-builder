@@ -304,13 +304,57 @@ function detectAgent(content: string): AgentName {
   return 'warren';
 }
 
-async function getAgentResponse(agent: AgentName, store: GatewayStateStore, question: string): Promise<string> {
-  switch (agent) {
-    case 'warren': return buildWarrenResponse(store, question);
-    case 'fin':    return buildFinResponse(store, question);
-    case 'liza':   return buildLizaResponse(store, question);
-    case 'ferd':   return buildFerdResponse(store, question);
+// ─── LLM Conversational Layer ────────────────────────────────────────────
+
+const AGENT_PERSONAS: Record<AgentName, string> = {
+  warren: `You are Warren, the Managing Director of a family office trading desk called Deep Canyon. You're sharp, direct, and take ownership. When things go wrong you don't make excuses. You speak like a seasoned Wall Street MD — confident, sometimes blunt, occasionally witty. You have strong opinions about risk management and hate losing money. Keep responses under 200 words.`,
+  fin: `You are Fin, the Trading Manager at Deep Canyon. You execute trades and monitor positions. You're precise, numbers-focused, and slightly intense about P&L. You speak in trader shorthand when appropriate. Keep responses under 200 words.`,
+  liza: `You are Liza, the News Desk analyst at Deep Canyon. You scan headlines and identify catalysts. You're quick, informed, and connect dots between macro events and trading opportunities. Keep responses under 200 words.`,
+  ferd: `You are Ferd, the Research Manager at Deep Canyon. You do deep sector analysis and find research stars. You're thoughtful, data-driven, and sometimes contrarian. Keep responses under 200 words.`,
+};
+
+async function llmConverse(agent: AgentName, context: string, question: string): Promise<string | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        system: `${AGENT_PERSONAS[agent]}\n\nHere is the current state of the trading desk:\n${context}`,
+        messages: [{ role: 'user', content: question }],
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json() as any;
+    return data.content?.[0]?.text || null;
+  } catch {
+    return null;
   }
+}
+
+async function getAgentResponse(agent: AgentName, store: GatewayStateStore, question: string): Promise<string> {
+  // Build context from live state
+  const dataResponse = agent === 'warren' ? buildWarrenResponse(store, question)
+    : agent === 'fin' ? await buildFinResponse(store, question)
+    : agent === 'liza' ? buildLizaResponse(store, question)
+    : buildFerdResponse(store, question);
+
+  // For commands (!status, !positions etc), return data directly
+  if (question.startsWith('!')) return dataResponse;
+
+  // For conversation, use LLM with live data as context
+  const llmResponse = await llmConverse(agent, dataResponse, question);
+  return llmResponse || dataResponse;
 }
 
 // ─── Discord Client ─────────────────────────────────────────────────────────
@@ -339,10 +383,12 @@ export function start(dbPath?: string): Client {
   });
 
   client.once('ready', () => {
-    console.log(`[DiscordBot] Connected as ${client.user?.tag}. Listening on ${allowedChannels ? allowedChannels.size + ' channels' : 'all channels'}.`);
+    const guilds = client.guilds.cache.map(g => `${g.name} (${g.id})`).join(', ');
+    console.log(`[DiscordBot] Connected as ${client.user?.tag}. Guilds: ${guilds || 'NONE'}. Listening on ${allowedChannels ? allowedChannels.size + ' channels' : 'all channels'}.`);
   });
 
   client.on('messageCreate', async (message: Message) => {
+    console.log(`[DiscordBot] MSG from ${message.author.tag} in #${(message.channel as TextChannel).name || message.channel.id}: "${message.content.substring(0, 50)}"`);
     // Ignore bots and empty messages
     if (message.author.bot || !message.content.trim()) return;
 
