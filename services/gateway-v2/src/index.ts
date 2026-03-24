@@ -25,6 +25,8 @@ import { startManagers, stopManagers } from './managers/index.js';
 import { CommsWorker } from './comms-worker.js';
 import { OpenClawEngine } from './openclaw.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
+import { RVFEngine } from '../../rvf-engine/src/index.js';
+import { LearningEngine } from '../../rvf-engine/src/learning-engine.js';
 // Nanobot loaded dynamically in main()
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
@@ -227,6 +229,15 @@ async function main(): Promise<void> {
     return origGet(key);
   };
   (stateStore as any).get = patchedGet;
+
+  // 2b. Initialize RVF Engine + Learning Engine
+  try {
+    const rvfEngine = new RVFEngine();
+    const learningEngine = new LearningEngine(rvfEngine);
+    log(`RVF Engine + Learning Engine online (${rvfEngine.search('learning-log', 'learning').length > 0 ? 'restored' : 'fresh'})`);
+  } catch (e: any) {
+    log(`RVF/Learning Engine failed: ${e.message} — running without RVF`);
+  }
 
   // 3. Start API server in-process (lightweight, no need for separate process)
   await startApiServer(stateStore);
