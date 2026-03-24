@@ -19,6 +19,7 @@ import { ForexScanner } from '../../forex-scanner/src/index.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
 import { loadCredentials, getAlpacaHeaders, ALPACA_DATA_URL, FOREX_SERVICE_URL } from './config-bus.js';
+import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
 
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
@@ -92,8 +93,10 @@ export class TradeEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private recent: HeartbeatResult[] = [];
+  private dailyOptimizer: DailyOptimizer;
 
   constructor() {
+    this.dailyOptimizer = new DailyOptimizer();
     // Single credential source — config bus loads from vault + env
     const creds = loadCredentials();
 
@@ -408,9 +411,30 @@ export class TradeEngine {
     try { const r = await this.checkExits(); actions.push(r); if (r.status !== 'skipped') console.log(`  [2] ${r.detail} (${r.durationMs}ms)`); }
     catch (e: any) { errors.push(`check_exits: ${e.message}`); }
 
-    // 3-4. Read strategy + stars
-    let strategy = {};
-    try { const raw = this.store.get('daily_strategy'); if (raw) strategy = JSON.parse(raw); } catch {}
+    // 3-4. Generate daily strategy via MinCut optimizer + read stars
+    let strategy: { maxPositions?: number; budgetMax?: number } = {};
+    try {
+      const positions = await this.executor.getPositions();
+      const dailyState = {
+        budget: BUDGET_MAX,
+        dailyGoal: 500,
+        currentDayPnl: positions.reduce((s, p) => s + p.unrealizedPnl, 0),
+        positions: positions.map(p => ({ ticker: p.ticker, value: p.marketValue, pnl: p.unrealizedPnl, pnlPct: p.unrealizedPnlPercent, isCrypto: isCrypto(p.ticker) })),
+        forexPositions: [],
+        bayesianPrefer: [],
+        bayesianAvoid: [],
+        slDominance: 0,
+        marketCondition: getMarketCondition(positions.map(p => ({ pct: p.unrealizedPnlPercent }))),
+        activeSessions: ['newyork'],
+        cryptoMarketBias: 'mixed' as const,
+      };
+      const optimized = this.dailyOptimizer.optimize(dailyState);
+      strategy = { maxPositions: optimized.maxNewPositions + positions.length, budgetMax: BUDGET_MAX };
+      this.store.set('daily_strategy', JSON.stringify(optimized));
+      if (this.hbCount % 10 === 1) console.log(`  [3] Strategy: ${optimized.approach} | Goal remaining: $${optimized.remainingGoal.toFixed(0)} | Risk: ${optimized.riskBudget.toFixed(0)}%`);
+    } catch (e: any) {
+      console.log(`  [3] Strategy error: ${e.message} — using defaults`);
+    }
     let stars: Array<{ symbol: string; sector: string; score: number; catalyst: string }> = [];
     try { this.store.clearExpiredStars(4); stars = this.store.getResearchStars(); console.log(`  [4] ${stars.length} research stars loaded`); } catch (e: any) { console.log(`  [4] Stars error: ${e.message}`); }
     if (stars.length > 0) console.log(`  [3-4] ${stars.length} research stars loaded`);
