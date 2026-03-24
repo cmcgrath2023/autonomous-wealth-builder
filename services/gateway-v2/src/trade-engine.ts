@@ -57,7 +57,8 @@ function isCrypto(ticker: string): boolean {
 }
 
 function budgetPositionCount(positions: Array<{ ticker: string; marketValue: number }>, marketOpen: boolean): number {
-  return positions.filter((p) => Math.abs(p.marketValue) > 0 && (marketOpen || isCrypto(p.ticker))).length;
+  // Always count ALL positions — after-hours crypto shouldn't fill equity slots
+  return positions.filter((p) => Math.abs(p.marketValue) > 0).length;
 }
 
 function totalDeployed(positions: Array<{ ticker: string; marketValue: number }>, marketOpen: boolean): number {
