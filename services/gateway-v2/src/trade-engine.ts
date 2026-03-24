@@ -316,7 +316,7 @@ export class TradeEngine {
             const open = await this.forex.getOpenTrades();
             if (open.length < 4) {
               try {
-                await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 5000 : -5000, top.stopLoss, top.takeProfit);
+                await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 25000 : -25000, top.stopLoss, top.takeProfit);
                 details.push(`FOREX ${top.direction.toUpperCase()} ${top.symbol} (${(top.confidence * 100).toFixed(0)}%)`);
               } catch (e: any) { details.push(`FOREX FAIL ${top.symbol}: ${e.message}`); }
             } else { details.push(`Forex full (${open.length}/4)`); }
