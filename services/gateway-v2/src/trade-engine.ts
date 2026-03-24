@@ -20,6 +20,7 @@ import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
 import { loadCredentials, getAlpacaHeaders, ALPACA_DATA_URL, FOREX_SERVICE_URL } from './config-bus.js';
 import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
+import { eventBus } from '../../shared/utils/event-bus.js';
 
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
@@ -164,6 +165,7 @@ export class TradeEngine {
             const dir = p.units > 0 ? 'long' : 'short';
             const reason = p.pl >= FOREX_BANK ? 'take_profit' : 'stop_loss';
             this.store.recordTrade({ ticker: sym, pnl: p.pl, direction: dir, reason, openedAt: '', closedAt: new Date().toISOString() });
+            eventBus.emit('trade:closed' as any, { ticker: sym, success: p.pl > 0, returnPct: p.pl / 100, reason });
             log.push(`${p.pl >= FOREX_BANK ? 'BANKED' : 'CUT'} ${sym} $${p.pl.toFixed(2)}`);
           } catch (e: any) { log.push(`FAILED ${p.instrument}: ${e.message}`); }
         }
@@ -211,6 +213,11 @@ export class TradeEngine {
         this.store.recordTrade({
           ticker: trade.ticker, pnl: trade.pnl, direction: 'long',
           reason: trade.exitReason, openedAt: '', closedAt: trade.closedAt,
+        });
+        eventBus.emit('trade:closed' as any, {
+          ticker: trade.ticker, success: trade.pnl > 0,
+          returnPct: trade.exitPrice && trade.entryPrice ? (trade.exitPrice - trade.entryPrice) / trade.entryPrice : trade.pnl / 100,
+          reason: trade.exitReason,
         });
       }
       return ar(all.some((a) => a.includes('LOSS')) ? 'error' : 'success', all.join('; ') + cb);
@@ -289,6 +296,7 @@ export class TradeEngine {
             });
             details.push(`ROTATED OUT ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) for ${bestStar.symbol}`);
             console.log(`[TradeEngine] ROTATION: sold ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) to make room for ${bestStar.symbol} (score: ${bestStar.score})`);
+            eventBus.emit('trade:closed' as any, { ticker: weakest.ticker, success: weakest.unrealizedPnl > 0, returnPct: weakest.unrealizedPnlPercent / 100, reason: 'rotation' });
           } catch (e: any) { details.push(`Rotation failed: ${e.message}`); }
           // Continue to scan — position freed
         } else {
