@@ -285,9 +285,13 @@ export class TradeEngine {
           .filter(p => Math.abs(p.marketValue) > 0)
           .sort((a, b) => a.unrealizedPnl - b.unrealizedPnl)[0];
         const bestStar = stars.filter(s => !new Set(positions.map(p => p.ticker)).has(s.symbol))[0];
-        // Only rotate if weakest is losing significantly (>$30) and best candidate is high-conviction
-        // $30 threshold accounts for spread + commission costs to prevent churn
-        const worthRotating = weakest && bestStar && weakest.unrealizedPnl < -30 && bestStar.score > 0.9;
+        // Rotate if: weakest is losing OR best candidate significantly outscores weakest's performance
+        // High-score movers (0.96+) can displace flat/weak positions even if not losing
+        const weakPnlPct = weakest ? weakest.unrealizedPnlPercent : 0;
+        const worthRotating = weakest && bestStar && (
+          weakest.unrealizedPnl < -10 ||                          // losing money
+          (weakPnlPct < 1 && bestStar.score > 0.96)              // flat position, hot mover available
+        );
         if (worthRotating) {
           // Rotate: sell weakest, then let the scan buy the star
           const isCrypto2 = isCrypto(weakest.ticker);
