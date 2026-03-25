@@ -27,6 +27,7 @@ import { OpenClawEngine } from './openclaw.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { RVFEngine } from '../../rvf-engine/src/index.js';
 import { LearningEngine } from '../../rvf-engine/src/learning-engine.js';
+import { eventBus } from '../../shared/utils/event-bus.js';
 // Nanobot loaded dynamically in main()
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
@@ -212,6 +213,9 @@ async function main(): Promise<void> {
       log(`Bayesian Intelligence restored: ${stats.totalBeliefs} beliefs, ${stats.totalObservations} observations`);
     }
   } catch (e: any) { log(`Bayesian restore failed: ${e.message} — starting fresh`); }
+
+  // Share Bayesian instance with trade engine via eventBus
+  eventBus.emit('intelligence:ready' as any, bayesianIntel);
 
   // Persist Bayesian state every 60 seconds
   setInterval(() => {

@@ -21,6 +21,11 @@ import { CredentialVault } from '../../qudag/src/vault.js';
 import { loadCredentials, getAlpacaHeaders, ALPACA_DATA_URL, FOREX_SERVICE_URL } from './config-bus.js';
 import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
+import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
+
+// Shared Bayesian instance — populated by gateway index.ts via eventBus
+let _bayesian: BayesianIntelligence | null = null;
+eventBus.on('intelligence:ready' as any, (bi: BayesianIntelligence) => { _bayesian = bi; });
 
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
@@ -96,6 +101,7 @@ export class TradeEngine {
   private stopping = false;
   private recent: HeartbeatResult[] = [];
   private dailyOptimizer: DailyOptimizer;
+  private _lastStrategy: { riskBudget: number; takeProfitTarget: number; approach: string; maxNewPositions: number; actions: string[] } | null = null;
 
   constructor() {
     this.dailyOptimizer = new DailyOptimizer();
@@ -279,9 +285,9 @@ export class TradeEngine {
           .filter(p => Math.abs(p.marketValue) > 0)
           .sort((a, b) => a.unrealizedPnl - b.unrealizedPnl)[0];
         const bestStar = stars.filter(s => !new Set(positions.map(p => p.ticker)).has(s.symbol))[0];
-        // Only rotate if the weakest position is losing >$10 (not just spread)
-        // This prevents churning movers that were just bought
-        const worthRotating = weakest && bestStar && weakest.unrealizedPnl < -10 && bestStar.score > 0.9;
+        // Only rotate if weakest is losing significantly (>$30) and best candidate is high-conviction
+        // $30 threshold accounts for spread + commission costs to prevent churn
+        const worthRotating = weakest && bestStar && weakest.unrealizedPnl < -30 && bestStar.score > 0.9;
         if (worthRotating) {
           // Rotate: sell weakest, then let the scan buy the star
           const isCrypto2 = isCrypto(weakest.ticker);
@@ -347,8 +353,22 @@ export class TradeEngine {
         const deployed = totalDeployed(fresh, mkt.isMarketOpen);
         if (deployed >= budget) { details.push('Budget full — done'); break; }
 
+        // FIX 1: Bayesian filter — adjustSignalConfidence before every buy
+        let adjustedScore = star.score;
+        if (_bayesian) {
+          adjustedScore = _bayesian.adjustSignalConfidence(star.symbol, star.score, 'buy');
+          const prior = _bayesian.getTickerPrior(star.symbol);
+          // Hard reject: if Bayesian has enough data and posterior < 0.35, skip this ticker
+          if (prior.observations >= 5 && prior.posterior < 0.35) {
+            details.push(`SKIP ${star.symbol} — Bayesian reject (${(prior.posterior*100).toFixed(0)}% win rate, ${prior.observations} obs)`);
+            continue;
+          }
+        }
+
+        // FIX 2: Use MinCut allocations for position sizing
         const remaining = budget - deployed;
-        const size = Math.min(remaining * 0.20, 1400);
+        const riskPct = this._lastStrategy?.riskBudget ?? 100;
+        const size = Math.min(remaining * 0.20 * (riskPct / 100), this._lastStrategy?.takeProfitTarget ? 1400 : 1400);
         if (size < 50) continue;
 
         try {
@@ -361,11 +381,11 @@ export class TradeEngine {
 
           const signal = {
             id: `star-${Date.now()}-${star.symbol}`, ticker: star.symbol,
-            direction: 'buy' as const, confidence: star.score, timeframe: '1h' as const,
+            direction: 'buy' as const, confidence: adjustedScore, timeframe: '1h' as const,
             indicators: {}, pattern: 'research_star', timestamp: new Date(), source: 'momentum' as const,
           };
           const order = await this.executor.execute(signal, qty, size);
-          details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}`);
+          details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}${adjustedScore !== star.score ? ` (adj: ${adjustedScore.toFixed(2)})` : ''}`);
           if (order.status === 'filled' || order.status === 'pending') owned.add(star.symbol);
         } catch (e: any) { details.push(`${star.symbol}: ${e.message}`); }
       }
@@ -438,9 +458,10 @@ export class TradeEngine {
         cryptoMarketBias: 'mixed' as const,
       };
       const optimized = this.dailyOptimizer.optimize(dailyState);
-      strategy = { maxPositions: optimized.maxNewPositions + positions.length, budgetMax: BUDGET_MAX };
+      this._lastStrategy = optimized;
+      strategy = { maxPositions: Math.min(optimized.maxNewPositions + positions.length, MAX_POSITIONS), budgetMax: BUDGET_MAX };
       this.store.set('daily_strategy', JSON.stringify(optimized));
-      if (this.hbCount % 10 === 1) console.log(`  [3] Strategy: ${optimized.approach} | Goal remaining: $${optimized.remainingGoal.toFixed(0)} | Risk: ${optimized.riskBudget.toFixed(0)}%`);
+      if (this.hbCount % 10 === 1) console.log(`  [3] Strategy: ${optimized.approach} | Goal: $${optimized.remainingGoal.toFixed(0)} | Risk: ${optimized.riskBudget.toFixed(0)}% | TP: $${optimized.takeProfitTarget.toFixed(0)} | Max new: ${optimized.maxNewPositions}`);
     } catch (e: any) {
       console.log(`  [3] Strategy error: ${e.message} — using defaults`);
     }

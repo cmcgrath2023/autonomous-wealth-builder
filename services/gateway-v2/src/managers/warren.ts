@@ -208,9 +208,14 @@ export class Warren {
     return 'critical'; // losing money
   }
 
+  private lastPushedUrgency: Urgency | null = null;
+
   private pushManagers(urgency: Urgency, dailyPnl: number, managers: ManagerHealth[]): void {
-    this.store.set('warren:urgency', urgency);
     this.store.set('warren:daily_pnl', String(dailyPnl));
+
+    // Only push directives when urgency actually changes — prevents overwriting every 30s
+    if (urgency === this.lastPushedUrgency) return;
+    this.lastPushedUrgency = urgency;
 
     if (urgency === 'critical') {
       this.store.set('fin:directive', 'tighten_stops_reduce_exposure');

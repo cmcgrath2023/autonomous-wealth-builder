@@ -9,6 +9,20 @@
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { MarketFACTCache } from '../../shared/src/fact-cache.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
+import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
+import { eventBus } from '../../shared/utils/event-bus.js';
+
+// FIX 1 & 3: Bayesian filter for research stars — adjust scores based on trade outcomes
+let _bayesian: BayesianIntelligence | null = null;
+eventBus.on('intelligence:ready' as any, (bi: BayesianIntelligence) => { _bayesian = bi; });
+
+function bayesianAdjustScore(ticker: string, rawScore: number): number {
+  if (!_bayesian) return rawScore;
+  const prior = _bayesian.getTickerPrior(ticker);
+  if (prior.observations < 3) return rawScore; // not enough data
+  // Penalize tickers with bad track records, boost proven winners
+  return _bayesian.adjustSignalConfidence(ticker, rawScore, 'buy');
+}
 
 const CYCLE_MS = 120_000;
 const STAR_EXPIRY_HOURS = 4;
@@ -241,7 +255,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 3 && m.percent_change < 15 && m.price > 5 && m.price < 500);
         for (const g of gainers.slice(0, 10)) {
           const score = Math.min(0.90 + g.percent_change / 100, 0.99);
-          store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, score);
+          store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, bayesianAdjustScore(g.symbol, score));
           starsWritten++;
           // Also fetch the price so it's in our snapshot map
           if (!prices.has(g.symbol)) prices.set(g.symbol, { price: g.price, changePercent: g.percent_change });
@@ -272,7 +286,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         const r = analyzeSector(sector, prices, news, factCache);
         for (const t of r.instruments) {
           const sc = r.scores.get(t) || 0;
-          if (sc >= MIN_USEFUL_SCORE) { store.saveResearchStar(t, sector.name, `${r.catalyst} | ${r.condition}`, sc); starsWritten++; }
+          { const adjSc = bayesianAdjustScore(t, sc); if (adjSc >= MIN_USEFUL_SCORE) { store.saveResearchStar(t, sector.name, `${r.catalyst} | ${r.condition}`, adjSc); starsWritten++; } }
         }
         store.saveReport({
           id: `research-${sector.key}-${Date.now()}`, agent: 'research-worker', type: `sector_${sector.key}`,
@@ -324,7 +338,27 @@ export async function start(dbPath?: string): Promise<void> {
   const db = dbPath || process.env.GATEWAY_DB_PATH || 'data/gateway-state.db';
   store = new GatewayStateStore(db);
   console.log(`[Research] Worker starting (db=${db}, cycle=${CYCLE_MS / 1000}s)`);
-  await scheduleCycle(new MarketFACTCache());
+  // FIX 5: Persist FACT cache across restarts
+  const factCache = new MarketFACTCache();
+  try {
+    const saved = store.get('fact_cache_state');
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (data.patterns) {
+        for (const [k, v] of data.patterns) (factCache as any).patterns.set(k, v);
+        console.log(`[Research] FACT cache restored: ${data.patterns.length} patterns`);
+      }
+    }
+  } catch {}
+  // Save FACT cache every 5 minutes
+  setInterval(() => {
+    try {
+      const patterns = [...(factCache as any).patterns.entries()];
+      store!.set('fact_cache_state', JSON.stringify({ patterns }));
+    } catch {}
+  }, 300_000);
+
+  await scheduleCycle(factCache);
 }
 
 export function stop(): void {
