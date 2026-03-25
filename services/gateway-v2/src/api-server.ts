@@ -281,6 +281,68 @@ app.get('/api/strategy/daily', (_req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// Manual Trade Override — buy/sell specific tickers
+// ---------------------------------------------------------------------------
+
+app.post('/api/trade/buy', async (req: Request, res: Response) => {
+  if (!hasAlpacaCreds()) return res.status(503).json({ error: 'No Alpaca credentials' });
+  const { symbol, qty, notional } = req.body;
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+
+  try {
+    const order: Record<string, unknown> = {
+      symbol,
+      side: 'buy',
+      type: 'market',
+      time_in_force: symbol.includes('/') || (symbol.includes('USD') && symbol.length > 5) ? 'gtc' : 'day',
+    };
+    if (qty) order.qty = String(qty);
+    else if (notional) order.notional = String(notional);
+    else order.notional = '500'; // default $500
+
+    const r = await fetch(`${ALPACA_BASE}/v2/orders`, {
+      method: 'POST',
+      headers: alpacaHeaders(),
+      body: JSON.stringify(order),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      console.log(`[ManualTrade] BUY ${symbol} — ${data.status}`);
+      res.json({ status: 'ok', order: data });
+    } else {
+      res.status(r.status).json({ error: data });
+    }
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/trade/sell', async (req: Request, res: Response) => {
+  if (!hasAlpacaCreds()) return res.status(503).json({ error: 'No Alpaca credentials' });
+  const { symbol } = req.body;
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+
+  try {
+    // Close entire position
+    const r = await fetch(`${ALPACA_BASE}/v2/positions/${symbol}`, {
+      method: 'DELETE',
+      headers: alpacaHeaders(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      console.log(`[ManualTrade] SELL ${symbol} — closed`);
+      res.json({ status: 'ok', order: data });
+    } else {
+      res.status(r.status).json({ error: data });
+    }
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Error handler — catch any unhandled route errors
 // ---------------------------------------------------------------------------
 app.use((err: Error, _req: Request, res: Response, _next: unknown) => {

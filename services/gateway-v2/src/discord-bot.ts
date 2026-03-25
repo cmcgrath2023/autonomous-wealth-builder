@@ -397,6 +397,37 @@ export function start(dbPath?: string): Client {
 
     const content = message.content.trim();
 
+    // Manual trade commands: !buy UGRO 500 or !sell UGRO
+    const buyMatch = content.match(/^!buy\s+(\S+)(?:\s+(\d+))?/i);
+    const sellMatch = content.match(/^!sell\s+(\S+)/i);
+    if (buyMatch) {
+      const symbol = buyMatch[1].toUpperCase();
+      const notional = buyMatch[2] || '500';
+      try {
+        const r = await fetch('http://localhost:3001/api/trade/buy', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, notional }),
+        });
+        const data = await r.json() as any;
+        const reply = r.ok ? `📊 **Fin** ⚡\nManual BUY ${symbol} — $${notional} — ${data.order?.status || 'submitted'}` : `⚠️ BUY failed: ${JSON.stringify(data.error).substring(0, 200)}`;
+        await message.reply(reply);
+      } catch (e: any) { await message.reply(`❌ Error: ${e.message}`); }
+      return;
+    }
+    if (sellMatch) {
+      const symbol = sellMatch[1].toUpperCase();
+      try {
+        const r = await fetch('http://localhost:3001/api/trade/sell', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol }),
+        });
+        const data = await r.json() as any;
+        const reply = r.ok ? `📊 **Fin** ⚡\nManual SELL ${symbol} — position closed` : `⚠️ SELL failed: ${JSON.stringify(data.error).substring(0, 200)}`;
+        await message.reply(reply);
+      } catch (e: any) { await message.reply(`❌ Error: ${e.message}`); }
+      return;
+    }
+
     // Only respond to commands, mentions, or messages that reference an agent
     const isCommand = content.startsWith('!');
     const isMention = message.mentions.has(client.user!);
