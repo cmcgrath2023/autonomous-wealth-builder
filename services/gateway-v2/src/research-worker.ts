@@ -252,7 +252,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
       // Top gainers — these are TODAY's actual movers
       if (moversRes.status === 'fulfilled' && moversRes.value.ok) {
         const data = await moversRes.value.json() as any;
-        const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 2 && m.percent_change < 25 && m.price > 5 && m.price < 500);
+        const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 2 && m.price > 5 && m.price < 500);
         for (const g of gainers.slice(0, 10)) {
           const score = Math.min(0.90 + g.percent_change / 100, 0.99);
           store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, bayesianAdjustScore(g.symbol, score));
