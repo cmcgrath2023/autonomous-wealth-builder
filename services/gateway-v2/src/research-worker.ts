@@ -278,30 +278,8 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     } catch (e) { errors.push(`Discovery: ${e}`); }
   }
 
-  // 4. Sector analysis — dynamic from movers + supplementary from predefined sectors
-  // Only run predefined sectors if we found fewer than 10 movers (movers take priority)
-  if (starsWritten < 10) {
-    for (const sector of SECTORS) {
-      try {
-        const r = analyzeSector(sector, prices, news, factCache);
-        for (const t of r.instruments) {
-          const sc = r.scores.get(t) || 0;
-          { const adjSc = bayesianAdjustScore(t, sc); if (adjSc >= MIN_USEFUL_SCORE) { store.saveResearchStar(t, sector.name, `${r.catalyst} | ${r.condition}`, adjSc); starsWritten++; } }
-        }
-        store.saveReport({
-          id: `research-${sector.key}-${Date.now()}`, agent: 'research-worker', type: `sector_${sector.key}`,
-          timestamp: new Date().toISOString(), summary: r.narrative,
-          findings: [r.narrative, `Instruments: ${r.instruments.join(', ') || 'none'}`,
-            ...r.instruments.map((t) => { const s = prices.get(t); return s ? `${t}: $${s.price.toFixed(2)} (${s.changePercent > 0 ? '+' : ''}${s.changePercent.toFixed(1)}%)` : t; })],
-          signals: r.instruments.map((t) => ({ symbol: t, direction: r.condition === 'bearish' ? 'short' : 'long', score: r.scores.get(t) || 0 })),
-        });
-        reportsWritten++;
-        console.log(`[Research] ${sector.name}: ${r.condition} | ${r.instruments.length} instruments`);
-      } catch (e) { errors.push(`${sector.name}: ${e}`); console.error(`[Research] ${sector.name} failed:`, e); }
-    }
-  } else {
-    console.log(`[Research] Skipping predefined sectors — ${starsWritten} movers already discovered`);
-  }
+  // 4. No hardcoded sectors — research is fully dynamic from movers, most actives, and news
+  console.log(`[Research] Dynamic discovery: ${starsWritten} stars from movers/actives`);
 
   // 5. Promote high-conviction direct news hits (expand beyond known tickers)
   const ALL_STOCK_RE = /\b([A-Z]{2,5})\b/g;
