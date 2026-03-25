@@ -255,15 +255,7 @@ export class PositionManager {
   }
 
   private async closePosition(executor: TradeExecutor, pos: Position, reason: ClosedTrade['exitReason']): Promise<string | null> {
-    // PDT guard: equity positions (not crypto) held < 24h only close on stop_loss
-    // This preserves our 3 day trades for emergencies on a sub-$25K account
-    const isCrypto = pos.ticker.includes('USD') && pos.ticker.length > 5;
-    const entryTime = this.entryTimes.get(pos.ticker) || Date.now();
-    const holdHours = (Date.now() - entryTime) / 3600000;
-    if (!isCrypto && holdHours < 20 && reason !== 'stop_loss' && reason !== 'circuit_breaker') {
-      console.log(`[PDT Guard] ${pos.ticker} held ${holdHours.toFixed(1)}h — blocking ${reason} sell (swing only, save day trades)`);
-      return null;
-    }
+    // PDT guard disabled — account equity > $25K, day trading unrestricted
 
     // Create a sell signal to close
     const signal = {
