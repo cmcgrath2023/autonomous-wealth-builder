@@ -112,7 +112,15 @@ export class Warren {
         console.log(`[Warren] #${this.cycleCount} | P&L: $${dailyPnl.toFixed(0)}/${DAILY_GOAL} | ${positions} pos | ${urgency} | ${managers.filter(m => m.healthy).length}/${managers.length} healthy`);
       }
 
-      // Post to Discord on urgency changes + hourly heartbeat during market hours
+      // Post to Discord on: urgency changes, market open, market close, and hourly during market
+      const now = new Date();
+      const etTime = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false });
+      const [etHourStr, etMinStr] = etTime.split(':');
+      const etHour = parseInt(etHourStr);
+      const etMin = parseInt(etMinStr || '0');
+      const isMarketHours = etHour >= 9 && etHour < 17;
+      const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+
       if (this.cycleCount > 3) {
         const prevUrgency = this.store.get('warren:prev_urgency') || '';
         const unhealthyManagers = managers.filter(m => !m.healthy);
@@ -123,16 +131,30 @@ export class Warren {
           await postToDiscord(`👔 **Warren** ${urgency === 'critical' ? '🚨' : urgency === 'elevated' ? '⚡' : ''}\n${briefing.narrative}`);
         }
 
-        // Hourly heartbeat during market hours (every 120 cycles = ~60 min at 30s cycle)
-        const mkt = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false });
-        const etHour = parseInt(mkt);
-        const isMarketHours = etHour >= 9 && etHour < 17;
-        if (isMarketHours && this.cycleCount % 120 === 0) {
-          const time = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
-          await postToDiscord(`👔 **Warren** [${time} ET]\n${briefing.narrative}`);
+        // Market open briefing (9:30-9:35 ET)
+        const lastOpenPost = this.store.get('warren:last_open_post') || '';
+        const today = now.toISOString().slice(0, 10);
+        if (etHour === 9 && etMin >= 30 && etMin <= 35 && lastOpenPost !== today) {
+          this.store.set('warren:last_open_post', today);
+          await postToDiscord(`👔 **Warren** [${timeStr} ET] 🔔 MARKET OPEN\n${briefing.narrative}`);
         }
 
-        // Manager health alerts
+        // Market close summary (4:00-4:05 ET)
+        const lastClosePost = this.store.get('warren:last_close_post') || '';
+        if (etHour === 16 && etMin <= 5 && lastClosePost !== today) {
+          this.store.set('warren:last_close_post', today);
+          const pnlEmoji = dailyPnl >= 0 ? '📈' : '📉';
+          await postToDiscord(`👔 **Warren** [${timeStr} ET] ${pnlEmoji} MARKET CLOSE\nDaily P&L: $${dailyPnl.toFixed(2)} | ${positions} positions | ${deployed > 0 ? '$' + deployed.toFixed(0) + ' deployed' : 'flat'}\n${briefing.narrative}`);
+        }
+
+        // Hourly heartbeat during market hours (check on-the-hour, ±2 min)
+        const lastHourlyPost = parseInt(this.store.get('warren:last_hourly_hour') || '-1');
+        if (isMarketHours && etMin <= 2 && etHour !== lastHourlyPost) {
+          this.store.set('warren:last_hourly_hour', String(etHour));
+          await postToDiscord(`👔 **Warren** [${timeStr} ET]\n${briefing.narrative}`);
+        }
+
+        // Manager health alerts (every 30 min)
         if (unhealthyManagers.length > 0 && this.cycleCount % 60 === 0) {
           await postToDiscord(`👔 **Warren** ⚠️\nManagers down: ${unhealthyManagers.map(m => m.name).join(', ')} — restarting`);
         }
