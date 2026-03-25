@@ -102,6 +102,8 @@ export class TradeEngine {
   private recent: HeartbeatResult[] = [];
   private dailyOptimizer: DailyOptimizer;
   private _lastStrategy: { riskBudget: number; takeProfitTarget: number; approach: string; maxNewPositions: number; actions: string[] } | null = null;
+  private _recentBuys = new Map<string, number>(); // ticker → timestamp of buy
+  private _sessionSells = new Set<string>(); // tickers sold this session — don't rebuy
 
   constructor() {
     this.dailyOptimizer = new DailyOptimizer();
@@ -285,12 +287,15 @@ export class TradeEngine {
           .filter(p => Math.abs(p.marketValue) > 0)
           .sort((a, b) => a.unrealizedPnl - b.unrealizedPnl)[0];
         const bestStar = stars.filter(s => !new Set(positions.map(p => p.ticker)).has(s.symbol))[0];
-        // Rotate if: weakest is losing OR best candidate significantly outscores weakest's performance
-        // High-score movers (0.96+) can displace flat/weak positions even if not losing
+        // Rotate if: weakest is losing OR flat with a hot mover available
+        // BUT: don't rotate positions bought in the last 30 minutes (cooldown)
         const weakPnlPct = weakest ? weakest.unrealizedPnlPercent : 0;
-        const worthRotating = weakest && bestStar && (
-          weakest.unrealizedPnl < -10 ||                          // losing money
-          (weakPnlPct < 1 && bestStar.score > 0.96)              // flat position, hot mover available
+        const buyTime = weakest ? this._recentBuys.get(weakest.ticker) : undefined;
+        const heldMinutes = buyTime ? (Date.now() - buyTime) / 60_000 : 999;
+        const onCooldown = heldMinutes < 30;
+        const worthRotating = weakest && bestStar && !onCooldown && !this._sessionSells.has(bestStar.symbol) && (
+          weakest.unrealizedPnl < -10 ||
+          (weakPnlPct < 1 && bestStar.score > 0.96)
         );
         if (worthRotating) {
           // Rotate: sell weakest, then let the scan buy the star
@@ -308,6 +313,8 @@ export class TradeEngine {
             details.push(`ROTATED OUT ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) for ${bestStar.symbol}`);
             console.log(`[TradeEngine] ROTATION: sold ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) to make room for ${bestStar.symbol} (score: ${bestStar.score})`);
             eventBus.emit('trade:closed' as any, { ticker: weakest.ticker, success: weakest.unrealizedPnl > 0, returnPct: weakest.unrealizedPnlPercent / 100, reason: 'rotation' });
+            this._sessionSells.add(weakest.ticker); // don't rebuy this session
+            this._recentBuys.delete(weakest.ticker);
           } catch (e: any) { details.push(`Rotation failed: ${e.message}`); }
           // Continue to scan — position freed
         } else {
@@ -388,9 +395,15 @@ export class TradeEngine {
             direction: 'buy' as const, confidence: adjustedScore, timeframe: '1h' as const,
             indicators: {}, pattern: 'research_star', timestamp: new Date(), source: 'momentum' as const,
           };
+          // Don't rebuy tickers we already sold this session
+          if (this._sessionSells.has(star.symbol)) { details.push(`SKIP ${star.symbol} — sold this session`); continue; }
+
           const order = await this.executor.execute(signal, qty, size);
           details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}${adjustedScore !== star.score ? ` (adj: ${adjustedScore.toFixed(2)})` : ''}`);
-          if (order.status === 'filled' || order.status === 'pending') owned.add(star.symbol);
+          if (order.status === 'filled' || order.status === 'pending') {
+            owned.add(star.symbol);
+            this._recentBuys.set(star.symbol, Date.now());
+          }
         } catch (e: any) { details.push(`${star.symbol}: ${e.message}`); }
       }
 
