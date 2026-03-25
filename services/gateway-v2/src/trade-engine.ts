@@ -263,7 +263,7 @@ export class TradeEngine {
             const moversData = await moversRes.json() as any;
             const ownedSet = new Set(positions.map(p => p.ticker));
             const gainers = (moversData.gainers || [])
-              .filter((m: any) => m.percent_change > 3 && m.percent_change < 15 && m.price > 5 && m.price < 500)
+              .filter((m: any) => m.percent_change > 2 && m.percent_change < 25 && m.price > 5 && m.price < 500)
               .filter((m: any) => !ownedSet.has(m.symbol))
               .slice(0, 5);
             for (const mover of gainers) {

@@ -219,26 +219,10 @@ export class Ferd {
       const { catalysts } = JSON.parse(raw) as { catalysts: string[] };
       const promotedSectors = sectorPerf.filter((s) => s.status === 'promoted').map((s) => s.sector);
 
-      // Catalyst → sector → ticker mapping for automatic star boosting
-      const catalystBoosts: Record<string, { sector: string; tickers: string[]; score: number }> = {
-        energy: { sector: 'Energy', tickers: ['XOM', 'HAL', 'CVX', 'KOS', 'OXY', 'SLB'], score: 0.93 },
-        defense: { sector: 'Defense', tickers: ['RTX', 'LMT', 'NOC', 'GD', 'BA'], score: 0.90 },
-        metals: { sector: 'Metals', tickers: ['FCX', 'AA', 'MP', 'NEM'], score: 0.88 },
-        tech_ai: { sector: 'AI/DC', tickers: ['NVDA', 'VRT', 'NRG', 'SMCI'], score: 0.85 },
-        crypto: { sector: 'Crypto', tickers: ['BTC-USD', 'ETH-USD', 'SOL-USD'], score: 0.85 },
-        macro: { sector: 'Hedge', tickers: ['SQQQ', 'GLD', 'SLV'], score: 0.92 },
-      };
-
+      // No hardcoded catalyst→ticker mapping — research worker discovers tickers dynamically
+      // Ferd logs detected catalysts for context only
       for (const catalyst of catalysts) {
-        const boost = catalystBoosts[catalyst];
-        if (boost) {
-          // BOOST: Liza detected this catalyst — promote related tickers NOW
-          for (const ticker of boost.tickers) {
-            this.store.saveResearchStar(ticker, boost.sector, `CATALYST: ${catalyst} detected by Liza`, boost.score);
-          }
-          aligned.push(`BOOSTED ${catalyst}: ${boost.tickers.length} tickers to ${boost.score}`);
-          console.log(`[Ferd] CATALYST BOOST: ${catalyst} → ${boost.tickers.join(', ')} at ${boost.score}`);
-        }
+        aligned.push(`CATALYST: ${catalyst} detected`);
         if (promotedSectors.includes(catalyst)) {
           aligned.push(`${catalyst} (catalyst + performing)`);
         }
@@ -247,12 +231,7 @@ export class Ferd {
       // Check Warren's urgency — if critical, also boost hedges
       const urgency = this.store.get('warren:urgency');
       if (urgency === 'critical') {
-        const hedgeTickers = ['SQQQ', 'GLD', 'SLV'];
-        for (const t of hedgeTickers) {
-          this.store.saveResearchStar(t, 'Hedge', 'CRITICAL: Warren says we are losing — hedge now', 0.95);
-        }
-        aligned.push('CRITICAL HEDGE: SQQQ, GLD, SLV boosted to 0.95');
-        console.log('[Ferd] CRITICAL HEDGE: boosting SQQQ, GLD, SLV to 0.95');
+        aligned.push('CRITICAL: Warren urgency — research worker will prioritize defensive movers');
       }
 
       // Write alignment for other managers to read
