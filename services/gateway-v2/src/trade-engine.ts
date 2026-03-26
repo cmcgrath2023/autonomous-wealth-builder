@@ -518,13 +518,22 @@ export class TradeEngine {
       } catch (e: any) { errors.push(`buy_movers: ${e.message}`); }
     }
 
-    // 4. Monitor positions — no rotation, no churn, just watch
-    if (mkt.isMarketOpen && this.hbCount % 5 === 0) {
+    // 4. Check exits — stop loss, trailing stops, circuit breaker (no rotation, just cut dogs)
+    if (mkt.isMarketOpen) {
       try {
-        const positions = await this.executor.getPositions();
-        const totalPnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
-        console.log(`  [MONITOR] ${positions.length} positions | P&L: $${totalPnl.toFixed(2)}`);
-      } catch {}
+        const r = await this.checkExits();
+        actions.push(r);
+        if (r.status !== 'skipped') console.log(`  [EXITS] ${r.detail} (${r.durationMs}ms)`);
+      } catch (e: any) { errors.push(`check_exits: ${e.message}`); }
+
+      // Monitor
+      if (this.hbCount % 5 === 0) {
+        try {
+          const positions = await this.executor.getPositions();
+          const totalPnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+          console.log(`  [MONITOR] ${positions.length} positions | P&L: $${totalPnl.toFixed(2)}`);
+        } catch {}
+      }
     }
 
     // 5. Forex signals (always scan — forex is 24/5)
