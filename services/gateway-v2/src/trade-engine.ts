@@ -21,6 +21,7 @@ import { CredentialVault } from '../../qudag/src/vault.js';
 import { loadCredentials, getAlpacaHeaders, ALPACA_DATA_URL, FOREX_SERVICE_URL } from './config-bus.js';
 import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
+import { brain } from './brain-client.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 
 // Shared Bayesian instance — populated by gateway index.ts via eventBus
@@ -176,6 +177,7 @@ export class TradeEngine {
             const reason = p.pl >= FOREX_BANK ? 'take_profit' : 'stop_loss';
             this.store.recordTrade({ ticker: sym, pnl: p.pl, direction: dir, reason, openedAt: '', closedAt: new Date().toISOString() });
             eventBus.emit('trade:closed' as any, { ticker: sym, success: p.pl > 0, returnPct: p.pl / 100, reason });
+            brain.recordTradeClose(sym, p.pl, p.pl / 100, reason, dir).catch(() => {});
             log.push(`${p.pl >= FOREX_BANK ? 'BANKED' : 'CUT'} ${sym} $${p.pl.toFixed(2)}`);
           } catch (e: any) { log.push(`FAILED ${p.instrument}: ${e.message}`); }
         }
@@ -476,6 +478,7 @@ export class TradeEngine {
             await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
             console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
             eventBus.emit('trade:closed' as any, { ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
+            brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'eod_close', 'long').catch(() => {});
           } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
         }
         actions.push({ action: 'eod_sell', priority: 0, durationMs: Date.now() - t0, status: 'success', detail: `EOD: sold ${equityPos.length} positions` });
@@ -502,6 +505,13 @@ export class TradeEngine {
 
           for (const g of gainers.slice(0, MAX_POSITIONS)) {
             try {
+              // Check Brain for ticker history — skip tickers we consistently lose on
+              const history = await brain.getTickerHistory(g.symbol);
+              if (history.shouldAvoid) {
+                console.log(`  [BUY] SKIP ${g.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
+                continue;
+              }
+
               const qty = Math.floor(perPosition / g.price);
               if (qty <= 0) continue;
               const signal = {
@@ -511,6 +521,7 @@ export class TradeEngine {
               };
               const order = await this.executor.execute(signal, qty, perPosition);
               console.log(`  [BUY] ${qty} ${g.symbol} @$${g.price.toFixed(2)} (+${g.percent_change.toFixed(1)}%) — ${order.status}`);
+              brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
             } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
           }
         }

@@ -28,6 +28,7 @@ import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelli
 import { RVFEngine } from '../../rvf-engine/src/index.js';
 import { LearningEngine } from '../../rvf-engine/src/learning-engine.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
+import { brain } from './brain-client.js';
 // Nanobot loaded dynamically in main()
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
@@ -217,13 +218,30 @@ async function main(): Promise<void> {
   // Share Bayesian instance with trade engine via eventBus
   eventBus.emit('intelligence:ready' as any, bayesianIntel);
 
-  // Persist Bayesian state every 60 seconds
+  // Persist Bayesian state every 60 seconds (local backup) + sync to Brain SONA
   setInterval(() => {
     try {
       stateStore.set(BAYESIAN_KEY, JSON.stringify(bayesianIntel.toJSON()));
       bayesianIntel.snapshotLearning();
+      // Sync top beliefs to Brain SONA for cross-system learning
+      const beliefs = bayesianIntel.query({ minObservations: 3 }).slice(0, 50);
+      if (beliefs.length > 0) {
+        brain.syncBayesianToSona(beliefs.map(b => ({ id: b.id, subject: b.subject, posterior: b.posterior, observations: b.observations, avgReturn: b.avgReturn }))).catch(() => {});
+      }
     } catch {}
   }, 60_000);
+
+  // Brain MCP health check
+  const brainOk = await brain.checkHealth();
+  log(`Brain MCP: ${brainOk ? 'connected (brain.oceanicai.io)' : 'unavailable — local persistence only'}`);
+
+  // Seed Brain with trading rules on first connect
+  if (brainOk) {
+    brain.recordRule('Buy movers at market open (9:35 ET), hold all day, sell before close (3:50 ET)', 'system').catch(() => {});
+    brain.recordRule('Max 6 equity positions, $8K budget, no rotation during day', 'system').catch(() => {});
+    brain.recordRule('Forex: 25K units per trade, max 4 positions, bank at $50, cut at -$20', 'system').catch(() => {});
+    brain.recordRule('Avoid tickers with <35% win rate over 5+ trades', 'system').catch(() => {});
+  }
 
   // Expose Bayesian intel on the status endpoint
   const origGet = stateStore.get.bind(stateStore);
