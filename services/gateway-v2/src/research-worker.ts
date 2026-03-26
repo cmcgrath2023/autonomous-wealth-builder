@@ -40,6 +40,9 @@ const RSS_FEEDS = [
   { name: 'CNBC Top',     url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114' },
   { name: 'CNBC Market',  url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258' },
   { name: 'SA Currents',  url: 'https://seekingalpha.com/market_currents.xml' },
+  { name: 'Bloomberg',   url: 'https://feeds.bloomberg.com/markets/news.rss' },
+  { name: 'Barrons',     url: 'https://www.barrons.com/market-data/rss' },
+  { name: 'MW TopStories', url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' },
 ];
 
 interface SectorDef { name: string; key: string; tickers: string[]; catalystKeywords: string[] }
