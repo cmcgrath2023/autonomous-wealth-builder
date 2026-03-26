@@ -485,10 +485,11 @@ export class TradeEngine {
       } catch (e: any) { errors.push(`eod_sell: ${e.message}`); }
     }
 
-    // 3. BUY MOVERS — when we have no equity positions and market is open (before 3:30 PM)
+    // 3. BUY MOVERS — fill available slots during market hours (before 3:30 PM)
     const positions = await this.executor.getPositions();
     const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
-    if (mkt.isMarketOpen && equityCount === 0 && !this._boughtToday && mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30)) {
+    const openSlots = MAX_POSITIONS - equityCount;
+    if (mkt.isMarketOpen && openSlots > 0 && !this._boughtToday && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
       this._boughtToday = true;
       try {
         const creds = loadCredentials();
@@ -505,7 +506,7 @@ export class TradeEngine {
           gainers = quotes
             .filter((q: any) => q.regularMarketPrice > 10 && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 2)
             .map((q: any) => ({ symbol: q.symbol, price: q.regularMarketPrice, percent_change: q.regularMarketChangePercent }))
-            .slice(0, MAX_POSITIONS);
+            .slice(0, openSlots);
         }
 
         // Fallback to Alpaca movers if Yahoo fails
@@ -515,12 +516,12 @@ export class TradeEngine {
             const moversData = await moversRes.json() as any;
             gainers = (moversData.gainers || [])
               .filter((m: any) => m.percent_change > 2 && m.price > 10 && m.price < 500 && (m.trade_count || 0) > 5000)
-              .slice(0, MAX_POSITIONS);
+              .slice(0, openSlots);
           }
           if (gainers.length > 0) console.log('  [BUY] Using Alpaca movers (Yahoo unavailable)');
         }
 
-          const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length, MAX_POSITIONS));
+          const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length, openSlots));
           console.log(`  [BUY] ${gainers.length} movers found, $${perPosition} per position`);
 
           for (const g of gainers.slice(0, MAX_POSITIONS)) {
