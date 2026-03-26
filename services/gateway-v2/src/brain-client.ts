@@ -14,9 +14,14 @@ const SOURCE = 'mtwm:trading-desk';
 
 async function brainFetch(path: string, opts?: RequestInit): Promise<any> {
   try {
+    const apiKey = process.env.BRAIN_API_KEY || '';
     const res = await fetch(`${BRAIN_URL}${path}`, {
       ...opts,
-      headers: { 'Content-Type': 'application/json', ...opts?.headers },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+        ...opts?.headers,
+      },
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return null;
