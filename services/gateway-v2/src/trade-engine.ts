@@ -103,7 +103,8 @@ export class TradeEngine {
   private dailyOptimizer: DailyOptimizer;
   private _lastStrategy: { riskBudget: number; takeProfitTarget: number; approach: string; maxNewPositions: number; actions: string[] } | null = null;
   private _recentBuys = new Map<string, number>(); // ticker → timestamp of buy
-  private _sessionSells = new Set<string>(); // tickers sold this session — don't rebuy
+  private _sessionSells = new Set<string>(); // tickers sold today — don't rebuy
+  private _dailySellKey = ''; // date string to reset daily
 
   constructor() {
     this.dailyOptimizer = new DailyOptimizer();
@@ -435,6 +436,9 @@ export class TradeEngine {
 
   // ── Heartbeat ─────────────────────────────────────────────────────────
 
+  private _boughtToday = false;
+  private _soldEod = false;
+
   private async heartbeat(): Promise<void> {
     if (this.stopping) return;
     this.hbCount++;
@@ -443,52 +447,108 @@ export class TradeEngine {
     const actions: ActionResult[] = [];
     const errors: string[] = [];
 
+    // Reset daily flags at market open
+    if (mkt.isMarketOpen && mkt.etHour === 9 && mkt.etMin <= 32) {
+      this._boughtToday = false;
+      this._soldEod = false;
+    }
+
     console.log(
       `\n[TradeEngine] === Heartbeat #${this.hbCount} === ${mkt.etDay} ` +
       `${mkt.etHour}:${String(mkt.etMin).padStart(2, '0')} ET — ` +
       `${mkt.isMarketOpen ? 'OPEN' : mkt.isAfterHours ? 'AFTER-HOURS' : 'CLOSED'}`,
     );
 
-    // 1. Forex position management (priority 1)
+    // 1. Forex position management (always runs — 24/5)
     try { const r = await this.manageForexPositions(); actions.push(r); if (r.status !== 'skipped') console.log(`  [1] ${r.detail} (${r.durationMs}ms)`); }
     catch (e: any) { errors.push(`manage_positions: ${e.message}`); }
 
-    // 2. Equity/crypto exits (priority 2)
-    try { const r = await this.checkExits(); actions.push(r); if (r.status !== 'skipped') console.log(`  [2] ${r.detail} (${r.durationMs}ms)`); }
-    catch (e: any) { errors.push(`check_exits: ${e.message}`); }
-
-    // 3-4. Generate daily strategy via MinCut optimizer + read stars
-    let strategy: { maxPositions?: number; budgetMax?: number } = {};
-    try {
-      const positions = await this.executor.getPositions();
-      const dailyState = {
-        budget: BUDGET_MAX,
-        dailyGoal: 500,
-        currentDayPnl: positions.reduce((s, p) => s + p.unrealizedPnl, 0),
-        positions: positions.map(p => ({ ticker: p.ticker, value: p.marketValue, pnl: p.unrealizedPnl, pnlPct: p.unrealizedPnlPercent, isCrypto: isCrypto(p.ticker) })),
-        forexPositions: [],
-        bayesianPrefer: [],
-        bayesianAvoid: [],
-        slDominance: 0,
-        marketCondition: getMarketCondition(positions.map(p => ({ pct: p.unrealizedPnlPercent }))),
-        activeSessions: ['newyork'],
-        cryptoMarketBias: 'mixed' as const,
-      };
-      const optimized = this.dailyOptimizer.optimize(dailyState);
-      this._lastStrategy = optimized;
-      strategy = { maxPositions: Math.min(optimized.maxNewPositions + positions.length, MAX_POSITIONS), budgetMax: BUDGET_MAX };
-      this.store.set('daily_strategy', JSON.stringify(optimized));
-      if (this.hbCount % 10 === 1) console.log(`  [3] Strategy: ${optimized.approach} | Goal: $${optimized.remainingGoal.toFixed(0)} | Risk: ${optimized.riskBudget.toFixed(0)}% | TP: $${optimized.takeProfitTarget.toFixed(0)} | Max new: ${optimized.maxNewPositions}`);
-    } catch (e: any) {
-      console.log(`  [3] Strategy error: ${e.message} — using defaults`);
+    // 2. EOD SELL — liquidate all equity positions at 3:50 PM ET
+    if (mkt.isMarketOpen && mkt.etHour === 15 && mkt.etMin >= 50 && !this._soldEod) {
+      this._soldEod = true;
+      try {
+        const creds = loadCredentials();
+        const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
+        const positions = await this.executor.getPositions();
+        const equityPos = positions.filter(p => !isCrypto(p.ticker));
+        for (const pos of equityPos) {
+          try {
+            await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
+            console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
+            eventBus.emit('trade:closed' as any, { ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
+          } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
+        }
+        actions.push({ action: 'eod_sell', priority: 0, durationMs: Date.now() - t0, status: 'success', detail: `EOD: sold ${equityPos.length} positions` });
+      } catch (e: any) { errors.push(`eod_sell: ${e.message}`); }
     }
-    let stars: Array<{ symbol: string; sector: string; score: number; catalyst: string }> = [];
-    try { this.store.clearExpiredStars(4); stars = this.store.getResearchStars(); console.log(`  [4] ${stars.length} research stars loaded`); } catch (e: any) { console.log(`  [4] Stars error: ${e.message}`); }
-    if (stars.length > 0) console.log(`  [3-4] ${stars.length} research stars loaded`);
 
-    // 5. Scan signals (priority 3)
-    try { const r = await this.scanSignals(strategy, stars); actions.push(r); console.log(`  [5] ${r.detail} (${r.durationMs}ms)`); }
-    catch (e: any) { errors.push(`scan_signals: ${e.message}`); }
+    // 3. BUY MOVERS — once per day, within first 30 min of market open
+    if (mkt.isMarketOpen && !this._boughtToday && mkt.etHour === 9 && mkt.etMin >= 35 && mkt.etMin <= 59 || (mkt.etHour === 10 && mkt.etMin <= 5 && !this._boughtToday)) {
+      this._boughtToday = true;
+      try {
+        const creds = loadCredentials();
+        const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
+        const moversRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=20', {
+          headers, signal: AbortSignal.timeout(5000),
+        });
+        if (moversRes.ok) {
+          const moversData = await moversRes.json() as any;
+          const gainers = (moversData.gainers || [])
+            .filter((m: any) => m.percent_change > 2 && m.price > 5 && m.price < 500)
+            .slice(0, MAX_POSITIONS);
+
+          const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length, MAX_POSITIONS));
+          console.log(`  [BUY] ${gainers.length} movers found, $${perPosition} per position`);
+
+          for (const g of gainers.slice(0, MAX_POSITIONS)) {
+            try {
+              const qty = Math.floor(perPosition / g.price);
+              if (qty <= 0) continue;
+              const signal = {
+                id: `mover-${Date.now()}-${g.symbol}`, ticker: g.symbol,
+                direction: 'buy' as const, confidence: 0.9, timeframe: '1h' as const,
+                indicators: {}, pattern: 'top_mover', timestamp: new Date(), source: 'momentum' as const,
+              };
+              const order = await this.executor.execute(signal, qty, perPosition);
+              console.log(`  [BUY] ${qty} ${g.symbol} @$${g.price.toFixed(2)} (+${g.percent_change.toFixed(1)}%) — ${order.status}`);
+            } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
+          }
+        }
+        actions.push({ action: 'buy_movers', priority: 1, durationMs: Date.now() - t0, status: 'success', detail: `Bought movers` });
+      } catch (e: any) { errors.push(`buy_movers: ${e.message}`); }
+    }
+
+    // 4. Monitor positions — no rotation, no churn, just watch
+    if (mkt.isMarketOpen && this.hbCount % 5 === 0) {
+      try {
+        const positions = await this.executor.getPositions();
+        const totalPnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+        console.log(`  [MONITOR] ${positions.length} positions | P&L: $${totalPnl.toFixed(2)}`);
+      } catch {}
+    }
+
+    // 5. Forex signals (always scan — forex is 24/5)
+    try {
+      const fxCreds = loadCredentials();
+      if (fxCreds.oanda || true) {
+        await this.forex.fetchQuotes();
+        const [momentumSigs, carrySigs] = await Promise.all([
+          Promise.resolve(this.forex.evaluateSessionMomentum()),
+          Promise.resolve(this.forex.evaluateCarryTrades()),
+        ]);
+        const sigs = [...momentumSigs, ...carrySigs];
+        if (sigs.length > 0) {
+          const top = sigs.sort((a, b) => b.confidence - a.confidence)[0];
+          const open = await this.forex.getOpenTrades();
+          if (open.length < 4) {
+            try {
+              await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 25000 : -25000, top.stopLoss, top.takeProfit);
+              console.log(`  [FOREX] ${top.direction.toUpperCase()} ${top.symbol} (${(top.confidence * 100).toFixed(0)}%)`);
+            } catch {}
+          }
+        }
+      }
+    } catch {}
 
     // Final position snapshot
     let posCount = 0, deployed = 0;
