@@ -275,6 +275,17 @@ app.get('/api/research/latest', (_req: Request, res: Response) => {
 // Strategy — read from state store
 // ---------------------------------------------------------------------------
 
+app.post('/api/strategy/morning-plan', (req: Request, res: Response) => {
+  stateStore.set('morning_plan', JSON.stringify(req.body));
+  console.log(`[API] Morning plan received: ${(req.body.tickers || []).length} tickers`);
+  res.json({ status: 'ok' });
+});
+
+app.get('/api/strategy/morning-plan', (_req: Request, res: Response) => {
+  const plan = JSON.parse(stateStore.get('morning_plan') || '{}');
+  res.json(plan);
+});
+
 app.get('/api/strategy/daily', (_req: Request, res: Response) => {
   const strategy = JSON.parse(stateStore.get('daily_strategy') || '{"approach":"pending","narrative":"Waiting for heartbeat..."}');
   res.json(strategy || { approach: 'pending', narrative: 'Waiting for first heartbeat...' });

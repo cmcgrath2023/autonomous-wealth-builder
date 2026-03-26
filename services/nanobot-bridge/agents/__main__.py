@@ -144,28 +144,140 @@ def digital_twin_check():
 
 
 def briefing_generator():
-    """Daily morning briefing — summarizes portfolio, overnight moves, and plan."""
-    # This runs at 7am — gather overnight data
-    output = market_monitor()
-    health = digital_twin_check()
-    forex = forex_alert()
+    """Daily morning briefing — synthesizes research into actionable plan for today.
 
-    summary_parts = [
-        f"MORNING BRIEFING — {datetime.now().strftime('%A %B %d, %Y')}",
-        output.get('summary', 'No market data'),
-        health.get('summary', 'No health data'),
-        forex.get('summary', 'No forex data'),
+    Runs at 7am ET. Produces:
+    1. Yesterday's results summary
+    2. Overnight news catalysts
+    3. Pre-market movers scan
+    4. Actionable buy list written to state store for trade engine at 9:35
+    """
+    import urllib.request
+    briefing_parts = [f"MORNING BRIEFING — {datetime.now().strftime('%A %B %d, %Y')}"]
+    plan_tickers = []
+    plan_reasons = {}
+
+    # 1. Yesterday's portfolio status
+    portfolio = market_monitor()
+    briefing_parts.append(portfolio.get('summary', 'No portfolio data'))
+
+    # 2. Scan news RSS for catalysts (pre-market)
+    catalysts = []
+    rss_feeds = [
+        'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US',
+        'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114',
     ]
+    for feed_url in rss_feeds:
+        try:
+            req = urllib.request.Request(feed_url, headers={'User-Agent': 'MTWM/1.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                content = resp.read().decode('utf-8', errors='ignore')
+                import re
+                titles = re.findall(r'<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', content)
+                for title in titles[:20]:
+                    title_lower = title.lower()
+                    # Detect actionable catalysts
+                    if any(kw in title_lower for kw in ['surge', 'soar', 'jump', 'rally', 'record', 'upgrade', 'beat', 'launch', 'fda', 'approval', 'deal', 'merger', 'acquisition']):
+                        catalysts.append(title.strip())
+                        # Extract tickers mentioned
+                        ticker_matches = re.findall(r'\b([A-Z]{2,5})\b', title)
+                        for t in ticker_matches:
+                            if t not in ['THE', 'AND', 'FOR', 'INC', 'NEW', 'CEO', 'IPO', 'ETF', 'SEC', 'FED', 'GDP', 'FDA', 'NYSE', 'CNBC']:
+                                if t not in plan_tickers:
+                                    plan_tickers.append(t)
+                                    plan_reasons[t] = f"NEWS: {title.strip()[:80]}"
+        except:
+            pass
+
+    if catalysts:
+        briefing_parts.append(f"CATALYSTS ({len(catalysts)}): {' | '.join(catalysts[:5])}")
+
+    # 3. Query Brain for patterns and historical winners
+    brain_url = os.environ.get('BRAIN_SERVER_URL', 'https://brain.oceanicai.io')
+    brain_key = os.environ.get('BRAIN_API_KEY', '')
+    brain_headers = {'Content-Type': 'application/json'}
+    if brain_key:
+        brain_headers['Authorization'] = f'Bearer {brain_key}'
+
+    try:
+        req = urllib.request.Request(
+            f"{brain_url}/v1/memories/search?q=profitable+trade+winner&limit=10",
+            headers=brain_headers
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            brain_data = json.loads(resp.read())
+            winners = [m for m in (brain_data.get('memories') or brain_data.get('results') or []) if m.get('metadata', {}).get('success')]
+            if winners:
+                briefing_parts.append(f"BRAIN: {len(winners)} historical winners found")
+                for w in winners[:5]:
+                    ticker = w.get('metadata', {}).get('ticker')
+                    if ticker and ticker not in plan_tickers:
+                        plan_tickers.append(ticker)
+                        plan_reasons[ticker] = f"BRAIN: historically profitable"
+    except:
+        briefing_parts.append("BRAIN: unavailable for pattern query")
+
+    # 4. Pre-market movers (Yahoo Finance)
+    try:
+        req = urllib.request.Request(
+            'https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=10',
+            headers={'User-Agent': 'MTWM/1.0'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            yahoo_data = json.loads(resp.read())
+            quotes = yahoo_data.get('finance', {}).get('result', [{}])[0].get('quotes', [])
+            for q in quotes[:6]:
+                sym = q.get('symbol')
+                pct = q.get('regularMarketChangePercent', 0)
+                price = q.get('regularMarketPrice', 0)
+                if sym and pct > 2 and price > 10 and price < 500 and sym not in plan_tickers:
+                    plan_tickers.append(sym)
+                    plan_reasons[sym] = f"YAHOO MOVER +{pct:.1f}%"
+            if quotes:
+                briefing_parts.append(f"PRE-MARKET MOVERS: {', '.join(q.get('symbol','?')+' +'+str(round(q.get('regularMarketChangePercent',0),1))+'%' for q in quotes[:5])}")
+    except Exception as e:
+        briefing_parts.append(f"Yahoo pre-market: unavailable ({e})")
+
+    # 5. Write actionable plan to state store via gateway API
+    morning_plan = {
+        "date": datetime.now().strftime('%Y-%m-%d'),
+        "tickers": plan_tickers[:6],
+        "reasons": plan_reasons,
+        "catalysts": catalysts[:5],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        plan_json = json.dumps(morning_plan).encode()
+        req = urllib.request.Request(
+            'http://localhost:3001/api/strategy/morning-plan',
+            data=plan_json,
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        urllib.request.urlopen(req, timeout=5)
+        briefing_parts.append(f"PLAN: {len(plan_tickers)} tickers queued for 9:35 buy")
+    except:
+        briefing_parts.append(f"PLAN: {len(plan_tickers)} tickers identified (API write failed, will use movers scanner)")
+
+    # 6. Record to Brain
+    try:
+        brain_payload = json.dumps({
+            "content": " | ".join(briefing_parts),
+            "source": "mtwm:morning-briefing",
+            "metadata": {"domain": "trading", "type": "morning_plan", "plan": morning_plan}
+        }).encode()
+        req = urllib.request.Request(f"{brain_url}/v1/memories", data=brain_payload, headers=brain_headers, method='POST')
+        urllib.request.urlopen(req, timeout=5)
+    except:
+        pass
 
     return {
-        "summary": " | ".join(summary_parts),
-        "data": {
-            "market": output.get('data'),
-            "health": health.get('data'),
-            "forex": forex.get('data'),
-        },
-        "requiresEscalation": output.get('requiresEscalation', False),
-        "escalationReason": output.get('escalationReason'),
+        "summary": " | ".join(briefing_parts),
+        "data": morning_plan,
+        "suggestedActions": [{"action": f"BUY {t}", "asset": t, "urgency": "high", "autonomyRequired": "act"} for t in plan_tickers[:6]],
+        "requiresEscalation": len(plan_tickers) == 0,
+        "escalationReason": "No actionable tickers found for today" if len(plan_tickers) == 0 else None,
     }
 
 
