@@ -493,31 +493,32 @@ export class TradeEngine {
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
-        const moversRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=20', {
-          headers, signal: AbortSignal.timeout(5000),
+        // Use Yahoo Finance gainers — reliable, real-time, quality stocks
+        const yahooRes = await fetch('https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=20', {
+          headers: { 'User-Agent': 'MTWM/1.0' },
+          signal: AbortSignal.timeout(10_000),
         });
-        if (moversRes.ok) {
-          const moversData = await moversRes.json() as any;
-          const gainers = (moversData.gainers || [])
-            .filter((m: any) => m.percent_change > 2 && m.price > 10 && m.price < 500 && (m.trade_count || 0) > 5000)
+        let gainers: Array<{ symbol: string; price: number; percent_change: number }> = [];
+        if (yahooRes.ok) {
+          const yahooData = await yahooRes.json() as any;
+          const quotes = yahooData?.finance?.result?.[0]?.quotes || [];
+          gainers = quotes
+            .filter((q: any) => q.regularMarketPrice > 10 && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 2)
+            .map((q: any) => ({ symbol: q.symbol, price: q.regularMarketPrice, percent_change: q.regularMarketChangePercent }))
             .slice(0, MAX_POSITIONS);
+        }
 
-          // If Alpaca movers are all micro-caps, supplement with most-actives (institutional volume)
-          if (gainers.length < 3) {
-            try {
-              const activesRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/most-actives?top=20&by=volume', { headers, signal: AbortSignal.timeout(5000) });
-              if (activesRes.ok) {
-                const activesData = await activesRes.json() as any;
-                const actives = (activesData.most_actives || [])
-                  .filter((a: any) => a.price > 10 && a.price < 500 && a.change > 0 && (a.trade_count || 0) > 10000)
-                  .filter((a: any) => !gainers.some((g: any) => g.symbol === a.symbol));
-                for (const a of actives.slice(0, MAX_POSITIONS - gainers.length)) {
-                  gainers.push({ ...a, percent_change: a.change || 0 });
-                }
-                console.log(`  [BUY] Supplemented with ${actives.length} most-actives`);
-              }
-            } catch {}
+        // Fallback to Alpaca movers if Yahoo fails
+        if (gainers.length === 0) {
+          const moversRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=20', { headers, signal: AbortSignal.timeout(5000) });
+          if (moversRes.ok) {
+            const moversData = await moversRes.json() as any;
+            gainers = (moversData.gainers || [])
+              .filter((m: any) => m.percent_change > 2 && m.price > 10 && m.price < 500 && (m.trade_count || 0) > 5000)
+              .slice(0, MAX_POSITIONS);
           }
+          if (gainers.length > 0) console.log('  [BUY] Using Alpaca movers (Yahoo unavailable)');
+        }
 
           const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length, MAX_POSITIONS));
           console.log(`  [BUY] ${gainers.length} movers found, $${perPosition} per position`);
