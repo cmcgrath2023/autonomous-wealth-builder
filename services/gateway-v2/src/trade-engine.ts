@@ -499,8 +499,25 @@ export class TradeEngine {
         if (moversRes.ok) {
           const moversData = await moversRes.json() as any;
           const gainers = (moversData.gainers || [])
-            .filter((m: any) => m.percent_change > 2 && m.price > 5 && m.price < 500)
+            .filter((m: any) => m.percent_change > 2 && m.price > 10 && m.price < 500 && (m.trade_count || 0) > 5000)
             .slice(0, MAX_POSITIONS);
+
+          // If Alpaca movers are all micro-caps, supplement with most-actives (institutional volume)
+          if (gainers.length < 3) {
+            try {
+              const activesRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/most-actives?top=20&by=volume', { headers, signal: AbortSignal.timeout(5000) });
+              if (activesRes.ok) {
+                const activesData = await activesRes.json() as any;
+                const actives = (activesData.most_actives || [])
+                  .filter((a: any) => a.price > 10 && a.price < 500 && a.change > 0 && (a.trade_count || 0) > 10000)
+                  .filter((a: any) => !gainers.some((g: any) => g.symbol === a.symbol));
+                for (const a of actives.slice(0, MAX_POSITIONS - gainers.length)) {
+                  gainers.push({ ...a, percent_change: a.change || 0 });
+                }
+                console.log(`  [BUY] Supplemented with ${actives.length} most-actives`);
+              }
+            } catch {}
+          }
 
           const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length, MAX_POSITIONS));
           console.log(`  [BUY] ${gainers.length} movers found, $${perPosition} per position`);
