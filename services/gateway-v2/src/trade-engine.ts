@@ -485,8 +485,10 @@ export class TradeEngine {
       } catch (e: any) { errors.push(`eod_sell: ${e.message}`); }
     }
 
-    // 3. BUY MOVERS — once per day, within first 30 min of market open
-    if (mkt.isMarketOpen && !this._boughtToday && mkt.etHour === 9 && mkt.etMin >= 35 && mkt.etMin <= 59 || (mkt.etHour === 10 && mkt.etMin <= 5 && !this._boughtToday)) {
+    // 3. BUY MOVERS — when we have no equity positions and market is open (before 3:30 PM)
+    const positions = await this.executor.getPositions();
+    const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
+    if (mkt.isMarketOpen && equityCount === 0 && !this._boughtToday && mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30)) {
       this._boughtToday = true;
       try {
         const creds = loadCredentials();
