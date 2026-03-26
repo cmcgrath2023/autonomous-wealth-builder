@@ -9,6 +9,7 @@ import {
   NanobotTaskStatus,
   NanobotOutput,
 } from '../../shared/nanobot.types.js';
+import { brain } from './brain-client.js';
 interface BridgeEvents {
   'task:spawned': (taskId: string) => void;
   'task:completed': (result: NanobotTaskResult) => void;
@@ -122,6 +123,7 @@ export class NanobotBridge extends EventEmitter<BridgeEvents> {
           authorityThreshold: config.authorityThreshold,
         });
         console.log(`[NanobotBridge] ESCALATION from ${config.taskClass}: ${output.escalationReason || output.summary}`);
+        brain.recordRule(`ESCALATION: ${config.taskClass} — ${output.escalationReason || output.summary}`, 'nanobot').catch(() => {});
       }
     } catch {
       // non-JSON stdout, ignore
@@ -146,6 +148,14 @@ export class NanobotBridge extends EventEmitter<BridgeEvents> {
     if (status === 'completed') {
       this.emit('task:completed', result);
       console.log(`[NanobotBridge] ${result.taskClass} completed (${result.durationMs}ms)`);
+      // Record to Brain — every Nanobot insight becomes shared memory
+      if (result.output) {
+        brain.recordTradeClose(
+          `nanobot:${result.taskClass}`, 0, 0,
+          result.output.summary,
+          'observe'
+        ).catch(() => {});
+      }
     } else {
       this.emit('task:failed', taskId, error || 'unknown');
       if (status !== 'timed_out') {

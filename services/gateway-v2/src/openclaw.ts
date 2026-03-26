@@ -12,6 +12,7 @@
 
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from './config-bus.js';
+import { brain } from './brain-client.js';
 
 export type AutonomyLevel = 'observe' | 'suggest' | 'act';
 
@@ -177,6 +178,12 @@ export class OpenClawEngine {
 
     // Self-healing check: detect and fix issues
     this.selfHeal();
+
+    // Record OpenClaw activity to Brain every 10 heartbeats
+    if (this.heartbeatCount % 10 === 0) {
+      const actionsRun = this.activityLog.slice(-5).map(a => `${a.agent}:${a.action} → ${a.result}`).join('; ');
+      brain.recordRule(`OpenClaw heartbeat #${this.heartbeatCount}: ${actionsRun}`, 'openclaw').catch(() => {});
+    }
 
     if (this.heartbeatCount % 20 === 1) {
       console.log(`[OpenClaw] #${this.heartbeatCount} | ${duration}ms | ${this.actions.size} actions | ${this.pendingSuggestions.filter(s => s.status === 'pending').length} pending`);
