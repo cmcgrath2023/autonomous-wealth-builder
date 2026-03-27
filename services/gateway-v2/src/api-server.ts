@@ -282,6 +282,29 @@ app.get('/api/research/latest', (_req: Request, res: Response) => {
 // Strategy — read from state store
 // ---------------------------------------------------------------------------
 
+// Intelligence metrics
+app.get('/api/intelligence/metrics', (_req: Request, res: Response) => {
+  try {
+    const metrics = JSON.parse(stateStore.get('__bayesian_metrics__') || '{}');
+    res.json(metrics);
+  } catch { res.json({}); }
+});
+
+// Traits
+app.get('/api/traits', (_req: Request, res: Response) => {
+  try {
+    const raw = stateStore.get('trait_snapshot');
+    res.json(raw ? JSON.parse(raw) : { traits: [], count: 0 });
+  } catch { res.json({ traits: [], count: 0 }); }
+});
+
+app.get('/api/traits/history/snapshots', (_req: Request, res: Response) => {
+  try {
+    const raw = stateStore.get('trait_history');
+    res.json(raw ? JSON.parse(raw) : { snapshots: [] });
+  } catch { res.json({ snapshots: [] }); }
+});
+
 // Account — Alpaca proxy with connected status
 app.get('/api/account', async (_req: Request, res: Response) => {
   if (!hasAlpacaCreds()) return res.json({ connected: false });
