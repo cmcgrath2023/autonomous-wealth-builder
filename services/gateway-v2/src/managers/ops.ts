@@ -143,11 +143,11 @@ export class Ops {
     if (!this.running) return;
     this.cycleCount++;
 
-    // Pre-market regression scan — once daily at 9:00 AM ET
-    const now = new Date();
-    const etTime = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false });
+    // Pre-market regression scan — once daily at 6:30 AM ET
+    const preMarketNow = new Date();
+    const etTime = preMarketNow.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false });
     const [etH, etM] = etTime.split(':').map(Number);
-    const today = now.toISOString().slice(0, 10);
+    const today = preMarketNow.toISOString().slice(0, 10);
     if (etH === 6 && etM >= 30 && etM <= 35 && this._lastPreMarketCheck !== today) {
       this._lastPreMarketCheck = today;
       try {
