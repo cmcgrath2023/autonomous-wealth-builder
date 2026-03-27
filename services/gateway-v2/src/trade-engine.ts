@@ -103,9 +103,40 @@ export class TradeEngine {
   private recent: HeartbeatResult[] = [];
   private dailyOptimizer: DailyOptimizer;
   private _lastStrategy: { riskBudget: number; takeProfitTarget: number; approach: string; maxNewPositions: number; actions: string[] } | null = null;
-  private _recentBuys = new Map<string, number>(); // ticker → timestamp of buy
-  private _sessionSells = new Set<string>(); // tickers sold today — don't rebuy
-  private _dailySellKey = ''; // date string to reset daily
+  private get _recentBuys(): Map<string, number> {
+    try {
+      const raw = this.store.get('recent_buys_today');
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data.date === new Date().toISOString().slice(0, 10)) return new Map(Object.entries(data.buys));
+      }
+    } catch {}
+    return new Map();
+  }
+  private _trackBuy(ticker: string): void {
+    const buys = this._recentBuys;
+    buys.set(ticker, Date.now());
+    const obj: Record<string, number> = {};
+    for (const [k, v] of buys) obj[k] = v;
+    this.store.set('recent_buys_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), buys: obj }));
+  }
+
+  // Persisted to state store — survives restarts
+  private get _sessionSells(): Set<string> {
+    try {
+      const raw = this.store.get('session_sells_today');
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data.date === new Date().toISOString().slice(0, 10)) return new Set(data.tickers);
+      }
+    } catch {}
+    return new Set();
+  }
+  private _addSessionSell(ticker: string): void {
+    const sells = this._sessionSells;
+    sells.add(ticker);
+    this.store.set('session_sells_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), tickers: [...sells] }));
+  }
 
   constructor() {
     this.dailyOptimizer = new DailyOptimizer();
@@ -316,8 +347,8 @@ export class TradeEngine {
             details.push(`ROTATED OUT ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) for ${bestStar.symbol}`);
             console.log(`[TradeEngine] ROTATION: sold ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) to make room for ${bestStar.symbol} (score: ${bestStar.score})`);
             eventBus.emit('trade:closed' as any, { ticker: weakest.ticker, success: weakest.unrealizedPnl > 0, returnPct: weakest.unrealizedPnlPercent / 100, reason: 'rotation' });
-            this._sessionSells.add(weakest.ticker); // don't rebuy this session
-            this._recentBuys.delete(weakest.ticker);
+            this._addSessionSell(weakest.ticker); // don't rebuy this session
+            // recentBuys auto-managed via state store
           } catch (e: any) { details.push(`Rotation failed: ${e.message}`); }
           // Continue to scan — position freed
         } else {
@@ -405,7 +436,7 @@ export class TradeEngine {
           details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}${adjustedScore !== star.score ? ` (adj: ${adjustedScore.toFixed(2)})` : ''}`);
           if (order.status === 'filled' || order.status === 'pending') {
             owned.add(star.symbol);
-            this._recentBuys.set(star.symbol, Date.now());
+            this._trackBuy(star.symbol);
           }
         } catch (e: any) { details.push(`${star.symbol}: ${e.message}`); }
       }
@@ -455,8 +486,7 @@ export class TradeEngine {
     if (today !== lastTradeDate) {
       this._boughtToday = false;
       this._soldEod = false;
-      this._sessionSells.clear();
-      this._recentBuys.clear();
+      // Session sells and recent buys auto-clear via date check in their getters
       this.store.set('trade_engine_last_date', today);
       console.log(`[TradeEngine] New trading day: ${today}`);
     }
