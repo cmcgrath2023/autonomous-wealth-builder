@@ -449,10 +449,16 @@ export class TradeEngine {
     const actions: ActionResult[] = [];
     const errors: string[] = [];
 
-    // Reset daily flags at market open
-    if (mkt.isMarketOpen && mkt.etHour === 9 && mkt.etMin <= 32) {
+    // Reset daily flags — check against stored date, not just time window
+    const today = new Date().toISOString().slice(0, 10);
+    const lastTradeDate = this.store.get('trade_engine_last_date') || '';
+    if (today !== lastTradeDate) {
       this._boughtToday = false;
       this._soldEod = false;
+      this._sessionSells.clear();
+      this._recentBuys.clear();
+      this.store.set('trade_engine_last_date', today);
+      console.log(`[TradeEngine] New trading day: ${today}`);
     }
 
     console.log(
