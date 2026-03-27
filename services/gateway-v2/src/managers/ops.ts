@@ -148,7 +148,7 @@ export class Ops {
     const etTime = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false });
     const [etH, etM] = etTime.split(':').map(Number);
     const today = now.toISOString().slice(0, 10);
-    if (etH === 9 && etM <= 5 && this._lastPreMarketCheck !== today) {
+    if (etH === 6 && etM >= 30 && etM <= 35 && this._lastPreMarketCheck !== today) {
       this._lastPreMarketCheck = today;
       try {
         const results = await this.preMarketRegressionScan();
