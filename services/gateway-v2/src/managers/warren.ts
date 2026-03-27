@@ -10,6 +10,7 @@
 
 import { GatewayStateStore } from '../../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from '../config-bus.js';
+import { brain } from '../brain-client.js';
 
 async function postToDiscord(text: string): Promise<void> {
   const webhook = process.env.DISCORD_WEBHOOK_URL;
@@ -100,7 +101,17 @@ export class Warren {
       const briefing = this.generateBriefing(urgency, dailyPnl, positions, deployed, managers);
       this.store.set('warren:briefing', JSON.stringify(briefing));
 
-      // 7. Record learning
+      // 7. Autonomous MD Review — Warren thinks and acts using Brain reasoning
+      // Every 20 cycles (~10 min), Warren evaluates the team and issues directives
+      if (this.cycleCount % 20 === 0 && this.cycleCount > 5) {
+        try {
+          await this.runTeamReview(dailyPnl, positions, deployed, managers, urgency);
+        } catch (e: any) {
+          console.error(`[Warren] Team review error: ${e.message}`);
+        }
+      }
+
+      // 8. Record learning
       this.recordLearning(
         `Cycle ${this.cycleCount}: P&L $${dailyPnl.toFixed(0)}, ${positions} pos, urgency=${urgency}`,
         urgency !== 'normal' ? `Pushing team: ${urgency}` : 'Monitoring — on track',
@@ -335,6 +346,112 @@ export class Warren {
       const reports = this.store.getReports('warren', limit);
       return reports.map(r => `${r.summary} → ${r.strategy?.action || 'no action'} (${r.meta?.outcome || '?'})`);
     } catch { return []; }
+  }
+
+  // ── Autonomous Team Review — Warren as thinking MD ────────────────────
+
+  private async runTeamReview(dailyPnl: number, positions: number, deployed: number, managers: ManagerHealth[], urgency: Urgency): Promise<void> {
+    const finStatus = this.store.get('manager_fin_status');
+    const lizaStatus = this.store.get('manager_liza_status');
+    const ferdStatus = this.store.get('manager_ferd_status');
+    const forexRaw = this.store.get('forex_positions');
+    const tradeStatus = this.store.get('trade_engine_status');
+
+    const context = [
+      `Daily P&L: $${dailyPnl.toFixed(2)} of $${DAILY_GOAL} target (${Math.round(dailyPnl/DAILY_GOAL*100)}%)`,
+      `Positions: ${positions}, Deployed: $${deployed.toFixed(0)}, Urgency: ${urgency}`,
+      `Managers: ${managers.map(m => `${m.name}=${m.healthy?'UP':'DOWN'}`).join(', ')}`,
+      finStatus ? `Fin: ${JSON.parse(finStatus).actions?.slice(0,3).join('; ') || 'idle'}` : 'Fin: no report',
+      lizaStatus ? `Liza: ${JSON.parse(lizaStatus).lastAction || 'idle'}` : 'Liza: no report',
+      ferdStatus ? `Ferd: ${JSON.parse(ferdStatus).lastAction || 'idle'}` : 'Ferd: no report',
+      tradeStatus ? `TradeEngine: heartbeat ${JSON.parse(tradeStatus).heartbeatNumber || 0}` : 'TradeEngine: no status',
+    ].join('\n');
+
+    // Ask Brain for strategic assessment
+    const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://brain.oceanicai.io';
+    const brainKey = process.env.BRAIN_API_KEY || '';
+    const brainHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (brainKey) brainHeaders['Authorization'] = `Bearer ${brainKey}`;
+
+    try {
+      const res = await fetch(`${BRAIN_URL}/v1/transfer`, {
+        method: 'POST',
+        headers: brainHeaders,
+        body: JSON.stringify({
+          prompt: `You are Warren, MD of Deep Canyon trading desk. Review the team's performance and issue 2-3 specific directives. Be blunt. What needs to change RIGHT NOW to hit the $500 daily target?`,
+          context,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (res.ok) {
+        const data = await res.json() as any;
+        const review = typeof data.response === 'string' ? data.response : JSON.stringify(data.response);
+
+        console.log(`[Warren] TEAM REVIEW: ${review.substring(0, 200)}`);
+
+        // Store directives for other managers to read
+        this.store.set('warren:team_review', JSON.stringify({
+          review: review.substring(0, 500),
+          timestamp: new Date().toISOString(),
+          dailyPnl,
+          urgency,
+        }));
+
+        // Post to Discord if we're behind target
+        if (dailyPnl < DAILY_GOAL * 0.5) {
+          await postToDiscord(`👔 **Warren** 📋 TEAM REVIEW\n${review.substring(0, 400)}`);
+        }
+
+        // Record to Brain for historical tracking
+        brain.recordRule(`TEAM REVIEW: P&L $${dailyPnl.toFixed(0)} | ${review.substring(0, 200)}`, 'warren:review').catch(() => {});
+      }
+    } catch (e: any) {
+      // Brain unavailable — issue basic directives based on rules
+      if (dailyPnl < 0) {
+        this.store.set('fin:directive', 'tighten_stops_reduce_exposure');
+        console.log('[Warren] Brain offline — issuing defensive directives');
+      }
+      if (positions < 4) {
+        this.store.set('fin:directive', 'fill_open_slots');
+        console.log('[Warren] Brain offline — need more positions');
+      }
+    }
+
+    // Check specific issues and act
+    // Issue 1: Empty forex positions = wasted capital
+    try {
+      const fxRes = await fetch('http://localhost:3003/api/forex/positions', { signal: AbortSignal.timeout(5000) });
+      if (fxRes.ok) {
+        const fxData = await fxRes.json() as any;
+        if ((fxData.count || 0) < 2) {
+          console.log(`[Warren] DIRECTIVE: Forex only ${fxData.count} positions — need more. 25K buying power sitting idle.`);
+          this.store.set('warren:forex_directive', 'increase_positions');
+        }
+      }
+    } catch {}
+
+    // Issue 2: Trade engine not running
+    if (tradeStatus) {
+      try {
+        const ts = JSON.parse(tradeStatus);
+        const age = Date.now() - new Date(ts.lastHeartbeat || 0).getTime();
+        if (age > 5 * 60_000) {
+          console.log(`[Warren] CRITICAL: Trade engine stale ${Math.round(age/60_000)}m — demanding restart`);
+          await postToDiscord(`👔 **Warren** 🚨\nTrade engine down for ${Math.round(age/60_000)} minutes! Tara, fix this NOW.`);
+          this.store.set('restart_request:trade_engine', new Date().toISOString());
+        }
+      } catch {}
+    }
+
+    // Issue 3: No research stars = blind trading
+    try {
+      const stars = this.store.getResearchStars();
+      if (stars.length < 3) {
+        console.log(`[Warren] DIRECTIVE: Only ${stars.length} research stars — Ferd needs to deliver more picks`);
+        this.store.set('ferd:directive', 'urgent_research_needed');
+      }
+    } catch {}
   }
 
   getLearnings(): Array<{ observation: string; action: string; outcome: string; score: number }> {

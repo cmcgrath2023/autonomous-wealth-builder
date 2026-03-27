@@ -7,6 +7,7 @@
  */
 
 import { GatewayStateStore, ClosedTradeRow } from '../../../gateway/src/state-store.js';
+import { brain } from '../brain-client.js';
 
 const LOOP_MS = 120_000;
 const MIN_TRADES_FOR_EVAL = 3;
@@ -84,7 +85,36 @@ export class Ferd {
       // 5. Coordinate with Liza's catalyst detection
       const catalystAlignment = this.alignWithCatalysts(sectorPerf);
 
-      // 6. Write status
+      // 6. Read Warren's directive — act on it
+      const warrenDirective = this.store.get('ferd:directive') || '';
+      if (warrenDirective === 'urgent_research_needed') {
+        console.log('[Ferd] Warren demands more picks — running urgent scan');
+        // Record to Brain that research was inadequate
+        brain.recordRule('Ferd: Warren flagged insufficient research stars — need broader scanning', 'ferd:directive').catch(() => {});
+      }
+
+      // 7. Every 10 cycles, query Brain for research patterns that worked
+      if (this.cycleCount % 10 === 0) {
+        try {
+          const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://brain.oceanicai.io';
+          const brainKey = process.env.BRAIN_API_KEY || '';
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (brainKey) headers['Authorization'] = `Bearer ${brainKey}`;
+
+          const res = await fetch(`${BRAIN_URL}/v1/memories/search?q=profitable+trade+research+winner&limit=5`, {
+            headers, signal: AbortSignal.timeout(5000),
+          });
+          if (res.ok) {
+            const data = await res.json() as any;
+            const patterns = (data.memories || data.results || []).slice(0, 3);
+            if (patterns.length > 0) {
+              console.log(`[Ferd] Brain patterns: ${patterns.map((p: any) => p.content?.substring(0, 60)).join(' | ')}`);
+            }
+          }
+        } catch {}
+      }
+
+      // 8. Write status
       this.lastStatus = {
         lastCycle: now, cycleCount: this.cycleCount,
         sectorPerformance: sectorPerf, recommendations,

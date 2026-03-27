@@ -103,6 +103,22 @@ export class Fin {
       // 5. Check positions for trailing stop tightening and outsized winners
       await this.monitorPositions(actions);
 
+      // 5b. Read Warren's directive and team review — act on it
+      const warrenDirective = this.store.get('fin:directive') || '';
+      const warrenReview = this.store.get('warren:team_review');
+      if (warrenDirective === 'fill_open_slots') {
+        actions.push('WARREN: fill open slots — scanning for opportunities');
+      }
+      if (warrenDirective === 'tighten_stops_reduce_exposure') {
+        actions.push('WARREN: tightening stops per directive');
+      }
+      if (warrenReview && this.cycleCount % 10 === 0) {
+        try {
+          const review = JSON.parse(warrenReview);
+          console.log(`[Fin] Reading Warren's review: ${review.review?.substring(0, 100)}`);
+        } catch {}
+      }
+
       // 5. Write status to state store
       this.lastStatus = {
         lastCycle: now, cycleCount: this.cycleCount,
