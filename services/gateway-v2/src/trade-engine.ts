@@ -536,8 +536,8 @@ export class TradeEngine {
           if (gainers.length > 0) console.log('  [BUY] Using Alpaca movers (Yahoo unavailable)');
         }
 
-          // Merge morning plan tickers (priority — research-backed picks)
-          for (const pt of planTickers) {
+        // Merge morning plan tickers (priority — research-backed picks)
+        for (const pt of planTickers) {
             if (!gainers.some(g => g.symbol === pt)) {
               // Fetch price for plan ticker
               try {
@@ -551,30 +551,27 @@ export class TradeEngine {
             }
           }
 
-          const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length || 1, openSlots));
-          console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition} per position`);
+        const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length || 1, openSlots));
+        console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition} per position`);
 
-          for (const g of gainers.slice(0, MAX_POSITIONS)) {
-            try {
-              // Check Brain for ticker history — skip tickers we consistently lose on
-              const history = await brain.getTickerHistory(g.symbol);
-              if (history.shouldAvoid) {
-                console.log(`  [BUY] SKIP ${g.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
-                continue;
-              }
-
-              const qty = Math.floor(perPosition / g.price);
-              if (qty <= 0) continue;
-              const signal = {
-                id: `mover-${Date.now()}-${g.symbol}`, ticker: g.symbol,
-                direction: 'buy' as const, confidence: 0.9, timeframe: '1h' as const,
-                indicators: {}, pattern: 'top_mover', timestamp: new Date(), source: 'momentum' as const,
-              };
-              const order = await this.executor.execute(signal, qty, perPosition);
-              console.log(`  [BUY] ${qty} ${g.symbol} @$${g.price.toFixed(2)} (+${g.percent_change.toFixed(1)}%) — ${order.status}`);
-              brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
-            } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
-          }
+        for (const g of gainers.slice(0, openSlots)) {
+          try {
+            const history = await brain.getTickerHistory(g.symbol);
+            if (history.shouldAvoid) {
+              console.log(`  [BUY] SKIP ${g.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
+              continue;
+            }
+            const qty = Math.floor(perPosition / g.price);
+            if (qty <= 0) continue;
+            const signal = {
+              id: `mover-${Date.now()}-${g.symbol}`, ticker: g.symbol,
+              direction: 'buy' as const, confidence: 0.9, timeframe: '1h' as const,
+              indicators: {}, pattern: 'top_mover', timestamp: new Date(), source: 'momentum' as const,
+            };
+            const order = await this.executor.execute(signal, qty, perPosition);
+            console.log(`  [BUY] ${qty} ${g.symbol} @$${g.price.toFixed(2)} (+${g.percent_change.toFixed(1)}%) — ${order.status}`);
+            brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
+          } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
         }
         actions.push({ action: 'buy_movers', priority: 1, durationMs: Date.now() - t0, status: 'success', detail: `Bought movers` });
       } catch (e: any) { errors.push(`buy_movers: ${e.message}`); }
