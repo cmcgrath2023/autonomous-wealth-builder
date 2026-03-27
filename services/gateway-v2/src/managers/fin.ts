@@ -8,6 +8,7 @@
 
 import { GatewayStateStore } from '../../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from '../config-bus.js';
+import { brain } from '../brain-client.js';
 
 async function postToDiscord(text: string): Promise<void> {
   const webhook = process.env.DISCORD_WEBHOOK_URL;
@@ -117,6 +118,16 @@ export class Fin {
           const review = JSON.parse(warrenReview);
           console.log(`[Fin] Reading Warren's review: ${review.review?.substring(0, 100)}`);
         } catch {}
+      }
+
+      // 6. Brain-powered trading analysis — Fin thinks like an ex-Citi analyst
+      // Every 15 cycles (~15 min), Fin queries Brain for patterns and trains SONA
+      if (this.cycleCount % 15 === 0) {
+        try {
+          await this.brainAnalysis(dailyPnl, goalProgress, actions);
+        } catch (e: any) {
+          console.error(`[Fin] Brain analysis error: ${e.message}`);
+        }
       }
 
       // 5. Write status to state store
@@ -246,6 +257,100 @@ export class Fin {
     } catch (e: any) {
       actions.push(`Emergency cuts error: ${e.message}`);
     }
+  }
+
+  // ── Brain-Powered Analysis — Fin as ex-Wall Street analyst ──────────
+
+  private async brainAnalysis(dailyPnl: number, goalProgress: number, actions: string[]): Promise<void> {
+    const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://brain.oceanicai.io';
+    const brainKey = process.env.BRAIN_API_KEY || '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (brainKey) headers['Authorization'] = `Bearer ${brainKey}`;
+
+    // Get current positions for context
+    const alpacaHeaders = getAlpacaHeaders();
+    let posContext = 'No position data';
+    if (alpacaHeaders) {
+      try {
+        const creds = loadCredentials();
+        const base = creds.alpaca?.baseUrl || 'https://paper-api.alpaca.markets';
+        const res = await fetch(`${base}/v2/positions`, { headers: alpacaHeaders, signal: AbortSignal.timeout(5000) });
+        if (res.ok) {
+          const positions = await res.json() as any[];
+          posContext = positions.map(p => `${p.symbol}: $${parseFloat(p.unrealized_pl).toFixed(2)} (${(parseFloat(p.unrealized_plpc)*100).toFixed(1)}%)`).join(', ');
+        }
+      } catch {}
+    }
+
+    // 1. Query Brain for analysis — Fin thinks like an ex-Citi equity analyst
+    try {
+      const res = await fetch(`${BRAIN_URL}/v1/transfer`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          prompt: `You are Fin, an ex-Citi equity research analyst now running trading at Deep Canyon. You are sharp, numbers-driven, and accountable.
+
+Current positions: ${posContext}
+Daily P&L: $${dailyPnl.toFixed(2)} (${goalProgress.toFixed(0)}% of $500 target)
+
+Analyze: What's working? What's not? Should we cut any losers? Are we positioned for the right sectors given current macro (Iran war, oil surge, inflation fears)? Give 2-3 specific actionable items.`,
+          context: `Day trader strategy: buy movers at open, hold, sell before close. Target $500/day minimum.`,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (res.ok) {
+        const data = await res.json() as any;
+        const analysis = typeof data.response === 'string' ? data.response : JSON.stringify(data.response);
+        console.log(`[Fin] BRAIN ANALYSIS: ${analysis.substring(0, 200)}`);
+        actions.push(`BRAIN: ${analysis.substring(0, 100)}`);
+
+        // Store analysis for Warren and Discord bot to read
+        this.store.set('fin:brain_analysis', JSON.stringify({
+          analysis: analysis.substring(0, 500),
+          timestamp: new Date().toISOString(),
+          dailyPnl,
+        }));
+      }
+    } catch {}
+
+    // 2. Train SONA with today's outcomes — Fin learns from every trade
+    try {
+      const trades = this.store.getTodayTrades();
+      if (trades.length > 0) {
+        for (const trade of trades.slice(-5)) {
+          await fetch(`${BRAIN_URL}/v1/train`, {
+            method: 'POST', headers,
+            body: JSON.stringify({
+              input: `Trade: ${trade.ticker} ${trade.direction} | Reason: ${trade.reason}`,
+              output: trade.pnl > 0 ? 'profitable' : 'loss',
+              metadata: {
+                domain: 'fin:trade_learning',
+                ticker: trade.ticker,
+                pnl: trade.pnl,
+                reason: trade.reason,
+                direction: trade.direction,
+              },
+            }),
+            signal: AbortSignal.timeout(5000),
+          });
+        }
+        console.log(`[Fin] Trained SONA on ${Math.min(trades.length, 5)} trades`);
+      }
+    } catch {}
+
+    // 3. Search Brain for patterns relevant to current positions
+    try {
+      const res = await fetch(`${BRAIN_URL}/v1/memories/search?q=day+trading+movers+profitable+pattern&limit=3`, {
+        headers, signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = await res.json() as any;
+        const patterns = (data.memories || data.results || []).slice(0, 3);
+        for (const p of patterns) {
+          if (p.content) console.log(`[Fin] Pattern: ${p.content.substring(0, 80)}`);
+        }
+      }
+    } catch {}
   }
 
   private async sellPosition(
