@@ -525,7 +525,7 @@ export class TradeEngine {
           const yahooData = await yahooRes.json() as any;
           const quotes = yahooData?.finance?.result?.[0]?.quotes || [];
           gainers = quotes
-            .filter((q: any) => q.regularMarketPrice > 10 && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 2)
+            .filter((q: any) => q.regularMarketPrice > 5 && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 2)
             .map((q: any) => ({ symbol: q.symbol, price: q.regularMarketPrice, percent_change: q.regularMarketChangePercent }))
             .slice(0, openSlots);
         }
