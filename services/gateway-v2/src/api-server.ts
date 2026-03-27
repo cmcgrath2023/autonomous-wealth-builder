@@ -275,6 +275,18 @@ app.get('/api/research/latest', (_req: Request, res: Response) => {
 // Strategy — read from state store
 // ---------------------------------------------------------------------------
 
+// Account — Alpaca proxy with connected status
+app.get('/api/account', async (_req: Request, res: Response) => {
+  if (!hasAlpacaCreds()) return res.json({ connected: false });
+  try {
+    const r = await fetch(`${ALPACA_BASE}/v2/account`, { headers: alpacaHeaders(), signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      const acct = await r.json() as any;
+      res.json({ connected: true, equity: parseFloat(acct.equity), cash: parseFloat(acct.cash), buyingPower: parseFloat(acct.buying_power), dayPnl: parseFloat(acct.equity) - parseFloat(acct.last_equity) });
+    } else { res.json({ connected: false }); }
+  } catch { res.json({ connected: false }); }
+});
+
 app.post('/api/strategy/morning-plan', (req: Request, res: Response) => {
   stateStore.set('morning_plan', JSON.stringify(req.body));
   console.log(`[API] Morning plan received: ${(req.body.tickers || []).length} tickers`);
