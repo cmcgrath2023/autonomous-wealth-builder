@@ -68,9 +68,103 @@ export class Ops {
     } catch { return []; }
   }
 
+  private _lastPreMarketCheck = '';
+
+  private async preMarketRegressionScan(): Promise<string[]> {
+    const results: string[] = [];
+    const pass = (t: string) => results.push(`✅ ${t}`);
+    const fail = (t: string) => results.push(`❌ ${t}`);
+
+    // 1. Trade engine alive
+    try {
+      const raw = this.store.get('trade_engine_status');
+      if (raw) {
+        const ts = JSON.parse(raw);
+        const age = Date.now() - new Date(ts.lastHeartbeat || 0).getTime();
+        age < 5 * 60_000 ? pass('Trade engine: alive') : fail(`Trade engine: stale (${Math.round(age/60_000)}m)`);
+      } else fail('Trade engine: no status');
+    } catch { fail('Trade engine: error'); }
+
+    // 2. Daily flag reset
+    const today = new Date().toISOString().slice(0, 10);
+    const lastDate = this.store.get('trade_engine_last_date') || '';
+    lastDate === today ? pass('Daily flags: reset for today') : fail(`Daily flags: stuck on ${lastDate}`);
+
+    // 3. Yahoo Finance reachable
+    try {
+      const r = await fetch('https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=1', { headers: { 'User-Agent': 'MTWM/1.0' }, signal: AbortSignal.timeout(5000) });
+      r.ok ? pass('Yahoo Finance: reachable') : fail(`Yahoo Finance: HTTP ${r.status}`);
+    } catch { fail('Yahoo Finance: unreachable'); }
+
+    // 4. Brain MCP
+    try {
+      const r = await fetch('https://brain.oceanicai.io/v1/health', { signal: AbortSignal.timeout(5000) });
+      r.ok ? pass('Brain MCP: connected') : fail('Brain MCP: unhealthy');
+    } catch { fail('Brain MCP: unreachable'); }
+
+    // 5. Discord webhook
+    try {
+      const webhook = process.env.DISCORD_WEBHOOK_URL;
+      if (webhook && webhook.length > 50 && webhook.length < 200) pass('Discord webhook: configured');
+      else fail(`Discord webhook: invalid (len=${webhook?.length})`);
+    } catch { fail('Discord webhook: error'); }
+
+    // 6. Alpaca credentials
+    try {
+      const r = await fetch('https://paper-api.alpaca.markets/v2/account', {
+        headers: { 'APCA-API-KEY-ID': process.env.ALPACA_API_KEY || '', 'APCA-API-SECRET-KEY': process.env.ALPACA_API_SECRET || '' },
+        signal: AbortSignal.timeout(5000),
+      });
+      r.ok ? pass('Alpaca: authenticated') : fail(`Alpaca: HTTP ${r.status}`);
+    } catch { fail('Alpaca: unreachable'); }
+
+    // 7. Forex service
+    try {
+      const r = await fetch('http://localhost:3003/api/forex/health', { signal: AbortSignal.timeout(3000) });
+      r.ok ? pass('Forex service: healthy') : fail('Forex service: unhealthy');
+    } catch { fail('Forex service: down'); }
+
+    // 8. Managers alive
+    for (const name of ['fin', 'liza', 'ferd']) {
+      const raw = this.store.get(`manager_${name}_status`);
+      if (raw) {
+        try {
+          const s = JSON.parse(raw);
+          const age = Date.now() - new Date(s.lastCycle || s.lastScan || 0).getTime();
+          age < 5 * 60_000 ? pass(`Manager ${name}: alive`) : fail(`Manager ${name}: stale (${Math.round(age/60_000)}m)`);
+        } catch { fail(`Manager ${name}: bad status`); }
+      } else fail(`Manager ${name}: no status`);
+    }
+
+    return results;
+  }
+
   private async cycle(): Promise<void> {
     if (!this.running) return;
     this.cycleCount++;
+
+    // Pre-market regression scan — once daily at 9:00 AM ET
+    const now = new Date();
+    const etTime = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false });
+    const [etH, etM] = etTime.split(':').map(Number);
+    const today = now.toISOString().slice(0, 10);
+    if (etH === 9 && etM <= 5 && this._lastPreMarketCheck !== today) {
+      this._lastPreMarketCheck = today;
+      try {
+        const results = await this.preMarketRegressionScan();
+        const failures = results.filter(r => r.startsWith('❌'));
+        const report = `🔧 **Tara** PRE-MARKET SCAN\n${results.join('\n')}`;
+        console.log(`[Tara] Pre-market scan: ${results.length - failures.length}/${results.length} pass`);
+        // Post to Discord
+        const webhook = process.env.DISCORD_WEBHOOK_URL;
+        if (webhook) {
+          await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: report }), signal: AbortSignal.timeout(5000) }).catch(() => {});
+        }
+        if (failures.length > 0) {
+          console.log(`[Tara] ⚠️ ${failures.length} FAILURES: ${failures.join('; ')}`);
+        }
+      } catch (e: any) { console.error(`[Tara] Pre-market scan error: ${e.message}`); }
+    }
     const now = new Date().toISOString();
     const incidents: Incident[] = [];
 
