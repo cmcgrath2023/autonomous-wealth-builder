@@ -128,6 +128,7 @@ app.get('/api/broker/account', async (_req: Request, res: Response) => {
     5000,
   );
   if (fromCache) (data as Record<string, unknown>)._cached = true;
+  if (status === 200 && data) (data as Record<string, unknown>).connected = true;
   res.status(status).json(data);
 });
 
@@ -305,7 +306,52 @@ app.get('/api/traits/history/snapshots', (_req: Request, res: Response) => {
   } catch { res.json({ snapshots: [] }); }
 });
 
-// Account — Alpaca proxy with connected status
+// Broker endpoints — what the frontend expects
+app.get('/api/broker/account', async (_req: Request, res: Response) => {
+  if (!hasAlpacaCreds()) return res.json({ connected: false, equity: 0, cash: 0, buyingPower: 0 });
+  try {
+    const r = await fetch(`${ALPACA_BASE}/v2/account`, { headers: alpacaHeaders(), signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      const a = await r.json() as any;
+      res.json({ connected: true, equity: parseFloat(a.equity), cash: parseFloat(a.cash), buyingPower: parseFloat(a.buying_power), lastEquity: parseFloat(a.last_equity) });
+    } else res.json({ connected: false });
+  } catch { res.json({ connected: false }); }
+});
+
+app.get('/api/broker/positions', async (_req: Request, res: Response) => {
+  if (!hasAlpacaCreds()) return res.json({ positions: [] });
+  try {
+    const r = await fetch(`${ALPACA_BASE}/v2/positions`, { headers: alpacaHeaders(), signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      const raw = await r.json() as any[];
+      const positions = raw.map(p => ({
+        symbol: p.symbol, qty: parseFloat(p.qty), avgPrice: parseFloat(p.avg_entry_price),
+        currentPrice: parseFloat(p.current_price), marketValue: parseFloat(p.market_value),
+        unrealizedPl: parseFloat(p.unrealized_pl), unrealizedPlPct: parseFloat(p.unrealized_plpc) * 100,
+        side: p.side,
+      }));
+      res.json({ positions });
+    } else res.json({ positions: [] });
+  } catch { res.json({ positions: [] }); }
+});
+
+app.get('/api/positions/closed', async (_req: Request, res: Response) => {
+  try {
+    const trades = stateStore.getTodayTrades();
+    res.json({ trades });
+  } catch { res.json({ trades: [] }); }
+});
+
+app.get('/api/positions/performance', async (_req: Request, res: Response) => {
+  try {
+    const trades = stateStore.getTodayTrades();
+    const wins = trades.filter(t => t.pnl > 0);
+    const losses = trades.filter(t => t.pnl <= 0);
+    res.json({ totalTrades: trades.length, wins: wins.length, losses: losses.length, winRate: trades.length > 0 ? (wins.length / trades.length) * 100 : 0 });
+  } catch { res.json({ totalTrades: 0, wins: 0, losses: 0, winRate: 0 }); }
+});
+
+// Account — Alpaca proxy with connected status (legacy)
 app.get('/api/account', async (_req: Request, res: Response) => {
   if (!hasAlpacaCreds()) return res.json({ connected: false });
   try {
