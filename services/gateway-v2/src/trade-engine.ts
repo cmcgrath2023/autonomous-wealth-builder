@@ -495,8 +495,7 @@ export class TradeEngine {
     const positions = await this.executor.getPositions();
     const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
     const openSlots = MAX_POSITIONS - equityCount;
-    if (mkt.isMarketOpen && openSlots > 0 && !this._boughtToday && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
-      this._boughtToday = true;
+    if (mkt.isMarketOpen && openSlots > 0 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
