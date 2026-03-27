@@ -10,6 +10,7 @@ export function middleware(request: NextRequest) {
   if (
     request.nextUrl.pathname === '/api/auth/login' ||
     request.nextUrl.pathname === '/login' ||
+    request.nextUrl.pathname.startsWith('/api/') ||
     request.nextUrl.pathname.startsWith('/_next/') ||
     request.nextUrl.pathname.startsWith('/favicon') ||
     request.nextUrl.pathname.endsWith('.svg') ||
