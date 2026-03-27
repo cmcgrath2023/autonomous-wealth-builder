@@ -27,10 +27,10 @@ export interface ClosedTrade {
 }
 
 const DEFAULT_RULES: PositionRules = {
-  stopLossPct: 0.03,        // 3% stop — cut losers fast
-  takeProfitPct: 0.08,       // 8% take profit — let winners run, trailing stop protects below this
-  trailingStopPct: 0.02,     // 2% trailing — protect profits aggressively
-  maxDailyLossPct: 0.03,     // 3% max daily loss = $150 on $5K
+  stopLossPct: 0.08,        // 8% stop — movers are volatile, give room
+  takeProfitPct: 0.15,       // 15% take profit — let big movers run
+  trailingStopPct: 0.05,     // 5% trailing — protect profits but allow normal pullbacks
+  maxDailyLossPct: 0.05,     // 5% max daily loss
 };
 
 const DEFAULT_GOAL: DailyGoalConfig = {
