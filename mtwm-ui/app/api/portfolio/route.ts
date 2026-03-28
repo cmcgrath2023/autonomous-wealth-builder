@@ -129,7 +129,7 @@ export async function GET() {
 
     // P&L calculations (includes forex positions added above)
     const unrealizedPnl = assets.reduce((sum: number, a: any) => sum + (a.change || 0), 0);
-    const totalValue = account.portfolioValue || 0;
+    const totalValue = parseFloat(account.portfolio_value || account.portfolioValue || account.equity || '0');
     const totalPnl = totalValue - INITIAL_BALANCE; // TRUE total P&L from starting balance
     // Realized P&L = total P&L minus what's still unrealized (from Alpaca's actual data)
     const realizedFromAlpaca = totalPnl - unrealizedPnl;
@@ -141,10 +141,11 @@ export async function GET() {
     const now = new Date();
     const utcHour = now.getUTCHours();
     const isAfterUSClose = utcHour >= 21 || utcHour < 5; // ~4PM ET to midnight
-    const alpacaDayPnl = isAfterUSClose ? 0 : (account.dayPnl || 0);
+    const lastEquity = parseFloat(account.last_equity || account.lastEquity || '0');
+    const alpacaDayPnl = isAfterUSClose ? 0 : (totalValue - lastEquity);
     // Combined day P&L: Alpaca equity/crypto + OANDA forex unrealized
     const dayPnl = alpacaDayPnl + forexUnrealizedPL;
-    const dayPnlPercent = (account.lastEquity || 0) > 0 ? (dayPnl / account.lastEquity) * 100 : 0;
+    const dayPnlPercent = lastEquity > 0 ? (dayPnl / lastEquity) * 100 : 0;
 
     // Performance stats
     const closedTrades = closedData.trades || [];
