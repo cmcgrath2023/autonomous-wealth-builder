@@ -129,44 +129,54 @@ export class Warren {
       const [etHourStr, etMinStr] = etTime.split(':');
       const etHour = parseInt(etHourStr);
       const etMin = parseInt(etMinStr || '0');
-      const isMarketHours = etHour >= 9 && etHour < 17;
+      const etDayName = now.toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+      const isWeekday = !['Sat', 'Sun'].includes(etDayName);
+      const isSunday = etDayName === 'Sun';
+      const isMarketHours = isWeekday && etHour >= 9 && etHour < 17;
       const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York' });
+      const today = now.toISOString().slice(0, 10);
 
       if (this.cycleCount > 3) {
         const prevUrgency = this.store.get('warren:prev_urgency') || '';
         const unhealthyManagers = managers.filter(m => !m.healthy);
 
-        // Urgency change
-        if (urgency !== prevUrgency) {
+        // Urgency change — weekdays only
+        if (isWeekday && urgency !== prevUrgency) {
           this.store.set('warren:prev_urgency', urgency);
           await postToDiscord(`👔 **Warren** ${urgency === 'critical' ? '🚨' : urgency === 'elevated' ? '⚡' : ''}\n${briefing.narrative}`);
         }
 
-        // Market open briefing (9:30-9:35 ET)
+        // Market open briefing (9:30-9:35 ET, weekdays)
         const lastOpenPost = this.store.get('warren:last_open_post') || '';
-        const today = now.toISOString().slice(0, 10);
-        if (etHour === 9 && etMin >= 30 && etMin <= 35 && lastOpenPost !== today) {
+        if (isWeekday && etHour === 9 && etMin >= 30 && etMin <= 35 && lastOpenPost !== today) {
           this.store.set('warren:last_open_post', today);
           await postToDiscord(`👔 **Warren** [${timeStr} ET] 🔔 MARKET OPEN\n${briefing.narrative}`);
         }
 
-        // Market close summary (4:00-4:05 ET)
+        // Market close summary (4:00-4:05 ET, weekdays)
         const lastClosePost = this.store.get('warren:last_close_post') || '';
-        if (etHour === 16 && etMin <= 5 && lastClosePost !== today) {
+        if (isWeekday && etHour === 16 && etMin <= 5 && lastClosePost !== today) {
           this.store.set('warren:last_close_post', today);
           const pnlEmoji = dailyPnl >= 0 ? '📈' : '📉';
           await postToDiscord(`👔 **Warren** [${timeStr} ET] ${pnlEmoji} MARKET CLOSE\nDaily P&L: $${dailyPnl.toFixed(2)} | ${positions} positions | ${deployed > 0 ? '$' + deployed.toFixed(0) + ' deployed' : 'flat'}\n${briefing.narrative}`);
         }
 
-        // Hourly heartbeat during market hours (check on-the-hour, ±2 min)
+        // Hourly heartbeat — weekdays during market hours ONLY
         const lastHourlyPost = parseInt(this.store.get('warren:last_hourly_hour') || '-1');
         if (isMarketHours && etMin <= 2 && etHour !== lastHourlyPost) {
           this.store.set('warren:last_hourly_hour', String(etHour));
           await postToDiscord(`👔 **Warren** [${timeStr} ET]\n${briefing.narrative}`);
         }
 
-        // Manager health alerts (every 30 min)
-        if (unhealthyManagers.length > 0 && this.cycleCount % 60 === 0) {
+        // Sunday evening weekly plan (6:00-6:05 PM ET)
+        const lastWeeklyPost = this.store.get('warren:last_weekly_post') || '';
+        if (isSunday && etHour === 18 && etMin <= 5 && lastWeeklyPost !== today) {
+          this.store.set('warren:last_weekly_post', today);
+          await postToDiscord(`👔 **Warren** [${timeStr} ET] 📋 WEEKLY PLAN\n${briefing.narrative}\n\nUpdated morning briefing at 7:00 AM ET Monday.`);
+        }
+
+        // Manager health alerts — weekdays only
+        if (isWeekday && unhealthyManagers.length > 0 && this.cycleCount % 60 === 0) {
           await postToDiscord(`👔 **Warren** ⚠️\nManagers down: ${unhealthyManagers.map(m => m.name).join(', ')} — restarting`);
         }
       } else {
