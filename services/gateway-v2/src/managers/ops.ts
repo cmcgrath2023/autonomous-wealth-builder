@@ -186,19 +186,28 @@ export class Ops {
         this._activeIncidents.add('trade_engine');
         this.store.set('restart_request:trade_engine', now);
         incidents.push({ component: 'trade_engine', issue: `Trade engine stale (${tradeEngine.staleSecs}s)`, action: 'restart_requested', timestamp: now });
-      } else if (tradeEngine.healthy) { this._activeIncidents.delete('trade_engine'); }
+      } else if (tradeEngine.healthy && this._activeIncidents.has('trade_engine')) {
+        this._activeIncidents.delete('trade_engine');
+        incidents.push({ component: 'trade_engine', issue: 'Trade engine recovered', action: 'RESOLVED ✅', timestamp: now });
+      }
 
       if (!researchWorker.healthy && !this._activeIncidents.has('research_worker')) {
         this._activeIncidents.add('research_worker');
         this.store.set('restart_request:research_worker', now);
         incidents.push({ component: 'research_worker', issue: 'Research worker stale', action: 'restart_requested', timestamp: now });
-      } else if (researchWorker.healthy) { this._activeIncidents.delete('research_worker'); }
+      } else if (researchWorker.healthy && this._activeIncidents.has('research_worker')) {
+        this._activeIncidents.delete('research_worker');
+        incidents.push({ component: 'research_worker', issue: 'Research worker recovered', action: 'RESOLVED ✅', timestamp: now });
+      }
 
       if (!apiServer.healthy && !this._activeIncidents.has('api_server')) {
         this._activeIncidents.add('api_server');
         this.store.set('ops:critical:api_server', now);
         incidents.push({ component: 'api_server', issue: `API slow (${apiServer.responseMs}ms)`, action: 'CRITICAL', timestamp: now });
-      } else if (apiServer.healthy) { this._activeIncidents.delete('api_server'); }
+      } else if (apiServer.healthy && this._activeIncidents.has('api_server')) {
+        this._activeIncidents.delete('api_server');
+        incidents.push({ component: 'api_server', issue: 'API recovered', action: 'RESOLVED ✅', timestamp: now });
+      }
 
       if (!forexService.healthy && !this._activeIncidents.has('forex_service')) {
         this._activeIncidents.add('forex_service');
@@ -210,7 +219,10 @@ export class Ops {
         } catch {
           incidents.push({ component: 'forex_service', issue: 'Forex unreachable', action: 'restart FAILED', timestamp: now });
         }
-      } else if (forexService.healthy) { this._activeIncidents.delete('forex_service'); }
+      } else if (forexService.healthy && this._activeIncidents.has('forex_service')) {
+        this._activeIncidents.delete('forex_service');
+        incidents.push({ component: 'forex_service', issue: 'Forex service recovered', action: 'RESOLVED ✅', timestamp: now });
+      }
 
       if (!ui.healthy && !this._activeIncidents.has('ui')) {
         this._activeIncidents.add('ui');
@@ -222,7 +234,10 @@ export class Ops {
         } catch {
           incidents.push({ component: 'ui', issue: 'UI unreachable', action: 'restart FAILED', timestamp: now });
         }
-      } else if (ui.healthy) { this._activeIncidents.delete('ui'); }
+      } else if (ui.healthy && this._activeIncidents.has('ui')) {
+        this._activeIncidents.delete('ui');
+        incidents.push({ component: 'ui', issue: 'UI recovered', action: 'RESOLVED ✅', timestamp: now });
+      }
 
       const allHealthy = apiServer.healthy && tradeEngine.healthy && researchWorker.healthy
         && forexService.healthy && ui.healthy && tunnel.healthy && stateStore.healthy
