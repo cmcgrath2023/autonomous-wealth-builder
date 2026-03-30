@@ -37,6 +37,7 @@ function emitTradeClosed(payload: { ticker: string; success: boolean; returnPct:
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
 const BUDGET_MAX = 8_000;
+const DAILY_LOSS_LIMIT = -500; // Hard circuit breaker — halt everything if day P&L exceeds this
 const FOREX_BANK = 50;
 const FOREX_CUT = -20;
 const SL_DOMINANCE_HALT = 0.70;
@@ -510,6 +511,34 @@ export class TradeEngine {
       `${mkt.etHour}:${String(mkt.etMin).padStart(2, '0')} ET — ` +
       `${mkt.isMarketOpen ? 'OPEN' : mkt.isAfterHours ? 'AFTER-HOURS' : 'CLOSED'}`,
     );
+
+    // DAILY LOSS CIRCUIT BREAKER — hard stop if day P&L exceeds limit
+    const todayClosedPnl = this.store.getTodayTrades().reduce((s, t) => s + t.pnl, 0);
+    if (todayClosedPnl < DAILY_LOSS_LIMIT) {
+      console.log(`  [CIRCUIT BREAKER] Daily realized P&L $${todayClosedPnl.toFixed(2)} exceeds $${DAILY_LOSS_LIMIT} limit — ALL TRADING HALTED`);
+      // Record to Brain so it persists across restarts
+      brain.recordRule(`CIRCUIT BREAKER TRIPPED ${today}: P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit`, 'circuit_breaker').catch(() => {});
+      // Discord alert
+      const webhook = process.env.DISCORD_WEBHOOK_URL;
+      if (webhook) {
+        fetch(webhook, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: `🚨 **CIRCUIT BREAKER TRIPPED** — Daily P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit. ALL trading halted for the day.` }),
+        }).catch(() => {});
+      }
+      // Write status so API/Discord can see it
+      this.store.set('autonomy_status', JSON.stringify({
+        heartbeatNumber: this.hbCount,
+        lastHeartbeat: new Date().toISOString(),
+        durationMs: Date.now() - t0,
+        positionCount: 0,
+        totalDeployed: 0,
+        actionSummary: 'CIRCUIT_BREAKER_TRIPPED',
+        errors: [`Daily loss $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit`],
+        recentActivity: ['CIRCUIT BREAKER — all trading halted'],
+      }));
+      return; // Skip entire heartbeat — no forex, no buys, no exits
+    }
 
     // 1. Forex position management (always runs — 24/5)
     try { const r = await this.manageForexPositions(); actions.push(r); if (r.status !== 'skipped') console.log(`  [1] ${r.detail} (${r.durationMs}ms)`); }
