@@ -432,6 +432,16 @@ app.post('/api/trade/sell', async (req: Request, res: Response) => {
     const data = await r.json();
     if (r.ok) {
       console.log(`[ManualTrade] SELL ${symbol} — closed`);
+      // Record session sell so trade engine won't rebuy this ticker today
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const key = 'session_sells_today';
+        const raw = stateStore.get(key);
+        const sells: { date: string; tickers: string[] } = raw ? JSON.parse(raw) : { date: today, tickers: [] };
+        if (sells.date !== today) { sells.date = today; sells.tickers = []; }
+        if (!sells.tickers.includes(symbol)) sells.tickers.push(symbol);
+        stateStore.set(key, JSON.stringify(sells));
+      } catch {}
       res.json({ status: 'ok', order: data });
     } else {
       res.status(r.status).json({ error: data });
