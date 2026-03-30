@@ -391,12 +391,12 @@ export class TradeEngine {
         } catch (e: any) { details.push(`Forex error: ${e.message}`); }
       }
 
-      // SL dominance check — halt all entries if > 70%
-      const todayTradesForStars = this.store.getTodayTrades();
-      const slCountStars = todayTradesForStars.filter(t => t.reason === 'stop_loss').length;
-      const slDomStars = todayTradesForStars.length >= 3 ? slCountStars / todayTradesForStars.length : 0;
-      if (slDomStars > 0.7) {
-        return ar('skipped', `SL dominance ${(slDomStars * 100).toFixed(0)}% > 70% — HALTING entries`);
+      // SL dominance check — halt equity entries if > 70% (equity trades only)
+      const starTrades = this.store.getTodayTrades().filter(t => !t.ticker.includes('/') && !t.ticker.includes('_'));
+      const starSlCount = starTrades.filter(t => t.reason === 'stop_loss').length;
+      const starSlDom = starTrades.length >= 3 ? starSlCount / starTrades.length : 0;
+      if (starSlDom > 0.7) {
+        return ar('skipped', `Equity SL dominance ${(starSlDom * 100).toFixed(0)}% > 70% — HALTING entries`);
       }
 
       // Equity/Crypto from research stars + movers (already sorted by score)
@@ -512,32 +512,25 @@ export class TradeEngine {
       `${mkt.isMarketOpen ? 'OPEN' : mkt.isAfterHours ? 'AFTER-HOURS' : 'CLOSED'}`,
     );
 
-    // DAILY LOSS CIRCUIT BREAKER — hard stop if day P&L exceeds limit
-    const todayClosedPnl = this.store.getTodayTrades().reduce((s, t) => s + t.pnl, 0);
-    if (todayClosedPnl < DAILY_LOSS_LIMIT) {
-      console.log(`  [CIRCUIT BREAKER] Daily realized P&L $${todayClosedPnl.toFixed(2)} exceeds $${DAILY_LOSS_LIMIT} limit — ALL TRADING HALTED`);
-      // Record to Brain so it persists across restarts
-      brain.recordRule(`CIRCUIT BREAKER TRIPPED ${today}: P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit`, 'circuit_breaker').catch(() => {});
-      // Discord alert
-      const webhook = process.env.DISCORD_WEBHOOK_URL;
-      if (webhook) {
-        fetch(webhook, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: `🚨 **CIRCUIT BREAKER TRIPPED** — Daily P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit. ALL trading halted for the day.` }),
-        }).catch(() => {});
+    // DAILY LOSS CIRCUIT BREAKER — halts EQUITY entries, forex manage_positions still runs
+    const allTodayTrades = this.store.getTodayTrades();
+    const todayClosedPnl = allTodayTrades.reduce((s, t) => s + t.pnl, 0);
+    const equityCircuitBreaker = todayClosedPnl < DAILY_LOSS_LIMIT;
+    if (equityCircuitBreaker) {
+      console.log(`  [CIRCUIT BREAKER] Daily realized P&L $${todayClosedPnl.toFixed(2)} exceeds $${DAILY_LOSS_LIMIT} limit — EQUITY HALTED (forex continues)`);
+      // Alert once per day
+      const cbKey = `circuit_breaker_${today}`;
+      if (!this.store.get(cbKey)) {
+        this.store.set(cbKey, 'tripped');
+        brain.recordRule(`CIRCUIT BREAKER TRIPPED ${today}: P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit`, 'system').catch(() => {});
+        const webhook = process.env.DISCORD_WEBHOOK_URL;
+        if (webhook) {
+          fetch(webhook, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: `**CIRCUIT BREAKER** — Daily P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit. Equity trading halted, forex management continues.` }),
+          }).catch(() => {});
+        }
       }
-      // Write status so API/Discord can see it
-      this.store.set('autonomy_status', JSON.stringify({
-        heartbeatNumber: this.hbCount,
-        lastHeartbeat: new Date().toISOString(),
-        durationMs: Date.now() - t0,
-        positionCount: 0,
-        totalDeployed: 0,
-        actionSummary: 'CIRCUIT_BREAKER_TRIPPED',
-        errors: [`Daily loss $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit`],
-        recentActivity: ['CIRCUIT BREAKER — all trading halted'],
-      }));
-      return; // Skip entire heartbeat — no forex, no buys, no exits
     }
 
     // 1. Forex position management (always runs — 24/5)
@@ -565,10 +558,11 @@ export class TradeEngine {
     }
 
     // 3. BUY MOVERS — fill available slots during market hours (before 3:30 PM)
-    //    PANIC PROTOCOL: check SL dominance before any buys
-    const todayTrades = this.store.getTodayTrades();
-    const slCount = todayTrades.filter(t => t.reason === 'stop_loss').length;
-    const slDominance = todayTrades.length > 0 ? slCount / todayTrades.length : 0;
+    //    PANIC PROTOCOL: circuit breaker + SL dominance before any equity buys
+    //    Note: allTodayTrades already fetched above for circuit breaker
+    const equityTrades = allTodayTrades.filter(t => !t.ticker.includes('/') && !t.ticker.includes('_'));
+    const eqSlCount = equityTrades.filter(t => t.reason === 'stop_loss').length;
+    const eqSlDominance = equityTrades.length > 0 ? eqSlCount / equityTrades.length : 0;
 
     const positions = await this.executor.getPositions();
     const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
@@ -576,8 +570,10 @@ export class TradeEngine {
     const totalDeployedNow = positions.reduce((s, p) => s + Math.abs(p.marketValue || p.costBasis || 0), 0);
     const budgetRemaining = BUDGET_MAX - totalDeployedNow;
 
-    if (slDominance > 0.7 && todayTrades.length >= 3) {
-      console.log(`  [BUY] SL DOMINANCE ${(slDominance * 100).toFixed(0)}% (${slCount}/${todayTrades.length}) > 70% — HALTING new entries`);
+    if (equityCircuitBreaker) {
+      // Already logged above — skip equity entirely
+    } else if (eqSlDominance > 0.7 && equityTrades.length >= 3) {
+      console.log(`  [BUY] EQUITY SL DOMINANCE ${(eqSlDominance * 100).toFixed(0)}% (${eqSlCount}/${equityTrades.length}) > 70% — HALTING equity entries`);
     } else if (totalDeployedNow >= BUDGET_MAX) {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
     } else if (mkt.isMarketOpen && openSlots > 0 && budgetRemaining > 100 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
