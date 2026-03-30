@@ -28,6 +28,12 @@ import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelli
 let _bayesian: BayesianIntelligence | null = null;
 eventBus.on('intelligence:ready' as any, (bi: BayesianIntelligence) => { _bayesian = bi; });
 
+// Forward trade:closed to parent process via IPC (Bayesian + Brain learning)
+function emitTradeClosed(payload: { ticker: string; success: boolean; returnPct: number; reason: string }) {
+  eventBus.emit('trade:closed' as any, payload);
+  if (process.send) process.send({ type: 'trade:closed', payload });
+}
+
 const HEARTBEAT_MS = 120_000;
 const MAX_POSITIONS = 6;
 const BUDGET_MAX = 8_000;
@@ -207,7 +213,7 @@ export class TradeEngine {
             const dir = p.units > 0 ? 'long' : 'short';
             const reason = p.pl >= FOREX_BANK ? 'take_profit' : 'stop_loss';
             this.store.recordTrade({ ticker: sym, pnl: p.pl, direction: dir, reason, openedAt: '', closedAt: new Date().toISOString() });
-            eventBus.emit('trade:closed' as any, { ticker: sym, success: p.pl > 0, returnPct: p.pl / 100, reason });
+            emitTradeClosed({ ticker: sym, success: p.pl > 0, returnPct: p.pl / 100, reason });
             brain.recordTradeClose(sym, p.pl, p.pl / 100, reason, dir).catch(() => {});
             log.push(`${p.pl >= FOREX_BANK ? 'BANKED' : 'CUT'} ${sym} $${p.pl.toFixed(2)}`);
           } catch (e: any) { log.push(`FAILED ${p.instrument}: ${e.message}`); }
@@ -257,7 +263,7 @@ export class TradeEngine {
           ticker: trade.ticker, pnl: trade.pnl, direction: 'long',
           reason: trade.exitReason, openedAt: '', closedAt: trade.closedAt,
         });
-        eventBus.emit('trade:closed' as any, {
+        emitTradeClosed({
           ticker: trade.ticker, success: trade.pnl > 0,
           returnPct: trade.exitPrice && trade.entryPrice ? (trade.exitPrice - trade.entryPrice) / trade.entryPrice : trade.pnl / 100,
           reason: trade.exitReason,
@@ -346,7 +352,7 @@ export class TradeEngine {
             });
             details.push(`ROTATED OUT ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) for ${bestStar.symbol}`);
             console.log(`[TradeEngine] ROTATION: sold ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) to make room for ${bestStar.symbol} (score: ${bestStar.score})`);
-            eventBus.emit('trade:closed' as any, { ticker: weakest.ticker, success: weakest.unrealizedPnl > 0, returnPct: weakest.unrealizedPnlPercent / 100, reason: 'rotation' });
+            emitTradeClosed({ ticker: weakest.ticker, success: weakest.unrealizedPnl > 0, returnPct: weakest.unrealizedPnlPercent / 100, reason: 'rotation' });
             this._addSessionSell(weakest.ticker); // don't rebuy this session
             // recentBuys auto-managed via state store
           } catch (e: any) { details.push(`Rotation failed: ${e.message}`); }
@@ -382,6 +388,14 @@ export class TradeEngine {
             } else { details.push(`Forex full (${open.length}/4)`); }
           } else { details.push(`Forex: no signals (${this.forex.getActiveSession()})`); }
         } catch (e: any) { details.push(`Forex error: ${e.message}`); }
+      }
+
+      // SL dominance check — halt all entries if > 70%
+      const todayTradesForStars = this.store.getTodayTrades();
+      const slCountStars = todayTradesForStars.filter(t => t.reason === 'stop_loss').length;
+      const slDomStars = todayTradesForStars.length >= 3 ? slCountStars / todayTradesForStars.length : 0;
+      if (slDomStars > 0.7) {
+        return ar('skipped', `SL dominance ${(slDomStars * 100).toFixed(0)}% > 70% — HALTING entries`);
       }
 
       // Equity/Crypto from research stars + movers (already sorted by score)
@@ -513,7 +527,7 @@ export class TradeEngine {
           try {
             await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
             console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
-            eventBus.emit('trade:closed' as any, { ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
+            emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
             brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'eod_close', 'long').catch(() => {});
           } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
         }
@@ -522,10 +536,22 @@ export class TradeEngine {
     }
 
     // 3. BUY MOVERS — fill available slots during market hours (before 3:30 PM)
+    //    PANIC PROTOCOL: check SL dominance before any buys
+    const todayTrades = this.store.getTodayTrades();
+    const slCount = todayTrades.filter(t => t.reason === 'stop_loss').length;
+    const slDominance = todayTrades.length > 0 ? slCount / todayTrades.length : 0;
+
     const positions = await this.executor.getPositions();
     const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
     const openSlots = MAX_POSITIONS - equityCount;
-    if (mkt.isMarketOpen && openSlots > 0 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+    const totalDeployedNow = positions.reduce((s, p) => s + Math.abs(p.marketValue || p.costBasis || 0), 0);
+    const budgetRemaining = BUDGET_MAX - totalDeployedNow;
+
+    if (slDominance > 0.7 && todayTrades.length >= 3) {
+      console.log(`  [BUY] SL DOMINANCE ${(slDominance * 100).toFixed(0)}% (${slCount}/${todayTrades.length}) > 70% — HALTING new entries`);
+    } else if (totalDeployedNow >= BUDGET_MAX) {
+      console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
+    } else if (mkt.isMarketOpen && openSlots > 0 && budgetRemaining > 100 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
@@ -586,11 +612,27 @@ export class TradeEngine {
             }
           }
 
-        const perPosition = Math.floor(BUDGET_MAX / Math.min(gainers.length || 1, openSlots));
-        console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition} per position`);
+        // Cap per-position to remaining budget / slots, never exceeding $1,400 per position
+        const slotsToFill = Math.min(gainers.length || 1, openSlots);
+        const perPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), 1400);
+        console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition}/pos, budget left: $${budgetRemaining.toFixed(0)}`);
 
+        if (perPosition < 50) {
+          console.log(`  [BUY] Per-position too small ($${perPosition}) — skipping`);
+        }
+
+        let spentThisHeartbeat = 0;
         for (const g of gainers.slice(0, openSlots)) {
+          if (spentThisHeartbeat + perPosition > budgetRemaining) {
+            console.log(`  [BUY] Budget exhausted this heartbeat — stopping`);
+            break;
+          }
           try {
+            // Skip tickers we sold this session
+            if (this._sessionSells.has(g.symbol)) {
+              console.log(`  [BUY] SKIP ${g.symbol} — sold this session`);
+              continue;
+            }
             const history = await brain.getTickerHistory(g.symbol);
             if (history.shouldAvoid) {
               console.log(`  [BUY] SKIP ${g.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
@@ -605,6 +647,10 @@ export class TradeEngine {
             };
             const order = await this.executor.execute(signal, qty, perPosition);
             console.log(`  [BUY] ${qty} ${g.symbol} @$${g.price.toFixed(2)} (+${g.percent_change.toFixed(1)}%) — ${order.status}`);
+            if (order.status === 'filled' || order.status === 'pending') {
+              spentThisHeartbeat += qty * g.price;
+              this._trackBuy(g.symbol);
+            }
             brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
           } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
         }

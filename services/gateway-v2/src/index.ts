@@ -32,7 +32,6 @@ import { brain } from './brain-client.js';
 // Nanobot loaded dynamically in main()
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
-const BAYESIAN_KEY = 'bayesian_intelligence_state';
 
 // ---------------------------------------------------------------------------
 // Worker configuration
@@ -124,6 +123,15 @@ function spawnWorker(state: WorkerState): void {
     for (const line of lines) console.error(`[${config.name}] ${line}`);
   });
 
+  // IPC: trade engine forwards trade:closed events to parent for Bayesian learning
+  child.on('message', (msg: any) => {
+    if (msg?.type === 'trade:closed' && msg.payload) {
+      const { ticker, success, returnPct, reason } = msg.payload;
+      eventBus.emit('trade:closed' as any, msg.payload);
+      log(`IPC trade:closed ${ticker} ${success ? 'WIN' : 'LOSS'} (${reason})`);
+    }
+  });
+
   child.on('exit', (code, signal) => {
     state.process = null;
 
@@ -204,38 +212,11 @@ async function main(): Promise<void> {
   stateStore = new GatewayStateStore(DB_PATH);
   log(`State store ready (${DB_PATH})`);
 
-  // 2. Initialize Bayesian Intelligence with persistence
-  const bayesianIntel = new BayesianIntelligence();
-  try {
-    const saved = stateStore.get(BAYESIAN_KEY);
-    if (saved) {
-      bayesianIntel.fromJSON(JSON.parse(saved));
-      const stats = bayesianIntel.getCollectiveIntelligence();
-      log(`Bayesian Intelligence restored: ${stats.totalBeliefs} beliefs, ${stats.totalObservations} observations`);
-    }
-  } catch (e: any) { log(`Bayesian restore failed: ${e.message} — starting fresh`); }
-
-  // Share Bayesian instance with trade engine via eventBus
-  eventBus.emit('intelligence:ready' as any, bayesianIntel);
-
-  // Persist Bayesian state every 60 seconds (local backup) + sync to Brain SONA
-  setInterval(() => {
-    try {
-      stateStore.set(BAYESIAN_KEY, JSON.stringify(bayesianIntel.toJSON()));
-      bayesianIntel.snapshotLearning();
-      // Sync top beliefs to Brain SONA for cross-system learning
-      const beliefs = bayesianIntel.query({ minObservations: 3 }).slice(0, 50);
-      if (beliefs.length > 0) {
-        brain.syncBayesianToSona(beliefs.map(b => ({ id: b.id, subject: b.subject, posterior: b.posterior, observations: b.observations, avgReturn: b.avgReturn }))).catch(() => {});
-      }
-    } catch {}
-  }, 60_000);
-
-  // Brain MCP health check
+  // 2. Brain MCP — single source of truth for trade intelligence
   const brainOk = await brain.checkHealth();
-  log(`Brain MCP: ${brainOk ? 'connected (brain.oceanicai.io)' : 'unavailable — local persistence only'}`);
+  log(`Brain MCP: ${brainOk ? 'connected (brain.oceanicai.io)' : 'UNAVAILABLE — trades will not be recorded'}`);
 
-  // Seed Brain with trading rules on first connect
+  // Seed Brain with trading rules (idempotent — Brain deduplicates)
   if (brainOk) {
     brain.recordRule('Buy movers at market open (9:35 ET), hold all day, sell before close (3:50 ET)', 'system').catch(() => {});
     brain.recordRule('Max 6 equity positions, $8K budget, no rotation during day', 'system').catch(() => {});
@@ -243,16 +224,43 @@ async function main(): Promise<void> {
     brain.recordRule('Avoid tickers with <35% win rate over 5+ trades', 'system').catch(() => {});
   }
 
-  // Expose Bayesian intel on the status endpoint
+  // 2b. Initialize Bayesian Intelligence — reconstructs from Brain, not local SQLite
+  const bayesianIntel = new BayesianIntelligence();
+  if (brainOk) {
+    try {
+      const tradeHistory = await brain.getRecentTradeOutcomes(200);
+      let loaded = 0;
+      for (const t of tradeHistory) {
+        bayesianIntel.recordOutcome(`ticker:${t.ticker}`, {
+          domain: 'ticker', subject: t.ticker,
+          tags: ['trade_outcome'], contributors: ['brain'],
+        }, t.success, t.returnPct);
+        loaded++;
+      }
+      const stats = bayesianIntel.getCollectiveIntelligence();
+      log(`Bayesian Intelligence seeded from Brain: ${stats.totalBeliefs} beliefs from ${loaded} trades`);
+    } catch (e: any) { log(`Bayesian seed from Brain failed: ${e.message} — starting fresh`); }
+  }
+
+  // Expose Bayesian intel on the status endpoint via config keys
   const origGet = stateStore.get.bind(stateStore);
-  const patchedGet = (key: string) => {
+  (stateStore as any).get = (key: string) => {
     if (key === '__bayesian_intel__') return JSON.stringify(bayesianIntel.getCollectiveIntelligence());
     if (key === '__bayesian_metrics__') return JSON.stringify(bayesianIntel.getIntelligenceMetrics());
     return origGet(key);
   };
-  (stateStore as any).get = patchedGet;
 
-  // 2b. Initialize RVF Engine + Learning Engine
+  // Sync Bayesian beliefs to Brain SONA every 5 minutes
+  setInterval(() => {
+    try {
+      const beliefs = bayesianIntel.query({ minObservations: 3 }).slice(0, 50);
+      if (beliefs.length > 0) {
+        brain.syncBeliefsToSona(beliefs.map(b => ({ id: b.id, subject: b.subject, posterior: b.posterior, observations: b.observations, avgReturn: b.avgReturn }))).catch(() => {});
+      }
+    } catch {}
+  }, 300_000);
+
+  // 2c. Initialize RVF Engine + Learning Engine
   try {
     const rvfEngine = new RVFEngine();
     const learningEngine = new LearningEngine(rvfEngine);
