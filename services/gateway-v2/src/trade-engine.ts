@@ -367,9 +367,10 @@ export class TradeEngine {
 
       const owned = new Set(positions.map((p) => p.ticker));
 
-      // Forex signals
-      const fxCreds = loadCredentials();
-      if (fxCreds.oanda || true) { // Always try forex via proxy
+      // Forex entries DISABLED — 13% win rate across 53 trades. See heartbeat step 5 comment.
+      if (false) { // eslint-disable-line no-constant-condition
+        const fxCreds = loadCredentials();
+        if (fxCreds.oanda || true) {
         try {
           await this.forex.fetchQuotes();
           const [momentumSigs, carrySigs] = await Promise.all([
@@ -733,28 +734,10 @@ export class TradeEngine {
       }
     }
 
-    // 5. Forex signals (always scan — forex is 24/5)
-    try {
-      const fxCreds = loadCredentials();
-      if (fxCreds.oanda || true) {
-        await this.forex.fetchQuotes();
-        const [momentumSigs, carrySigs] = await Promise.all([
-          Promise.resolve(this.forex.evaluateSessionMomentum()),
-          Promise.resolve(this.forex.evaluateCarryTrades()),
-        ]);
-        const sigs = [...momentumSigs, ...carrySigs];
-        if (sigs.length > 0) {
-          const top = sigs.sort((a, b) => b.confidence - a.confidence)[0];
-          const open = await this.forex.getOpenTrades();
-          if (open.length < 4) {
-            try {
-              await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 25000 : -25000, top.stopLoss, top.takeProfit);
-              console.log(`  [FOREX] ${top.direction.toUpperCase()} ${top.symbol} (${(top.confidence * 100).toFixed(0)}%)`);
-            } catch {}
-          }
-        }
-      }
-    } catch {}
+    // 5. Forex entries DISABLED — 13% win rate, -$825 net. Manage_positions still runs (step 1).
+    //    Re-enable when forex scanner signals are rebuilt with proper edge.
+    //    Previous code placed orders on momentum + carry signals every heartbeat.
+    //    AUD/JPY alone: 3W/22L = -$376. EUR/USD (blacklisted): 1W/9L = -$191.
 
     // Final position snapshot
     let posCount = 0, deployed = 0;
