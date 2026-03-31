@@ -16,9 +16,24 @@
 const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://brain.oceanicai.io';
 const SOURCE = 'mtwm';
 
+// Brain tags must be <= 30 chars
+function sanitizeTags(tags: string[]): string[] {
+  return tags.map(t => t.slice(0, 30).toLowerCase().replace(/[^a-z0-9_\-/]/g, '_'));
+}
+
 async function brainFetch(path: string, opts?: RequestInit): Promise<any> {
   try {
     const apiKey = process.env.BRAIN_API_KEY || '';
+    // Auto-sanitize tags in POST bodies
+    if (opts?.body && typeof opts.body === 'string') {
+      try {
+        const parsed = JSON.parse(opts.body);
+        if (parsed.tags && Array.isArray(parsed.tags)) {
+          parsed.tags = sanitizeTags(parsed.tags);
+          opts = { ...opts, body: JSON.stringify(parsed) };
+        }
+      } catch {}
+    }
     const res = await fetch(`${BRAIN_URL}${path}`, {
       ...opts,
       headers: {
