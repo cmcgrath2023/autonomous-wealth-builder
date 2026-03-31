@@ -70,20 +70,21 @@ export async function GET() {
     const forexData = forexRes?.ok ? await forexRes.json() : { positions: [], totalUnrealizedPL: 0 };
 
     const assets = (positions || []).map((p: any) => {
-      const meta = ASSET_META[p.ticker] || { name: p.ticker, category: 'equity', lat: 0, lng: 0 };
+      const ticker = p.ticker || p.symbol || 'UNKNOWN';
+      const meta = ASSET_META[ticker] || { name: ticker, category: 'equity', lat: 0, lng: 0 };
       return {
-        id: p.ticker.toLowerCase().replace(/[/-]/g, ''),
+        id: ticker.toLowerCase().replace(/[/-]/g, ''),
         name: meta.name,
-        ticker: p.ticker,
-        value: Math.round(p.marketValue),
-        change: p.unrealizedPnl,
-        changePercent: p.unrealizedPnlPercent,
+        ticker,
+        value: Math.round(p.marketValue || parseFloat(p.market_value || '0')),
+        change: p.unrealizedPnl ?? parseFloat(p.unrealized_pl || '0'),
+        changePercent: p.unrealizedPnlPercent ?? parseFloat(p.unrealized_plpc || '0') * 100,
         category: meta.category,
         lat: meta.lat,
         lng: meta.lng,
-        shares: p.shares,
-        avgPrice: p.avgPrice,
-        currentPrice: p.currentPrice,
+        shares: p.shares ?? parseFloat(p.qty || '0'),
+        avgPrice: p.avgPrice ?? parseFloat(p.avg_entry_price || '0'),
+        currentPrice: p.currentPrice ?? parseFloat(p.current_price || '0'),
       };
     });
 
@@ -168,9 +169,9 @@ export async function GET() {
       dayChange: Math.round(dayPnl),
       dayChangePercent: Math.round(dayPnlPercent * 100) / 100,
       // Broker status
-      brokerConnected: account.connected || false,
-      buyingPower: account.buyingPower || 0,
-      cash: account.cash || 0,
+      brokerConnected: account.connected ?? (account.status === 'ACTIVE') ?? false,
+      buyingPower: account.buyingPower ?? parseFloat(account.buying_power || '0'),
+      cash: account.cash ?? parseFloat(account.cash || '0'),
       // Trade stats
       tradeStats: {
         totalTrades: closedTrades.length,
@@ -197,7 +198,8 @@ export async function GET() {
       lastUpdated: new Date().toISOString(),
       assets,
     });
-  } catch {
+  } catch (err: any) {
+    console.error('[portfolio API] Error:', err?.message || err);
     return NextResponse.json({
       totalValue: 0,
       initialBalance: INITIAL_BALANCE,
