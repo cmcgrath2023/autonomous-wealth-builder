@@ -281,8 +281,33 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     } catch (e) { errors.push(`Discovery: ${e}`); }
   }
 
-  // 4. No hardcoded sectors — research is fully dynamic from movers, most actives, and news
-  console.log(`[Research] Dynamic discovery: ${starsWritten} stars from movers/actives`);
+  // 3b. Yahoo Finance gainers — supplements Alpaca with broader market coverage
+  try {
+    const yahooRes = await fetch('https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=20', {
+      headers: { 'User-Agent': 'MTWM/1.0' },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (yahooRes.ok) {
+      const yahooData = await yahooRes.json() as any;
+      const quotes = yahooData?.finance?.result?.[0]?.quotes || [];
+      const yahooGainers = quotes.filter((q: any) => q.regularMarketPrice > 5 && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 5);
+      let yahooAdded = 0;
+      for (const q of yahooGainers.slice(0, 10)) {
+        // Only add if not already a star from Alpaca (avoid duplicates)
+        const existing = store.getResearchStars().find((s: any) => s.symbol === q.symbol);
+        if (!existing) {
+          const score = Math.min(0.85 + q.regularMarketChangePercent / 200, 0.95);
+          store.saveResearchStar(q.symbol, 'momentum', `YAHOO GAINER +${q.regularMarketChangePercent.toFixed(1)}% | Vol: ${(q.regularMarketVolume || 0).toLocaleString()}`, bayesianAdjustScore(q.symbol, score));
+          starsWritten++;
+          yahooAdded++;
+        }
+      }
+      if (yahooAdded > 0) console.log(`[Research] Yahoo: ${yahooAdded} new gainers added (${yahooGainers.length} total, ${yahooAdded} unique)`);
+    }
+  } catch (e) { errors.push(`Yahoo: ${e}`); }
+
+  // 4. Research is dynamic from Alpaca movers, Yahoo gainers, most actives, and news
+  console.log(`[Research] Dynamic discovery: ${starsWritten} stars from all sources`);
 
   // 5. Promote high-conviction direct news hits (expand beyond known tickers)
   const ALL_STOCK_RE = /\b([A-Z]{2,5})\b/g;
