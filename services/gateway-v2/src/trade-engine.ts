@@ -367,30 +367,7 @@ export class TradeEngine {
 
       const owned = new Set(positions.map((p) => p.ticker));
 
-      // Forex entries DISABLED — 13% win rate across 53 trades. See heartbeat step 5 comment.
-      if (false) { // eslint-disable-line no-constant-condition
-        const fxCreds = loadCredentials();
-        if (fxCreds.oanda || true) {
-        try {
-          await this.forex.fetchQuotes();
-          const [momentumSigs, carrySigs] = await Promise.all([
-            Promise.resolve(this.forex.evaluateSessionMomentum()),
-            Promise.resolve(this.forex.evaluateCarryTrades()),
-          ]);
-          const sigs = [...momentumSigs, ...carrySigs];
-          if (sigs.length > 0) {
-            sigs.sort((a, b) => b.confidence - a.confidence);
-            const top = sigs[0];
-            const open = await this.forex.getOpenTrades();
-            if (open.length < 4) {
-              try {
-                await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 25000 : -25000, top.stopLoss, top.takeProfit);
-                details.push(`FOREX ${top.direction.toUpperCase()} ${top.symbol} (${(top.confidence * 100).toFixed(0)}%)`);
-              } catch (e: any) { details.push(`FOREX FAIL ${top.symbol}: ${e.message}`); }
-            } else { details.push(`Forex full (${open.length}/4)`); }
-          } else { details.push(`Forex: no signals (${this.forex.getActiveSession()})`); }
-        } catch (e: any) { details.push(`Forex error: ${e.message}`); }
-      }
+      // Forex entries DISABLED — 13% win rate across 53 trades.
 
       // SL dominance check — halt equity entries if > 70% (equity trades only)
       const starTrades = this.store.getTodayTrades().filter(t => !t.ticker.includes('/') && !t.ticker.includes('_'));
