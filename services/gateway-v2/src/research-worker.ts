@@ -355,7 +355,42 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     }
   }
 
-  // 5. Expire stale stars
+  // 5b. Catalyst-driven stars — Liza's active_catalysts → sector tickers
+  //     This closes the intelligence → action gap (Lesson 1 + 6)
+  // Map catalyst categories to tradeable tickers (use what's already in SECTORS + extras)
+  const CATALYST_TICKERS: Record<string, string[]> = {
+    energy:     ['XOM', 'OXY', 'CVX', 'HAL', 'SLB', 'KOS', 'USO', 'UNG'],
+    tech_ai:    ['NVDA', 'VRT', 'NRG', 'EQIX', 'NET', 'SMCI'],
+    crypto:     ['BTC-USD', 'ETH-USD', 'SOL-USD'],
+    macro:      ['GLD', 'USO', 'UNG'],
+    defense:    ['LMT', 'RTX', 'NOC', 'GD', 'BA'],
+    metals:     ['FCX', 'AA', 'NEM', 'GLD'],
+    crypto_macro: ['BTC-USD', 'ETH-USD', 'SOL-USD'],
+  };
+  try {
+    const catalystRaw = store.get('active_catalysts');
+    if (catalystRaw) {
+      const { catalysts } = JSON.parse(catalystRaw) as { catalysts: string[] };
+      let catalystAdded = 0;
+      for (const cat of catalysts) {
+        const tickers = CATALYST_TICKERS[cat] || [];
+        for (const ticker of tickers) {
+          // Only add if it's actually moving (have price data) and not already a star
+          const existing = store.getResearchStars().find((s: any) => s.symbol === ticker);
+          if (existing) continue; // already tracked
+          const p = prices.get(ticker);
+          if (p && p.changePercent > 1) {
+            store.saveResearchStar(ticker, 'catalyst', `CATALYST(${cat}): ${ticker} +${p.changePercent.toFixed(1)}%`, 0.90);
+            starsWritten++;
+            catalystAdded++;
+          }
+        }
+      }
+      if (catalystAdded > 0) console.log(`[Research] Catalysts: ${catalystAdded} tickers from active catalysts [${catalysts.join(',')}]`);
+    }
+  } catch {}
+
+  // 6. Expire stale stars
   const expired = store.clearExpiredStars(STAR_EXPIRY_HOURS);
   console.log(`[Research] Cycle ${Date.now() - t0}ms | stars=${starsWritten} expired=${expired} reports=${reportsWritten} news=${news.length} prices=${prices.size} errors=${errors.length}`);
 }
