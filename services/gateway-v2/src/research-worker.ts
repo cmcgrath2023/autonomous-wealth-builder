@@ -306,7 +306,41 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     }
   } catch (e) { errors.push(`Yahoo: ${e}`); }
 
-  // 4. Research is dynamic from Alpaca movers, Yahoo gainers, most actives, and news
+  // 3c. Crypto — scan Alpaca crypto movers (24/7 market, 100% win rate historically)
+  if (headers) {
+    const CRYPTO_PAIRS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'BCH/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD', 'LTC/USD'];
+    try {
+      const symbols = CRYPTO_PAIRS.join(',');
+      const cryptoRes = await fetch(`https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=${symbols}`, {
+        headers, signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      });
+      if (cryptoRes.ok) {
+        const snapData = await cryptoRes.json() as any;
+        const snapshots = snapData.snapshots || snapData;
+        let cryptoAdded = 0;
+        for (const pair of CRYPTO_PAIRS) {
+          const snap = snapshots[pair];
+          if (!snap) continue;
+          const price = snap.latestTrade?.p || snap.latestQuote?.ap;
+          const prevClose = snap.prevDailyBar?.c || snap.dailyBar?.o;
+          if (!price || !prevClose) continue;
+          const changePct = ((price - prevClose) / prevClose) * 100;
+          // Only add if moving > 1% (crypto is volatile, lower threshold than equities)
+          if (Math.abs(changePct) > 1) {
+            const ticker = pair.replace('/', '-'); // BTC/USD → BTC-USD for Alpaca orders
+            const direction = changePct > 0 ? 'UP' : 'DOWN';
+            const score = Math.min(0.80 + Math.abs(changePct) / 50, 0.95);
+            store.saveResearchStar(ticker, 'crypto', `CRYPTO ${direction} ${changePct > 0 ? '+' : ''}${changePct.toFixed(1)}% | $${price.toFixed(2)}`, score);
+            starsWritten++;
+            cryptoAdded++;
+          }
+        }
+        if (cryptoAdded > 0) console.log(`[Research] Crypto: ${cryptoAdded} pairs moving >1%`);
+      }
+    } catch (e) { errors.push(`Crypto: ${e}`); }
+  }
+
+  // 4. Research is dynamic from Alpaca movers, Yahoo gainers, crypto, most actives, and news
   console.log(`[Research] Dynamic discovery: ${starsWritten} stars from all sources`);
 
   // 5. Promote high-conviction direct news hits (expand beyond known tickers)

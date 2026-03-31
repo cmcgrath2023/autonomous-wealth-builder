@@ -577,38 +577,71 @@ export class TradeEngine {
       console.log(`  [BUY] EQUITY SL DOMINANCE ${(eqSlDominance * 100).toFixed(0)}% (${eqSlCount}/${equityTrades.length}) > 70% — HALTING equity entries`);
     } else if (totalDeployedNow >= BUDGET_MAX) {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
-    } else if (mkt.isMarketOpen && openSlots > 0 && budgetRemaining > 100 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+    } else if (openSlots > 0 && budgetRemaining > 100 && (mkt.isMarketOpen ? (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30)) : true)) {
+      // Equity: market hours only (before 3:30 PM). Crypto: 24/7 via research stars.
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
 
-        // PRIMARY: Research stars from state store (Alpaca movers + most-actives, refreshed every 120s by research worker)
+        // PRIMARY: Research stars from state store (Alpaca movers + most-actives + crypto, refreshed every 120s)
         const researchStars = this.store.getResearchStars();
         let gainers: Array<{ symbol: string; price: number; percent_change: number }> = [];
 
         if (researchStars.length > 0) {
-          // Stars have symbol + score but not always price — fetch current prices
-          const starSymbols = researchStars.map(s => s.symbol).slice(0, 10);
-          try {
-            const snapRes = await fetch(
-              `https://data.alpaca.markets/v2/stocks/snapshots?symbols=${starSymbols.join(',')}&feed=iex`,
-              { headers, signal: AbortSignal.timeout(5000) },
-            );
-            if (snapRes.ok) {
-              const snapData = await snapRes.json() as any;
-              for (const star of researchStars) {
-                const snap = snapData[star.symbol];
-                if (!snap) continue;
-                const price = snap.latestTrade?.p || snap.latestQuote?.ap;
-                if (!price || price < 5 || price > 500) continue;
-                // Parse percent change from catalyst string "TOP MOVER +X.X%"
-                const pctMatch = star.catalyst.match(/\+?([\d.]+)%/);
-                const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
-                gainers.push({ symbol: star.symbol, price, percent_change: pct });
+          const equityStars = researchStars.filter(s => !isCrypto(s.symbol));
+          const cryptoStars = researchStars.filter(s => isCrypto(s.symbol));
+
+          // Fetch equity prices
+          if (equityStars.length > 0) {
+            try {
+              const syms = equityStars.map(s => s.symbol).slice(0, 10).join(',');
+              const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=iex`, { headers, signal: AbortSignal.timeout(5000) });
+              if (snapRes.ok) {
+                const snapData = await snapRes.json() as any;
+                for (const star of equityStars) {
+                  const snap = snapData[star.symbol];
+                  if (!snap) continue;
+                  const price = snap.latestTrade?.p || snap.latestQuote?.ap;
+                  if (!price || price < 5 || price > 500) continue;
+                  const pctMatch = star.catalyst.match(/\+?([\d.]+)%/);
+                  const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
+                  gainers.push({ symbol: star.symbol, price, percent_change: pct });
+                }
               }
-            }
-          } catch {}
-          if (gainers.length > 0) console.log(`  [BUY] Using research stars (${gainers.length} from Alpaca movers/actives)`);
+            } catch {}
+          }
+
+          // Fetch crypto prices
+          if (cryptoStars.length > 0) {
+            try {
+              const syms = cryptoStars.map(s => s.symbol.replace('-', '/')).slice(0, 8).join(',');
+              const snapRes = await fetch(`https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=${syms}`, { headers, signal: AbortSignal.timeout(5000) });
+              if (snapRes.ok) {
+                const snapData = await snapRes.json() as any;
+                const snaps = snapData.snapshots || snapData;
+                for (const star of cryptoStars) {
+                  const key = star.symbol.replace('-', '/');
+                  const snap = snaps[key];
+                  if (!snap) continue;
+                  const price = snap.latestTrade?.p || snap.latestQuote?.ap;
+                  if (!price) continue;
+                  const pctMatch = star.catalyst.match(/\+?([\d.]+)%/);
+                  const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
+                  gainers.push({ symbol: star.symbol, price, percent_change: pct });
+                }
+              }
+            } catch {}
+          }
+
+          // Filter: equity only during market hours, crypto 24/7
+          if (!mkt.isMarketOpen) {
+            gainers = gainers.filter(g => isCrypto(g.symbol));
+          }
+          if (gainers.length > 0) {
+            const eq = gainers.filter(g => !isCrypto(g.symbol)).length;
+            const cr = gainers.filter(g => isCrypto(g.symbol)).length;
+            console.log(`  [BUY] Using research stars (${eq} equity, ${cr} crypto)`);
+          }
         }
 
         // FALLBACK: Alpaca movers direct if research worker hasn't populated stars
