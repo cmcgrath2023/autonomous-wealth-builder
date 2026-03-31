@@ -59,6 +59,8 @@ if [ "$GW_CODE" = "000" ] || [ -z "$GW_CODE" ]; then
     /usr/sbin/lsof -ti:3001 | /usr/bin/xargs kill -9 2>/dev/null
     sleep 1
     cd /Users/cmcgrath/Documents/mtwm/services
+    # Source env so Trident/Brain keys are available (dotenv doesn't always override)
+    set -a; source /Users/cmcgrath/Documents/mtwm/services/gateway/.env.local 2>/dev/null; set +a
     nohup /opt/homebrew/bin/node --import tsx/esm gateway-v2/src/index.ts >> /tmp/mtwm-gateway.log 2>&1 &
     sleep 15
     GW_VERIFY=$(http_code "http://localhost:3001/api/status")

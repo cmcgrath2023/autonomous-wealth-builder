@@ -14,7 +14,7 @@ import { config } from 'dotenv';
 
 // Load env from gateway/.env.local (same file the old gateway used — has Discord tokens etc.)
 const envLocal = resolve(dirname(new URL(import.meta.url).pathname), '../../gateway/.env.local');
-if (existsSync(envLocal)) config({ path: envLocal });
+if (existsSync(envLocal)) config({ path: envLocal, override: true });
 // Also load services/.env.webhook if present
 const envWebhook = resolve(dirname(new URL(import.meta.url).pathname), '../../.env.webhook');
 if (existsSync(envWebhook)) config({ path: envWebhook });
