@@ -114,6 +114,18 @@ export class NanobotBridge extends EventEmitter<BridgeEvents> {
       if (!result) return;
       result.output = output;
 
+      // Trade advisor outputs become research stars
+      if (config.taskClass === 'trade_advisor' && output.recommendations) {
+        for (const rec of output.recommendations as Array<{ ticker: string; action: string; reason: string; confidence: number }>) {
+          if (rec.action === 'buy' && rec.ticker) {
+            this.writeState(`advisor_star:${rec.ticker}`, rec);
+            // Write directly to research_stars via state store
+            this.storeWrite?.(`__advisor_star__:${JSON.stringify(rec)}`, '');
+            console.log(`[NanobotBridge] TRADE ADVISOR: BUY ${rec.ticker} — ${rec.reason}`);
+          }
+        }
+      }
+
       if (output.requiresEscalation) {
         this.emit('task:escalation', result);
         this.writeState('escalation', {

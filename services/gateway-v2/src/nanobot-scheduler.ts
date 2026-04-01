@@ -61,6 +61,24 @@ const SCHEDULED_TASKS: PartialConfig[] = [
     outputChannel: 'openclaw_rpc',
   },
   {
+    taskClass: 'trade_advisor',
+    autonomyLevel: 'act',
+    cronExpression: '*/10 * * * 1-5',     // every 10 min weekdays
+    timeoutMs: 90_000,
+    memoryLimitMb: 256,
+    modelProvider: 'anthropic',
+    modelId: 'claude-haiku-4-5-20251001',
+    tools: [
+      { tool: 'web_fetch', sandboxed: true, allowlist: ['finance.yahoo.com', 'api.alpaca.markets', 'data.alpaca.markets'] },
+    ],
+    authorityThreshold: {
+      canExecuteTrades: false,     // writes stars, doesn't place orders directly
+      requiresApproval: false,
+      approvalChannel: 'mtwm-openclaw-agent',
+    },
+    outputChannel: 'openclaw_rpc',
+  },
+  {
     taskClass: 'briefing_generator',
     autonomyLevel: 'observe',
     cronExpression: '0 7 * * *',         // daily 7am
