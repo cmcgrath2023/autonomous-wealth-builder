@@ -210,30 +210,16 @@ export class PositionManager {
       }
 
       // ── Equity exit logic ──
+      // Strategy: buy at open, hold all day, sell at EOD (3:50 PM ET).
+      // Only mid-day exit on STOP LOSS. No mid-day take profit.
+      // If trending up, let winners run. EOD sell banks all gains.
+      // Trailing stop only activates on severe reversal (>8% drop from peak).
 
-      // Dynamic take-profit (pressure-adjusted base)
-      const holdTimeMs = Date.now() - (this.entryTimes.get(ticker) || Date.now());
-      const holdMinutes = holdTimeMs / 60000;
-      const nearPeak = peak > 0 ? (pos.currentPrice / peak) > 0.995 : false;
-      let dynamicTP = thresholds.equityTakeProfit; // pressure-adjusted (8% → 4%)
-      if (pnlPct >= 0.04 && nearPeak && holdMinutes > 30) {
-        dynamicTP = Math.min(0.15, dynamicTP + 0.04);
-      }
-      if (pnlPct >= 0.08 && nearPeak && holdMinutes > 60) {
-        dynamicTP = 0.15;
-      }
-
-      // Check take-profit against dynamic target
-      if (pnlPct >= dynamicTP) {
-        const result = await this.closePosition(executor, pos, 'take_profit');
-        if (result) actions.push(result);
-        continue;
-      }
-
-      // Check trailing stop (only if we've been profitable)
       if (peak > pos.avgPrice) {
         const dropFromPeak = (peak - pos.currentPrice) / peak;
-        if (dropFromPeak >= this.rules.trailingStopPct) {
+        // Only trail if drop from peak exceeds the stop loss % — severe reversal
+        if (dropFromPeak >= this.rules.stopLossPct) {
+          console.log(`[TrailingStop] ${ticker} dropped ${(dropFromPeak*100).toFixed(1)}% from peak — closing`);
           const result = await this.closePosition(executor, pos, 'trailing_stop');
           if (result) actions.push(result);
           continue;
