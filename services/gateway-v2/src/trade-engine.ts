@@ -15,6 +15,7 @@
 import { join } from 'path';
 import { TradeExecutor } from '../../neural-trader/src/executor.js';
 import { PositionManager } from '../../neural-trader/src/position-manager.js';
+import { NeuralTrader } from '../../neural-trader/src/index.js';
 import { ForexScanner } from '../../forex-scanner/src/index.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
@@ -103,6 +104,7 @@ export class TradeEngine {
   private executor: TradeExecutor;
   private pm: PositionManager;
   private forex: ForexScanner;
+  private neural: NeuralTrader;
   private store: GatewayStateStore;
   private hbCount = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -146,6 +148,7 @@ export class TradeEngine {
   }
 
   constructor() {
+    this.neural = new NeuralTrader();
     this.dailyOptimizer = new DailyOptimizer();
     // Single credential source — config bus loads from vault + env
     const creds = loadCredentials();
@@ -703,9 +706,34 @@ export class TradeEngine {
             }
             const history = await brain.getTickerHistory(g.symbol);
             if (history.shouldAvoid) {
-              console.log(`  [BUY] SKIP ${g.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
+              console.log(`  [BUY] SKIP ${g.symbol} — Trident says avoid (${history.wins}W/${history.losses}L)`);
               continue;
             }
+            // Neural trader technical confirmation — fetch recent bars and analyze
+            if (!isCrypto(g.symbol)) {
+              try {
+                const barsRes = await fetch(
+                  `https://data.alpaca.markets/v2/stocks/${g.symbol}/bars?timeframe=15Min&limit=50&feed=iex`,
+                  { headers, signal: AbortSignal.timeout(5000) },
+                );
+                if (barsRes.ok) {
+                  const barsData = await barsRes.json() as any;
+                  const bars = barsData.bars || [];
+                  if (bars.length >= 30) {
+                    for (const bar of bars) this.neural.addBar(g.symbol, bar.c, bar.v);
+                    const neuralSignal = await this.neural.analyze(g.symbol);
+                    if (neuralSignal && neuralSignal.direction !== 'buy') {
+                      console.log(`  [BUY] SKIP ${g.symbol} — neural says ${neuralSignal.direction} (${(neuralSignal.confidence*100).toFixed(0)}%)`);
+                      continue;
+                    }
+                    if (neuralSignal) {
+                      console.log(`  [BUY] ${g.symbol} neural CONFIRMED: ${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}% — ${neuralSignal.pattern}`);
+                    }
+                  }
+                }
+              } catch {}
+            }
+
             const qty = Math.floor(perPosition / g.price);
             if (qty <= 0) continue;
             const signal = {
