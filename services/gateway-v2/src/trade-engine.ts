@@ -370,7 +370,7 @@ export class TradeEngine {
       // Forex entries DISABLED — 13% win rate across 53 trades.
 
       // SL dominance check — halt equity entries if > 70% (equity trades only)
-      const starTrades = this.store.getTodayTrades().filter(t => !t.ticker.includes('/') && !t.ticker.includes('_'));
+      const starTrades = this.store.getTodayTrades().filter(t => !isCrypto(t.ticker) && !t.ticker.includes('/') && !t.ticker.includes('_'));
       const starSlCount = starTrades.filter(t => t.reason === 'stop_loss').length;
       const starSlDom = starTrades.length >= 3 ? starSlCount / starTrades.length : 0;
       if (starSlDom > 0.7) {
@@ -538,7 +538,7 @@ export class TradeEngine {
     // 3. BUY MOVERS — fill available slots during market hours (before 3:30 PM)
     //    PANIC PROTOCOL: circuit breaker + SL dominance before any equity buys
     //    Note: allTodayTrades already fetched above for circuit breaker
-    const equityTrades = allTodayTrades.filter(t => !t.ticker.includes('/') && !t.ticker.includes('_'));
+    const equityTrades = allTodayTrades.filter(t => !isCrypto(t.ticker) && !t.ticker.includes('/') && !t.ticker.includes('_'));
     const eqSlCount = equityTrades.filter(t => t.reason === 'stop_loss').length;
     const eqSlDominance = equityTrades.length > 0 ? eqSlCount / equityTrades.length : 0;
 
