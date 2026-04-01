@@ -370,7 +370,7 @@ export class TradeEngine {
 
       const owned = new Set(positions.map((p) => p.ticker));
 
-      // Forex entries DISABLED — 13% win rate across 53 trades.
+      // Forex entries handled in heartbeat step 5 (rebuilt with technical analysis).
 
       // SL dominance check — halt equity entries if > 70% (equity trades only)
       const starTrades = this.store.getTodayTrades().filter(t => !isCrypto(t.ticker) && !t.ticker.includes('/') && !t.ticker.includes('_'));
@@ -772,10 +772,23 @@ export class TradeEngine {
       }
     }
 
-    // 5. Forex entries DISABLED — 13% win rate, -$825 net. Manage_positions still runs (step 1).
-    //    Re-enable when forex scanner signals are rebuilt with proper edge.
-    //    Previous code placed orders on momentum + carry signals every heartbeat.
-    //    AUD/JPY alone: 3W/22L = -$376. EUR/USD (blacklisted): 1W/9L = -$191.
+    // 5. Forex entries — rebuilt with RSI/EMA/BB/momentum (requires 3/4 indicators to agree)
+    try {
+      await this.forex.fetchQuotes();
+      const fxSignals = this.forex.evaluateSessionMomentum();
+      if (fxSignals.length > 0) {
+        const top = fxSignals.sort((a, b) => b.confidence - a.confidence)[0];
+        const open = await this.forex.getOpenTrades();
+        if (open.length < 4) {
+          try {
+            await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 25000 : -25000, top.stopLoss, top.takeProfit);
+            console.log(`  [FOREX] ${top.direction.toUpperCase()} ${top.symbol} (${(top.confidence * 100).toFixed(0)}%) — ${top.rationale}`);
+          } catch (e: any) { console.log(`  [FOREX] ORDER FAILED ${top.symbol}: ${e.message}`); }
+        } else {
+          console.log(`  [FOREX] Full (${open.length}/4 positions)`);
+        }
+      }
+    } catch (e: any) { console.log(`  [FOREX] Error: ${e.message}`); }
 
     // Final position snapshot
     let posCount = 0, deployed = 0;

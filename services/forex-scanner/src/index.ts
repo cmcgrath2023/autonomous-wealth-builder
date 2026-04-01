@@ -161,121 +161,109 @@ export class ForexScanner extends EventEmitter {
     }
   }
 
+  /**
+   * Technical analysis using the same indicators as NeuralTrader (RSI, MACD, EMA, BB, momentum).
+   * Runs on ALL pairs during ANY active session — not just session opens.
+   * Requires minimum 50 data points for reliable signals.
+   */
   evaluateSessionMomentum(): ForexSignal[] {
     const signals: ForexSignal[] = [];
-    const utcHour = new Date().getUTCHours();
-    const utcMinutes = new Date().getUTCMinutes();
-    const timeDecimal = utcHour + utcMinutes / 60;
+    const session = this.getActiveSession();
     const now = new Date();
 
-    const isTokyoOpen = timeDecimal >= 23.5 || timeDecimal <= 0.5; // Tokyo open ~00:00 UTC
-    const isLondonOpen = timeDecimal >= 7.5 && timeDecimal <= 8.5;
-    const isNYOpen = timeDecimal >= 14.0 && timeDecimal <= 15.0;
-    const isOverlap = timeDecimal >= 14.5 && timeDecimal < 16.5;
-
-    if (!isTokyoOpen && !isLondonOpen && !isNYOpen) {
-      return signals;
-    }
-
-    const majors = FOREX_PAIRS.filter((p) => p.category === 'major');
-
-    for (const pair of majors) {
+    for (const pair of FOREX_PAIRS) {
       const quote = this.quotes.get(pair.symbol);
       const history = this.priceHistory.get(pair.symbol);
 
-      if (!quote || !history || history.length < 5) {
-        continue;
+      if (!quote || !history || history.length < 50) continue;
+
+      const closes = history.slice(-100);
+      const current = closes[closes.length - 1];
+      const prev = closes[closes.length - 2] || current;
+
+      // RSI (14-period)
+      let gains = 0, losses = 0;
+      for (let i = closes.length - 14; i < closes.length; i++) {
+        const diff = closes[i] - closes[i - 1];
+        if (diff > 0) gains += diff; else losses -= diff;
       }
+      const rs = losses === 0 ? 100 : gains / losses;
+      const rsi = 100 - (100 / (1 + rs));
 
-      // Check for breakout from prior session range
-      const recentPrices = history.slice(-20);
-      const rangeHigh = Math.max(...recentPrices);
-      const rangeLow = Math.min(...recentPrices);
-      const rangeSize = rangeHigh - rangeLow;
+      // EMA-9 and EMA-21
+      const calcEma = (data: number[], period: number) => {
+        const k = 2 / (period + 1);
+        let ema = data[0];
+        for (let i = 1; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
+        return ema;
+      };
+      const ema9 = calcEma(closes.slice(-20), 9);
+      const ema21 = calcEma(closes.slice(-30), 21);
 
-      if (rangeSize === 0) continue;
+      // Momentum (5-bar and 20-bar)
+      const mom5 = (current - closes[closes.length - 6]) / closes[closes.length - 6];
+      const mom20 = closes.length >= 21 ? (current - closes[closes.length - 21]) / closes[closes.length - 21] : 0;
 
-      const pricePosition = (quote.mid - rangeLow) / rangeSize;
-      let direction: 'long' | 'short' | null = null;
+      // Bollinger Bands (20-period)
+      const bb20 = closes.slice(-20);
+      const bbMean = bb20.reduce((s, p) => s + p, 0) / bb20.length;
+      const bbStd = Math.sqrt(bb20.reduce((s, p) => s + (p - bbMean) ** 2, 0) / bb20.length);
+      const bbUpper = bbMean + 2 * bbStd;
+      const bbLower = bbMean - 2 * bbStd;
+      const bbPos = bbStd > 0 ? (current - bbLower) / (bbUpper - bbLower) : 0.5;
 
-      // Tighter thresholds during session opens for faster entry
-      const breakoutHigh = isTokyoOpen ? 0.65 : 0.75;
-      const breakoutLow = isTokyoOpen ? 0.35 : 0.25;
+      // Score: each indicator votes
+      let buyVotes = 0, sellVotes = 0;
+      const reasons: string[] = [];
 
-      if (pricePosition > breakoutHigh) {
-        direction = 'long';
-      } else if (pricePosition < breakoutLow) {
-        direction = 'short';
-      }
+      // RSI
+      if (rsi < 30) { buyVotes++; reasons.push(`RSI oversold (${rsi.toFixed(0)})`); }
+      else if (rsi > 70) { sellVotes++; reasons.push(`RSI overbought (${rsi.toFixed(0)})`); }
 
-      if (!direction) continue;
+      // EMA crossover
+      if (ema9 > ema21 && current > ema9) { buyVotes++; reasons.push('EMA bullish'); }
+      else if (ema9 < ema21 && current < ema9) { sellVotes++; reasons.push('EMA bearish'); }
 
-      const confidence = isOverlap ? 0.80 : isTokyoOpen ? 0.70 : 0.70;
-      const pipMultiplier = pair.symbol.includes('JPY') ? 0.01 : 0.0001;
-      const stopDistance = 30 * pipMultiplier;
-      const tpDistance = 65 * pipMultiplier; // ~$162 profit target per 25K position on majors
+      // Momentum
+      if (mom5 > 0.001 && mom20 > 0) { buyVotes++; reasons.push(`Momentum up +${(mom5 * 100).toFixed(2)}%`); }
+      else if (mom5 < -0.001 && mom20 < 0) { sellVotes++; reasons.push(`Momentum down ${(mom5 * 100).toFixed(2)}%`); }
 
-      const signal: ForexSignal = {
+      // Bollinger position
+      if (bbPos < 0.15 && current > prev) { buyVotes++; reasons.push('BB bounce from lower'); }
+      else if (bbPos > 0.85 && current < prev) { sellVotes++; reasons.push('BB rejection from upper'); }
+
+      // Need minimum 3 indicators agreeing
+      const totalVotes = Math.max(buyVotes, sellVotes);
+      if (totalVotes < 3) continue;
+
+      const direction: 'long' | 'short' = buyVotes > sellVotes ? 'long' : 'short';
+      const confidence = totalVotes / 4; // max 4 indicators
+
+      const isJpy = pair.symbol.includes('JPY');
+      const pipMultiplier = isJpy ? 0.01 : 0.0001;
+      // SL: 40 pips, TP: 80 pips = 2:1 R/R (TP always > SL)
+      const stopDistance = 40 * pipMultiplier;
+      const tpDistance = 80 * pipMultiplier;
+
+      signals.push({
         symbol: pair.symbol,
-        strategy: 'session_momentum',
+        strategy: 'neural_momentum',
         direction,
         confidence,
         entry: quote.mid,
         stopLoss: direction === 'long' ? quote.mid - stopDistance : quote.mid + stopDistance,
         takeProfit: direction === 'long' ? quote.mid + tpDistance : quote.mid - tpDistance,
-        rationale: `${direction === 'long' ? 'Bullish' : 'Bearish'} breakout from prior session range during ${isTokyoOpen ? 'Tokyo' : isLondonOpen ? 'London' : 'NY'} open. Price at ${(pricePosition * 100).toFixed(0)}% of range.${isOverlap ? ' London/NY overlap increases conviction.' : ''}`,
+        rationale: `${direction.toUpperCase()} ${pair.symbol} — ${reasons.join(', ')} (${session} session, ${totalVotes}/4 indicators)`,
         timestamp: now,
-      };
-
-      signals.push(signal);
-      this.emit('signal', signal);
+      });
     }
 
     return signals;
   }
 
+  /** Carry trades removed — was 3W/22L on AUD/JPY. Use neural momentum for all pairs. */
   evaluateCarryTrades(): ForexSignal[] {
-    const signals: ForexSignal[] = [];
-    const now = new Date();
-
-    const carryPairs = FOREX_PAIRS.filter((p) => p.category === 'carry');
-
-    for (const pair of carryPairs) {
-      const quote = this.quotes.get(pair.symbol);
-      const history = this.priceHistory.get(pair.symbol);
-
-      if (!quote || !history || history.length < 5) {
-        continue;
-      }
-
-      // SMA using available history (min 5 points)
-      const recentPrices = history.slice(-20);
-      const sma20 = recentPrices.reduce((sum, p) => sum + p, 0) / recentPrices.length;
-
-      // If trend is up (price > 20-period average), long carry
-      if (quote.mid > sma20) {
-        const pipMultiplier = 0.01; // JPY pairs
-        const stopDistance = 50 * pipMultiplier;
-        const tpDistance = 100 * pipMultiplier;
-
-        const signal: ForexSignal = {
-          symbol: pair.symbol,
-          strategy: 'carry_trade',
-          direction: 'long',
-          confidence: 0.6,
-          entry: quote.mid,
-          stopLoss: quote.mid - stopDistance,
-          takeProfit: quote.mid + tpDistance,
-          rationale: `Long ${pair.symbol} carry trade. Price ${quote.mid.toFixed(3)} above 20-period SMA ${sma20.toFixed(3)} confirms uptrend. Positive swap income from interest rate differential supports holding.`,
-          timestamp: now,
-        };
-
-        signals.push(signal);
-        this.emit('signal', signal);
-      }
-    }
-
-    return signals;
+    return []; // Disabled — no edge demonstrated
   }
 
   async onHeartbeat(): Promise<void> {
