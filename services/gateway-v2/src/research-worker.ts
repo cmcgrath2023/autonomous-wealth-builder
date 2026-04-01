@@ -345,16 +345,52 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
   // 4. Research is dynamic from Alpaca movers, Yahoo gainers, crypto, most actives, and news
   console.log(`[Research] Dynamic discovery: ${starsWritten} stars from all sources`);
 
-  // 5. Promote high-conviction direct news hits (expand beyond known tickers)
+  // 5. Promote news-mentioned tickers — fetch prices for unknown tickers on the fly
   const ALL_STOCK_RE = /\b([A-Z]{2,5})\b/g;
+  const NOISE_WORDS = new Set(['THE','AND','FOR','INC','NEW','CEO','IPO','ETF','SEC','FED','GDP','CPI','ECB','NYSE','API','USA','USD','FDA','CEO','CFO','CTO','LLC','LTD','BUY','PUT','GET','HAS','HAD','WAS','ARE','NOT','ALL','CAN','HER','HIS','HOW','ITS','MAY','OLD','OUR','OUT','OWN','SAY','SHE','TOO','USE','HIM','WAR','WHO','BOY','DID','OIL','RUN','TOP','TRY','TWO']);
+  const newsTickersToFetch = new Set<string>();
+
   for (const item of news) {
-    if (item.sentiment === 'bullish') {
-      const mentioned = [...new Set((item.title.match(ALL_STOCK_RE) || []).filter(t => t.length >= 2 && t.length <= 5 && !['THE','AND','FOR','INC','NEW','CEO','IPO','ETF','SEC','FED','GDP','CPI','ECB'].includes(t)))];
+    if (item.sentiment === 'bullish' || item.sentiment === 'neutral') {
+      const mentioned = [...new Set((item.title.match(ALL_STOCK_RE) || []).filter(t => t.length >= 2 && t.length <= 5 && !NOISE_WORDS.has(t)))];
       for (const t of mentioned) {
         const s = prices.get(t);
-        if (s && s.changePercent > 2) { store.saveResearchStar(t, 'news', `NEWS: ${item.title.substring(0, 80)}`, 0.85); starsWritten++; }
+        if (s && s.changePercent > 2) {
+          store.saveResearchStar(t, 'news', `NEWS: ${item.title.substring(0, 80)}`, 0.90);
+          starsWritten++;
+        } else if (!s && !store.getResearchStars().find((st: any) => st.symbol === t)) {
+          newsTickersToFetch.add(t);
+        }
       }
     }
+  }
+
+  // Fetch prices for news-mentioned tickers not in our sector lists
+  if (newsTickersToFetch.size > 0 && headers) {
+    try {
+      const syms = [...newsTickersToFetch].slice(0, 20).join(',');
+      const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=iex`, {
+        headers, signal: AbortSignal.timeout(FETCH_TIMEOUT),
+      });
+      if (snapRes.ok) {
+        const snapData = await snapRes.json() as any;
+        let newsAdded = 0;
+        for (const [sym, snap] of Object.entries(snapData) as [string, any][]) {
+          const price = snap?.latestTrade?.p;
+          const prevClose = snap?.prevDailyBar?.c;
+          if (!price || !prevClose || price < 5 || price > 500) continue;
+          const pct = ((price - prevClose) / prevClose) * 100;
+          if (pct > 2) {
+            // Find the news headline that mentioned this ticker
+            const headline = news.find(n => n.title.includes(sym))?.title || '';
+            store.saveResearchStar(sym, 'news', `NEWS +${pct.toFixed(1)}%: ${headline.substring(0, 70)}`, 0.90);
+            starsWritten++;
+            newsAdded++;
+          }
+        }
+        if (newsAdded > 0) console.log(`[Research] News tickers: ${newsAdded} new from headlines (fetched ${newsTickersToFetch.size})`);
+      }
+    } catch (e) { errors.push(`News ticker fetch: ${e}`); }
   }
 
   // 5b. Catalyst-driven stars — Liza's active_catalysts → sector tickers
