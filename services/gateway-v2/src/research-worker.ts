@@ -50,15 +50,17 @@ interface SectorDef { name: string; key: string; tickers: string[]; catalystKeyw
 const ETF_SET = new Set(['USO', 'UNG', 'XLE', 'GLD', 'COPX', 'CPER']);
 
 const SECTORS: SectorDef[] = [
-  { name: 'Energy', key: 'energy', tickers: ['XOM', 'HAL', 'CVX', 'KOS', 'OXY', 'SLB', 'USO', 'UNG', 'XLE'],
-    catalystKeywords: ['oil', 'crude', 'iran', 'opec', 'energy', 'pipeline', 'lng', 'petroleum'] },
-  { name: 'Defense', key: 'defense', tickers: ['RTX', 'LMT', 'NOC', 'GD', 'BA'],
-    catalystKeywords: ['war', 'military', 'defense', 'iran', 'missile', 'conflict', 'pentagon'] },
-  { name: 'Metals', key: 'metals', tickers: ['FCX', 'AA', 'MP', 'NEM', 'GLD', 'COPX', 'CPER'],
+  { name: 'Energy', key: 'energy', tickers: ['XOM', 'HAL', 'CVX', 'KOS', 'OXY', 'SLB', 'USO', 'UNG', 'XLE', 'COP', 'EOG', 'DVN'],
+    catalystKeywords: ['oil', 'crude', 'iran', 'opec', 'energy', 'pipeline', 'lng', 'petroleum', 'brent', 'wti'] },
+  { name: 'Defense', key: 'defense', tickers: ['RTX', 'LMT', 'NOC', 'GD', 'BA', 'LHX', 'HII'],
+    catalystKeywords: ['war', 'military', 'defense', 'iran', 'missile', 'conflict', 'pentagon', 'nato'] },
+  { name: 'Metals', key: 'metals', tickers: ['FCX', 'AA', 'MP', 'NEM', 'GLD', 'COPX', 'CPER', 'SLV'],
     catalystKeywords: ['gold', 'copper', 'aluminum', 'rare earth', 'mining', 'metal', 'silver'] },
-  { name: 'AI/DC', key: 'ai_infrastructure', tickers: ['NVDA', 'VRT', 'NRG', 'EQIX', 'NET', 'SMCI'],
-    catalystKeywords: ['ai', 'data center', 'gpu', 'semiconductor', 'nvidia', 'chip', 'cloud'] },
-  { name: 'Crypto', key: 'crypto_macro', tickers: ['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOT-USD'],
+  { name: 'AI/DC', key: 'ai_infrastructure', tickers: ['NVDA', 'MRVL', 'AMD', 'VRT', 'NRG', 'EQIX', 'NET', 'SMCI', 'MSFT', 'GOOGL', 'PLTR', 'CRWV'],
+    catalystKeywords: ['ai', 'data center', 'gpu', 'semiconductor', 'nvidia', 'chip', 'cloud', 'openai', 'marvel', 'marvell'] },
+  { name: 'Nuclear/Uranium', key: 'nuclear', tickers: ['CCJ', 'LEU', 'URA', 'NNE', 'SMR', 'OKLO', 'DNN', 'UEC'],
+    catalystKeywords: ['uranium', 'nuclear', 'reactor', 'enrichment', 'smr', 'fission', 'power plant'] },
+  { name: 'Crypto', key: 'crypto_macro', tickers: ['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOT-USD', 'COIN', 'MARA', 'RIOT'],
     catalystKeywords: ['bitcoin', 'crypto', 'ethereum', 'defi', 'regulation', 'sec', 'etf'] },
 ];
 
@@ -357,15 +359,17 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
 
   // 5b. Catalyst-driven stars — Liza's active_catalysts → sector tickers
   //     This closes the intelligence → action gap (Lesson 1 + 6)
-  // Map catalyst categories to tradeable tickers (use what's already in SECTORS + extras)
+  // Map catalyst categories to tradeable tickers (mirrors SECTORS)
   const CATALYST_TICKERS: Record<string, string[]> = {
-    energy:     ['XOM', 'OXY', 'CVX', 'HAL', 'SLB', 'KOS', 'USO', 'UNG'],
-    tech_ai:    ['NVDA', 'VRT', 'NRG', 'EQIX', 'NET', 'SMCI'],
-    crypto:     ['BTC-USD', 'ETH-USD', 'SOL-USD'],
-    macro:      ['GLD', 'USO', 'UNG'],
-    defense:    ['LMT', 'RTX', 'NOC', 'GD', 'BA'],
-    metals:     ['FCX', 'AA', 'NEM', 'GLD'],
-    crypto_macro: ['BTC-USD', 'ETH-USD', 'SOL-USD'],
+    energy:          ['XOM', 'OXY', 'CVX', 'HAL', 'SLB', 'KOS', 'USO', 'UNG', 'COP', 'EOG'],
+    tech_ai:         ['NVDA', 'MRVL', 'AMD', 'VRT', 'SMCI', 'MSFT', 'GOOGL', 'PLTR', 'CRWV'],
+    ai_infrastructure: ['NVDA', 'MRVL', 'AMD', 'VRT', 'SMCI', 'MSFT', 'GOOGL', 'PLTR', 'CRWV'],
+    crypto:          ['BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'MARA', 'RIOT'],
+    crypto_macro:    ['BTC-USD', 'ETH-USD', 'SOL-USD', 'COIN', 'MARA', 'RIOT'],
+    macro:           ['GLD', 'USO', 'UNG', 'SPY', 'QQQ'],
+    defense:         ['LMT', 'RTX', 'NOC', 'GD', 'BA', 'LHX'],
+    metals:          ['FCX', 'AA', 'NEM', 'GLD', 'SLV'],
+    nuclear:         ['CCJ', 'LEU', 'URA', 'NNE', 'SMR', 'OKLO', 'UEC'],
   };
   try {
     const catalystRaw = store.get('active_catalysts');
