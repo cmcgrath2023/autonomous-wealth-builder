@@ -98,16 +98,18 @@ export class PositionManager {
   }
 
   private getPressureThresholds(pressure: number) {
+    const sl = this.rules.stopLossPct; // 8%
+    // RULE: TP must ALWAYS exceed SL. Minimum R/R = 1.5:1
+    // At low pressure: TP = 15% (1.875:1 R/R). At max: TP = 12% (1.5:1 R/R). Never below SL.
+    const minTP = sl * 1.5; // 12% — floor for take profit
     return {
-      cryptoTrailActivation: lerp(0.03, 0.015, pressure), // Trail activates at 1.5-3%
-      cryptoTrailLow: lerp(0.015, 0.008, pressure),
-      cryptoTrailHigh: lerp(0.01, 0.005, pressure),
-      cryptoHighGainThreshold: lerp(0.06, 0.03, pressure),
-      cryptoHardCap: lerp(0.10, 0.05, pressure),           // Hard cap 5-10% (never below 5%)
-      equityTakeProfit: lerp(0.08, 0.04, pressure),
-      // Micro-bank disabled: $10 wins with $42 losses is inverted risk/reward.
-      // Let positions run to at least $30+ before considering early exit.
-      microBankMin: pressure > 0.8 ? 30 : Infinity,        // Only micro-bank at extreme pressure, min $30
+      cryptoTrailActivation: lerp(0.03, 0.02, pressure),
+      cryptoTrailLow: lerp(0.015, 0.01, pressure),
+      cryptoTrailHigh: lerp(0.01, 0.008, pressure),
+      cryptoHighGainThreshold: lerp(0.06, 0.04, pressure),
+      cryptoHardCap: Math.max(lerp(0.10, 0.06, pressure), minTP), // Never below 12%
+      equityTakeProfit: Math.max(lerp(0.15, 0.10, pressure), minTP), // 10-15%, floor 12%
+      microBankMin: pressure > 0.9 ? 50 : Infinity, // Only at extreme pressure, min $50 (not $10 or $30)
     };
   }
 
@@ -138,9 +140,8 @@ export class PositionManager {
     const pressure = this.calculatePressure();
     const thresholds = this.getPressureThresholds(pressure);
 
-    // SPEC-005: Use simulated $5K capital for circuit breaker, not full paper account
-    const simulatedCapital = 5000;
-    const maxDailyLoss = simulatedCapital * this.rules.maxDailyLossPct; // $150 on $5K
+    // Circuit breaker: $500 daily loss limit (matches trade-engine DAILY_LOSS_LIMIT)
+    const maxDailyLoss = 500;
 
     for (const pos of positions) {
       const pnlPct = pos.unrealizedPnlPercent / 100;
