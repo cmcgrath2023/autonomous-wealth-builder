@@ -716,17 +716,20 @@ export class TradeEngine {
               continue;
             }
             // Neural trader technical confirmation — fetch recent bars and analyze
-            if (!isCrypto(g.symbol)) {
+            {
               try {
-                const barsRes = await fetch(
-                  `https://data.alpaca.markets/v2/stocks/${g.symbol}/bars?timeframe=15Min&limit=50&feed=iex`,
-                  { headers, signal: AbortSignal.timeout(5000) },
-                );
+                const isCryptoSym = isCrypto(g.symbol);
+                const barsUrl = isCryptoSym
+                  ? `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=${g.symbol.replace('-', '/')}&timeframe=15Min&limit=50`
+                  : `https://data.alpaca.markets/v2/stocks/${g.symbol}/bars?timeframe=15Min&limit=50&feed=iex`;
+                const barsRes = await fetch(barsUrl, { headers, signal: AbortSignal.timeout(5000) });
                 if (barsRes.ok) {
                   const barsData = await barsRes.json() as any;
-                  const bars = barsData.bars || [];
-                  if (bars.length >= 30) {
-                    for (const bar of bars) this.neural.addBar(g.symbol, bar.c, bar.v);
+                  const rawBars = isCryptoSym
+                    ? (barsData.bars?.[g.symbol.replace('-', '/')] || [])
+                    : (barsData.bars || []);
+                  if (rawBars.length >= 30) {
+                    for (const bar of rawBars) this.neural.addBar(g.symbol, bar.c, bar.v || 0);
                     const neuralSignal = await this.neural.analyze(g.symbol);
                     if (neuralSignal && neuralSignal.direction !== 'buy') {
                       console.log(`  [BUY] SKIP ${g.symbol} — neural says ${neuralSignal.direction} (${(neuralSignal.confidence*100).toFixed(0)}%)`);
