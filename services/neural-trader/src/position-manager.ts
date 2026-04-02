@@ -27,9 +27,9 @@ export interface ClosedTrade {
 }
 
 const DEFAULT_RULES: PositionRules = {
-  stopLossPct: 0.03,        // 3% stop — tight risk management
+  stopLossPct: 0.07,        // 7% stop — room for volatile movers
   takeProfitPct: 0.15,       // 15% take profit — let big movers run
-  trailingStopPct: 0.03,     // 3% trailing — match stop loss
+  trailingStopPct: 0.07,     // 7% trailing — match stop loss
   maxDailyLossPct: 0.05,     // 5% max daily loss
 };
 
