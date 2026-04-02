@@ -350,33 +350,9 @@ export class PositionManager {
     this.dailyPnl = 0;
   }
 
-  // Star Concentration: identify top performer and cut dogs
-  async starConcentration(executor: TradeExecutor): Promise<string[]> {
-    const positions = await executor.getPositions();
-    if (positions.length < 2) return [];
-
-    const actions: string[] = [];
-    const sorted = [...positions].sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
-    const star = sorted[0];
-
-    // Only concentrate if the star is actually winning meaningfully
-    if (star.unrealizedPnl < 25) return []; // Need a strong star, not just slightly green
-
-    // Cut positions losing more than $25 OR more than 2% — give new entries room to breathe
-    // Don't cut positions opened in the last 30 minutes (they need time)
-    for (const pos of sorted.slice(1)) {
-      const pctLoss = Math.abs(pos.unrealizedPnlPercent || 0);
-      const isNewPosition = !this.entryTimes.has(pos.ticker) || (Date.now() - (this.entryTimes.get(pos.ticker) || 0)) < 30 * 60 * 1000;
-      if (!isNewPosition && (pos.unrealizedPnl < -25 || pctLoss > 2)) {
-        const result = await this.closePosition(executor, pos, 'stop_loss');
-        if (result) actions.push(`CUT DOG: ${result} → freeing capital for star ${star.ticker}`);
-      }
-    }
-
-    if (actions.length > 0) {
-      actions.unshift(`STAR: ${star.ticker} P&L=$${star.unrealizedPnl.toFixed(2)} — concentrating capital`);
-    }
-
-    return actions;
+  // Star Concentration: DISABLED — 3% SL handles losers. This was cutting positions
+  // at -$25 which is under the 3% SL threshold and killed manual buys prematurely.
+  async starConcentration(_executor: TradeExecutor): Promise<string[]> {
+    return [];
   }
 }
