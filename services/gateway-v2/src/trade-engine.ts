@@ -493,12 +493,18 @@ export class TradeEngine {
       `${mkt.isMarketOpen ? 'OPEN' : mkt.isAfterHours ? 'AFTER-HOURS' : 'CLOSED'}`,
     );
 
-    // DAILY LOSS CIRCUIT BREAKER — halts EQUITY entries, forex manage_positions still runs
+    // DAILY LOSS CIRCUIT BREAKER — checks BOTH realized AND unrealized P&L
     const allTodayTrades = this.store.getTodayTrades();
     const todayClosedPnl = allTodayTrades.reduce((s, t) => s + t.pnl, 0);
-    const equityCircuitBreaker = todayClosedPnl < DAILY_LOSS_LIMIT;
+    let unrealizedPnl = 0;
+    try {
+      const pos = await this.executor.getPositions();
+      unrealizedPnl = pos.reduce((s, p) => s + p.unrealizedPnl, 0);
+    } catch {}
+    const totalDayPnl = todayClosedPnl + unrealizedPnl;
+    const equityCircuitBreaker = totalDayPnl < DAILY_LOSS_LIMIT;
     if (equityCircuitBreaker) {
-      console.log(`  [CIRCUIT BREAKER] Daily realized P&L $${todayClosedPnl.toFixed(2)} exceeds $${DAILY_LOSS_LIMIT} limit — EQUITY HALTED (forex continues)`);
+      console.log(`  [CIRCUIT BREAKER] Daily P&L $${totalDayPnl.toFixed(2)} (realized $${todayClosedPnl.toFixed(2)} + unrealized $${unrealizedPnl.toFixed(2)}) exceeds $${DAILY_LOSS_LIMIT} — HALTED`);
       // Alert once per day
       const cbKey = `circuit_breaker_${today}`;
       if (!this.store.get(cbKey)) {

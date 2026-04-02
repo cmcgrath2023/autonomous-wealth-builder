@@ -27,9 +27,9 @@ export interface ClosedTrade {
 }
 
 const DEFAULT_RULES: PositionRules = {
-  stopLossPct: 0.08,        // 8% stop — movers are volatile, give room
+  stopLossPct: 0.03,        // 3% stop — tight risk management
   takeProfitPct: 0.15,       // 15% take profit — let big movers run
-  trailingStopPct: 0.05,     // 5% trailing — protect profits but allow normal pullbacks
+  trailingStopPct: 0.03,     // 3% trailing — match stop loss
   maxDailyLossPct: 0.05,     // 5% max daily loss
 };
 
@@ -101,7 +101,7 @@ export class PositionManager {
     const sl = this.rules.stopLossPct; // 8%
     // RULE: TP must ALWAYS exceed SL. Minimum R/R = 1.5:1
     // At low pressure: TP = 15% (1.875:1 R/R). At max: TP = 12% (1.5:1 R/R). Never below SL.
-    const minTP = sl * 1.5; // 12% — floor for take profit
+    const minTP = sl * 1.5; // 4.5% — floor for take profit (1.5:1 R/R on 3% SL)
     return {
       cryptoTrailActivation: lerp(0.03, 0.02, pressure),
       cryptoTrailLow: lerp(0.015, 0.01, pressure),
