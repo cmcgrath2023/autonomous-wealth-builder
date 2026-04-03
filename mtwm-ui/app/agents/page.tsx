@@ -517,43 +517,63 @@ export default function AgentsPage() {
 
       {/* Agent Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {agents.map(agent => (
-          <Card key={agent.id} className="bg-white/5 border border-white/5">
-            <CardBody className="p-4">
-              <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-                <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${agent.status === 'active' || agent.status === 'busy' ? 'bg-green-400 animate-pulse' : agent.status === 'idle' ? 'bg-yellow-400' : agent.status === 'error' ? 'bg-red-400' : 'bg-white/20'}`} />
-                  <h3 className="text-sm font-semibold text-white/90">{agent.name}</h3>
-                  <Chip size="sm" variant="flat" color={statusColor(agent.status)}>{agent.status}</Chip>
+        {agents.map(agent => {
+          const agentActivity = activity.filter(a => a.agent === agent.id || a.agent === agent.name.toLowerCase().replace(/\s+/g, '-'));
+          return (
+            <Card key={agent.id} className="bg-white/5 border border-white/5">
+              <CardBody className="p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${agent.status === 'active' || agent.status === 'busy' ? 'bg-green-400 animate-pulse' : agent.status === 'idle' ? 'bg-yellow-400' : agent.status === 'error' ? 'bg-red-400' : 'bg-white/20'}`} />
+                    <h3 className="text-sm font-semibold text-white/90">{agent.name}</h3>
+                    <Chip size="sm" variant="flat" color={statusColor(agent.status)}>{agent.status}</Chip>
+                  </div>
+                  <div className="flex gap-1">
+                    <Chip size="sm" variant="bordered" color={moduleColor(agent.module)}>{agent.module}</Chip>
+                    <Chip size="sm" variant="flat" color="default">{agent.role}</Chip>
+                  </div>
                 </div>
-                <div className="flex gap-1">
-                  <Chip size="sm" variant="bordered" color={moduleColor(agent.module)}>{agent.module}</Chip>
-                  <Chip size="sm" variant="flat" color="default">{agent.role}</Chip>
+
+                <p className="text-xs text-white/40 mb-3">{agent.description}</p>
+
+                {agent.currentTask && (
+                  <div className="text-xs text-blue-400/60 mb-2">
+                    Current: {agent.currentTask}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-1 mb-3">
+                  {agent.capabilities.map(cap => (
+                    <span key={cap} className="text-xs text-white/25 bg-white/5 px-1.5 py-0.5 rounded">{cap}</span>
+                  ))}
                 </div>
-              </div>
 
-              <p className="text-xs text-white/40 mb-3">{agent.description}</p>
-
-              {agent.currentTask && (
-                <div className="text-xs text-blue-400/60 mb-2">
-                  Current: {agent.currentTask}
+                <Divider className="bg-white/5 mb-2" />
+                <div className="flex justify-between text-xs text-white/30">
+                  <span>{agent.stats.tasksCompleted > 0 ? `${agent.stats.tasksCompleted} tasks` : 'No tasks yet'}</span>
+                  <span>{agent.stats.lastAction || ''}</span>
                 </div>
-              )}
 
-              <div className="flex flex-wrap gap-1 mb-3">
-                {agent.capabilities.map(cap => (
-                  <span key={cap} className="text-xs text-white/25 bg-white/5 px-1.5 py-0.5 rounded">{cap}</span>
-                ))}
-              </div>
-
-              <Divider className="bg-white/5 mb-2" />
-              <div className="flex justify-between text-xs text-white/30">
-                <span>{agent.stats.tasksCompleted > 0 ? `${agent.stats.tasksCompleted} tasks` : 'No tasks yet'}</span>
-                <span>{agent.stats.lastAction || ''}</span>
-              </div>
-            </CardBody>
-          </Card>
-        ))}
+                {/* Per-agent activity */}
+                {agentActivity.length > 0 && (
+                  <>
+                    <Divider className="bg-white/5 my-2" />
+                    <div className="text-[10px] text-white/30 uppercase tracking-wider mb-1">Recent Activity</div>
+                    <div className="space-y-1 max-h-24 overflow-y-auto">
+                      {agentActivity.slice(0, 5).map(entry => (
+                        <div key={entry.id} className="flex items-center gap-1.5 text-[11px]">
+                          <Chip size="sm" variant="dot" color={resultColor(entry.result)} className="h-4 text-[9px] min-w-0">{entry.result}</Chip>
+                          <span className="text-white/40 truncate flex-1">{entry.detail}</span>
+                          <span className="text-white/20 flex-shrink-0">{formatTime(entry.timestamp)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </CardBody>
+            </Card>
+          );
+        })}
       </div>
     </div>
   );

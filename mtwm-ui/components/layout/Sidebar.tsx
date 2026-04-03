@@ -6,6 +6,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Divider } from '@heroui/react';
 import { Squeeze as Hamburger } from 'hamburger-react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 
 interface NavItem { href: string; label: string; icon: string }
 interface NavGroup { label: string; icon: string; items: NavItem[]; defaultOpen?: boolean }
@@ -81,7 +82,7 @@ function NavSection({ group, pathname, expanded, onToggle }: { group: NavGroup; 
       >
         <span className="text-base">{group.icon}</span>
         <span className="flex-1 text-left font-medium">{group.label}</span>
-        <span className={`text-[10px] transition-transform ${expanded ? 'rotate-90' : ''}`}>&#9654;</span>
+        {expanded ? <ChevronDown size={14} className="text-white/30" /> : <ChevronRight size={14} className="text-white/30" />}
       </button>
       {expanded && (
         <div className="ml-4 mt-0.5 space-y-0.5 border-l border-white/5 pl-2">
