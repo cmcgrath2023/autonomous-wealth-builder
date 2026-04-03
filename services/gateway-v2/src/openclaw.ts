@@ -193,7 +193,7 @@ export class OpenClawEngine {
   // ── Self-Healing ─────────────────────────────────────────────────────
 
   private selfHeal(): void {
-    // Check if trade engine is responding
+    // 1. Check if trade engine is responding
     const engineStatus = this.store.get('trade_engine_status');
     if (engineStatus) {
       try {
@@ -206,7 +206,7 @@ export class OpenClawEngine {
       } catch {}
     }
 
-    // Check if research worker is producing stars
+    // 2. Check if research worker is producing stars
     try {
       const stars = this.store.getResearchStars();
       if (stars.length === 0) {
@@ -215,7 +215,7 @@ export class OpenClawEngine {
       }
     } catch {}
 
-    // Check manager health
+    // 3. Check manager health
     for (const name of ['fin', 'liza', 'ferd']) {
       const status = this.store.get(`manager:${name}:status`) || this.store.get(`manager_${name}_status`);
       if (!status) continue;
@@ -225,6 +225,53 @@ export class OpenClawEngine {
         if (age > 5 * 60_000) {
           console.log(`[OpenClaw] HEAL: Manager ${name} stale (${Math.round(age / 60_000)}m)`);
         }
+      } catch {}
+    }
+
+    // 4. Monitor P&L and positions — alert on significant losses
+    try {
+      const autonomyRaw = this.store.get('autonomy_status');
+      if (autonomyRaw) {
+        const autonomy = JSON.parse(autonomyRaw);
+        const deployed = autonomy.totalDeployed || 0;
+        const posCount = autonomy.positionCount || 0;
+
+        // Alert if budget is less than 50% deployed during market hours
+        const hour = new Date().getUTCHours();
+        const isUSMarket = hour >= 14 && hour < 21; // 9:30 AM - 4 PM ET
+        if (isUSMarket && deployed < 4000 && posCount < 3) {
+          console.log(`[OpenClaw] WARN: Only $${deployed.toFixed(0)} deployed (${posCount} positions) — system may be idle`);
+        }
+
+        // Alert if circuit breaker tripped
+        if (autonomy.actionSummary?.includes('CIRCUIT_BREAKER')) {
+          console.log(`[OpenClaw] ALERT: Circuit breaker tripped — all trading halted`);
+        }
+      }
+    } catch {}
+
+    // 5. Check Trident connectivity every 50 heartbeats
+    if (this.heartbeatCount % 50 === 0) {
+      brain.checkHealth().then(ok => {
+        if (!ok) console.log('[OpenClaw] ALERT: Trident disconnected');
+      }).catch(() => {});
+    }
+
+    // 6. Write daily status summary to Trident every 100 heartbeats (~50 min)
+    if (this.heartbeatCount % 100 === 0) {
+      try {
+        const autonomyRaw = this.store.get('autonomy_status');
+        const autonomy = autonomyRaw ? JSON.parse(autonomyRaw) : {};
+        const todayTrades = this.store.getTodayTrades();
+        const wins = todayTrades.filter(t => t.pnl > 0).length;
+        const losses = todayTrades.filter(t => t.pnl <= 0).length;
+        const realizedPnl = todayTrades.reduce((s, t) => s + t.pnl, 0);
+        const summary = `Positions: ${autonomy.positionCount || 0} | Deployed: $${(autonomy.totalDeployed || 0).toFixed(0)} | Realized: $${realizedPnl.toFixed(2)} (${wins}W/${losses}L) | Stars: ${this.store.getResearchStars().length}`;
+        console.log(`[OpenClaw] STATUS: ${summary}`);
+        brain.recordDailySummary(
+          new Date().toISOString().slice(0, 10),
+          realizedPnl, todayTrades.length, wins, losses,
+        ).catch(() => {});
       } catch {}
     }
   }
