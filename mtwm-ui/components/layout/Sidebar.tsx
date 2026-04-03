@@ -29,6 +29,7 @@ const navGroups: (NavItem | NavGroup)[] = [
       { href: '/commodities', label: 'Commodities', icon: '⏣' },
     ],
   },
+  { href: '/crypto', label: 'Crypto', icon: '₿' },
   { href: '/realestate', label: 'Real Estate', icon: '⌂' },
   {
     label: 'Operations', icon: '◈', items: [

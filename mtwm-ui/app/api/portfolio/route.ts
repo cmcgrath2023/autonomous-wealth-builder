@@ -49,6 +49,19 @@ const ASSET_META: Record<string, { name: string; category: string; lat: number; 
   'LINK-USD': { name: 'Chainlink', category: 'crypto', lat: 0, lng: 40 },
   'DOGE/USD': { name: 'Dogecoin', category: 'crypto', lat: 0, lng: 50 },
   'DOGE-USD': { name: 'Dogecoin', category: 'crypto', lat: 0, lng: 50 },
+  'DOGEUSD': { name: 'Dogecoin', category: 'crypto', lat: 0, lng: 50 },
+  'SOLUSD': { name: 'Solana', category: 'crypto', lat: 0, lng: 20 },
+  'AVAXUSD': { name: 'Avalanche', category: 'crypto', lat: 0, lng: 30 },
+  'LINKUSD': { name: 'Chainlink', category: 'crypto', lat: 0, lng: 40 },
+  'LTCUSD': { name: 'Litecoin', category: 'crypto', lat: 0, lng: 60 },
+  'LTC/USD': { name: 'Litecoin', category: 'crypto', lat: 0, lng: 60 },
+  'LTC-USD': { name: 'Litecoin', category: 'crypto', lat: 0, lng: 60 },
+  'BCHUSD': { name: 'Bitcoin Cash', category: 'crypto', lat: 0, lng: 70 },
+  'BCH/USD': { name: 'Bitcoin Cash', category: 'crypto', lat: 0, lng: 70 },
+  'BCH-USD': { name: 'Bitcoin Cash', category: 'crypto', lat: 0, lng: 70 },
+  'DOT/USD': { name: 'Polkadot', category: 'crypto', lat: 0, lng: 80 },
+  'DOT-USD': { name: 'Polkadot', category: 'crypto', lat: 0, lng: 80 },
+  'DOTUSD': { name: 'Polkadot', category: 'crypto', lat: 0, lng: 80 },
 };
 
 export async function GET() {
@@ -71,7 +84,9 @@ export async function GET() {
 
     const assets = (positions || []).map((p: any) => {
       const ticker = p.ticker || p.symbol || 'UNKNOWN';
-      const meta = ASSET_META[ticker] || { name: ticker, category: 'equity', lat: 0, lng: 0 };
+      const isCryptoSymbol = (p.asset_class === 'crypto') || ticker.endsWith('USD') && ticker.length > 5;
+      const fallbackCategory = isCryptoSymbol ? 'crypto' : 'equity';
+      const meta = ASSET_META[ticker] || { name: isCryptoSymbol ? ticker.replace(/USD$/, '') : ticker, category: fallbackCategory, lat: 0, lng: 0 };
       return {
         id: ticker.toLowerCase().replace(/[/-]/g, ''),
         name: meta.name,
