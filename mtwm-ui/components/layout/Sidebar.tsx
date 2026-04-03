@@ -6,13 +6,13 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Divider } from '@heroui/react';
 import { Squeeze as Hamburger } from 'hamburger-react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Home } from 'lucide-react';
 
 interface NavItem { href: string; label: string; icon: string }
 interface NavGroup { label: string; icon: string; items: NavItem[]; defaultOpen?: boolean }
 
 const navGroups: (NavItem | NavGroup)[] = [
-  { href: '/', label: 'Dashboard', icon: '◉' },
+  { href: '/', label: 'Home', icon: 'home' },
   {
     label: 'Stocks', icon: '⟁', defaultOpen: true, items: [
       { href: '/trading', label: 'Trading', icon: '⟁' },
@@ -61,10 +61,10 @@ function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
       className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
         active
           ? 'bg-blue-500/15 text-blue-400 font-medium'
-          : 'text-white/60 hover:bg-white/5 hover:text-white/90'
+          : 'text-white/80 hover:bg-white/5 hover:text-white'
       }`}
     >
-      <span className="text-base">{item.icon}</span>
+      {item.icon === 'home' ? <Home size={16} /> : <span className="text-base">{item.icon}</span>}
       {item.label}
     </Link>
   );
@@ -77,12 +77,12 @@ function NavSection({ group, pathname, expanded, onToggle }: { group: NavGroup; 
       <button
         onClick={onToggle}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm w-full transition-colors ${
-          hasActive ? 'text-blue-400' : 'text-white/50 hover:text-white/80'
+          hasActive ? 'text-blue-400' : 'text-white/80 hover:text-white'
         }`}
       >
         <span className="text-base">{group.icon}</span>
         <span className="flex-1 text-left font-medium">{group.label}</span>
-        {expanded ? <ChevronDown size={14} className="text-white/30" /> : <ChevronRight size={14} className="text-white/30" />}
+        {expanded ? <ChevronDown size={16} className="text-white/50" /> : <ChevronRight size={16} className="text-white/50" />}
       </button>
       {expanded && (
         <div className="ml-4 mt-0.5 space-y-0.5 border-l border-white/5 pl-2">
@@ -160,9 +160,9 @@ export function Sidebar() {
         )}
       </nav>
       <Divider className="my-4 bg-white/5" />
-      <div className="text-xs text-white/30 px-3">
+      <div className="text-xs text-white/40 px-3">
         <div>Local Instance</div>
-        <div className="mt-1">v6.0 — Spec Compliant</div>
+        <div className="mt-1">v6.0</div>
       </div>
     </>
   );

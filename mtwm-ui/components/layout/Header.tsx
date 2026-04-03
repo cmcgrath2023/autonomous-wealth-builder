@@ -27,11 +27,6 @@ export function Header() {
           </div>
         </div>
         <div className="flex items-center gap-2 lg:gap-3">
-          <div className="hidden md:flex items-center gap-2">
-            <Chip size="sm" variant="dot" color={connected.ruvector ? 'success' : 'danger'}>RuVector</Chip>
-            <Chip size="sm" variant="dot" color={connected.ruflow ? 'success' : 'danger'}>Ruflow</Chip>
-            <Chip size="sm" variant="dot" color={connected.claude ? 'success' : 'danger'}>Claude</Chip>
-          </div>
           <Chip size="sm" variant="flat" color={statusColor}>
             {systemStatus.toUpperCase()}
           </Chip>
