@@ -1,8 +1,12 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Card, CardBody, CardHeader, Chip, Spinner, Progress } from '@heroui/react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, ScatterChart, Scatter, ZAxis } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import dynamic from 'next/dynamic';
+
+// Force-graph must be loaded client-side only (uses WebGL)
+const ForceGraph3D = dynamic(() => import('react-force-graph-3d'), { ssr: false });
 
 interface Belief {
   id: string;
@@ -32,7 +36,6 @@ interface TridentMemory {
   title: string;
   category: string;
   tags: string[];
-  content?: string;
 }
 
 interface SonaStatus {
@@ -43,7 +46,108 @@ interface SonaStatus {
   tier: string;
 }
 
+interface GraphNode {
+  id: string;
+  name: string;
+  group: string;
+  val: number;
+  color: string;
+}
+
+interface GraphLink {
+  source: string;
+  target: string;
+  color: string;
+}
+
 const REFRESH_MS = 30_000;
+
+// Build knowledge graph from Trident memories + Bayesian beliefs
+function buildGraph(memories: TridentMemory[], beliefs: Belief[]): { nodes: GraphNode[]; links: GraphLink[] } {
+  const nodes: GraphNode[] = [];
+  const links: GraphLink[] = [];
+  const nodeIds = new Set<string>();
+
+  const addNode = (id: string, name: string, group: string, val: number, color: string) => {
+    if (nodeIds.has(id)) return;
+    nodeIds.add(id);
+    nodes.push({ id, name, group, val, color });
+  };
+
+  // Central hub nodes
+  addNode('hub:trading', 'Trading', 'hub', 12, '#3b82f6');
+  addNode('hub:research', 'Research', 'hub', 10, '#8b5cf6');
+  addNode('hub:rules', 'Rules', 'hub', 8, '#f59e0b');
+  addNode('hub:sona', 'SONA', 'hub', 10, '#06b6d4');
+
+  // Bayesian beliefs → ticker nodes
+  for (const b of beliefs) {
+    const color = b.posterior > 0.6 ? '#22c55e' : b.posterior < 0.4 ? '#ef4444' : '#eab308';
+    const size = Math.max(3, Math.min(b.observations * 1.5, 15));
+    addNode(`ticker:${b.subject}`, b.subject, 'ticker', size, color);
+    links.push({ source: 'hub:trading', target: `ticker:${b.subject}`, color: color + '60' });
+  }
+
+  // Trident memories → categorized nodes
+  const tickerCounts: Record<string, { wins: number; losses: number }> = {};
+  const sectors = new Set<string>();
+  const researchTickers = new Set<string>();
+
+  for (const m of memories) {
+    const tags = m.tags || [];
+
+    if (tags.includes('outcome')) {
+      // Trade outcome — extract ticker from tags
+      const ticker = tags.find(t => !['trade', 'outcome', 'win', 'loss', 'stop_loss', 'take_profit', 'eod_close', 'trailing_stop', 'rotation', 'premarket_liquidation', 'historical_seed', 'long', 'short', 'momentum', 'entry', 'buy'].includes(t) && t.length >= 1 && t.length <= 10);
+      if (ticker) {
+        const sym = ticker.toUpperCase().replace('_', '/');
+        if (!tickerCounts[sym]) tickerCounts[sym] = { wins: 0, losses: 0 };
+        if (tags.includes('win')) tickerCounts[sym].wins++;
+        else if (tags.includes('loss')) tickerCounts[sym].losses++;
+      }
+    } else if (tags.includes('research') || tags.includes('cycle')) {
+      // Research cycle — extract mentioned tickers
+      for (const t of tags) {
+        if (t.length >= 2 && t.length <= 8 && !['research', 'cycle', 'stars'].includes(t)) {
+          researchTickers.add(t.toUpperCase());
+        }
+      }
+    } else if (tags.includes('rule')) {
+      const ruleId = `rule:${m.id.slice(0, 8)}`;
+      addNode(ruleId, m.title.slice(0, 30), 'rule', 4, '#f59e0b');
+      links.push({ source: 'hub:rules', target: ruleId, color: '#f59e0b40' });
+    }
+  }
+
+  // Create ticker nodes from trade history
+  for (const [sym, counts] of Object.entries(tickerCounts)) {
+    const total = counts.wins + counts.losses;
+    const winRate = total > 0 ? counts.wins / total : 0.5;
+    const color = winRate > 0.5 ? '#22c55e' : winRate < 0.35 ? '#ef4444' : '#eab308';
+    const size = Math.max(3, Math.min(total * 2, 15));
+    addNode(`ticker:${sym}`, `${sym} (${counts.wins}W/${counts.losses}L)`, 'ticker', size, color);
+    links.push({ source: 'hub:trading', target: `ticker:${sym}`, color: color + '50' });
+  }
+
+  // Research connections
+  for (const ticker of researchTickers) {
+    if (nodeIds.has(`ticker:${ticker}`)) {
+      links.push({ source: 'hub:research', target: `ticker:${ticker}`, color: '#8b5cf640' });
+    } else {
+      addNode(`ticker:${ticker}`, ticker, 'research-star', 3, '#8b5cf6');
+      links.push({ source: 'hub:research', target: `ticker:${ticker}`, color: '#8b5cf640' });
+    }
+  }
+
+  // SONA connections to beliefs
+  for (const b of beliefs.filter(b => b.observations >= 3)) {
+    if (nodeIds.has(`ticker:${b.subject}`)) {
+      links.push({ source: 'hub:sona', target: `ticker:${b.subject}`, color: '#06b6d440' });
+    }
+  }
+
+  return { nodes, links };
+}
 
 export default function IntelligencePage() {
   const [bayesian, setBayesian] = useState<BayesianStats | null>(null);
@@ -52,14 +156,31 @@ export default function IntelligencePage() {
   const [tridentMemories, setTridentMemories] = useState<TridentMemory[]>([]);
   const [sonaStatus, setSonaStatus] = useState<SonaStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const graphRef = useRef<HTMLDivElement>(null);
+  const [graphDimensions, setGraphDimensions] = useState({ width: 800, height: 500 });
+
+  // Responsive graph sizing
+  useEffect(() => {
+    const updateSize = () => {
+      if (graphRef.current) {
+        setGraphDimensions({
+          width: graphRef.current.offsetWidth,
+          height: Math.min(500, window.innerHeight * 0.45),
+        });
+      }
+    };
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, [loading]);
 
   const refresh = useCallback(async () => {
     try {
       const [statusRes, metricsRes, topRes, worstRes] = await Promise.allSettled([
-        fetch('/api/gateway?path=/api/status'),
-        fetch('/api/gateway?path=/api/intelligence/metrics'),
-        fetch('/api/gateway?path=/api/intelligence/top-performers'),
-        fetch('/api/gateway?path=/api/intelligence/worst-performers'),
+        fetch('/api/gateway/status'),
+        fetch('/api/gateway/intelligence/metrics'),
+        fetch('/api/gateway/intelligence/top-performers'),
+        fetch('/api/gateway/intelligence/worst-performers'),
       ]);
 
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
@@ -71,7 +192,6 @@ export default function IntelligencePage() {
         setMetrics(d);
       }
 
-      // Combine top + worst performers into beliefs
       const allBeliefs: Belief[] = [];
       if (topRes.status === 'fulfilled' && topRes.value.ok) {
         const d = await topRes.value.json();
@@ -83,7 +203,7 @@ export default function IntelligencePage() {
       }
       setBeliefs(allBeliefs);
 
-      // Trident memories — fetch via gateway proxy (gateway has Brain credentials)
+      // Trident memories via gateway proxy
       try {
         const tridentRes = await fetch('/api/gateway/intelligence/trident');
         if (tridentRes.ok) {
@@ -105,21 +225,13 @@ export default function IntelligencePage() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  const graphData = useMemo(() => buildGraph(tridentMemories, beliefs), [tridentMemories, beliefs]);
+
   if (loading) return <div className="flex justify-center items-center h-64"><Spinner size="lg" /></div>;
 
   const preferredTickers = beliefs.filter(b => b.domain === 'top' && b.posterior > 0.6);
   const avoidTickers = beliefs.filter(b => b.domain === 'worst' && b.posterior < 0.4);
 
-  // Knowledge graph data — beliefs as nodes sized by observations
-  const graphData = beliefs.map(b => ({
-    name: b.subject,
-    x: b.posterior * 100,
-    y: b.avgReturn * 100,
-    z: Math.max(b.observations * 20, 60),
-    fill: b.posterior > 0.6 ? '#22c55e' : b.posterior < 0.4 ? '#ef4444' : '#eab308',
-  }));
-
-  // Bar chart — beliefs sorted by posterior
   const barData = [...beliefs]
     .sort((a, b) => b.posterior - a.posterior)
     .slice(0, 20)
@@ -131,7 +243,6 @@ export default function IntelligencePage() {
       color: b.posterior > 0.6 ? '#22c55e' : b.posterior < 0.4 ? '#ef4444' : '#eab308',
     }));
 
-  // Trident category breakdown
   const catCounts: Record<string, number> = {};
   for (const m of tridentMemories) {
     const cat = m.tags?.includes('outcome') ? 'Trade Outcomes' :
@@ -183,7 +294,71 @@ export default function IntelligencePage() {
         </Card>
       </div>
 
-      {/* Trident connection + SONA */}
+      {/* Knowledge Graph */}
+      <Card className="bg-white/5 border border-white/10">
+        <CardHeader className="px-4 pt-4 pb-2">
+          <h3 className="text-sm font-semibold text-white/80">Knowledge Graph</h3>
+          <div className="flex gap-3 ml-auto text-[10px]">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#22c55e]" /> Winning</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#ef4444]" /> Losing</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#3b82f6]" /> Trading</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#8b5cf6]" /> Research</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#f59e0b]" /> Rules</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#06b6d4]" /> SONA</span>
+          </div>
+        </CardHeader>
+        <CardBody className="p-0 overflow-hidden" style={{ height: graphDimensions.height }}>
+          <div ref={graphRef} className="w-full h-full">
+            {graphData.nodes.length > 0 && (
+              <ForceGraph3D
+                width={graphDimensions.width}
+                height={graphDimensions.height}
+                graphData={graphData}
+                nodeLabel={(node: any) => node.name}
+                nodeColor={(node: any) => node.color}
+                nodeVal={(node: any) => node.val}
+                nodeOpacity={0.9}
+                linkColor={(link: any) => link.color}
+                linkOpacity={0.4}
+                linkWidth={1}
+                backgroundColor="rgba(0,0,0,0)"
+                showNavInfo={false}
+                enableNodeDrag={true}
+                enableNavigationControls={true}
+                nodeThreeObjectExtend={true}
+                nodeThreeObject={(node: any) => {
+                  // Add text labels to hub nodes
+                  if (node.group === 'hub') {
+                    const THREE = require('three');
+                    const sprite = new THREE.Sprite(
+                      new THREE.SpriteMaterial({
+                        map: new THREE.CanvasTexture((() => {
+                          const canvas = document.createElement('canvas');
+                          canvas.width = 128;
+                          canvas.height = 48;
+                          const ctx = canvas.getContext('2d')!;
+                          ctx.fillStyle = node.color;
+                          ctx.font = 'bold 20px sans-serif';
+                          ctx.textAlign = 'center';
+                          ctx.fillText(node.name, 64, 30);
+                          return canvas;
+                        })()),
+                        transparent: true,
+                      })
+                    );
+                    sprite.scale.set(20, 8, 1);
+                    sprite.position.y = 8;
+                    return sprite;
+                  }
+                  return false;
+                }}
+              />
+            )}
+          </div>
+        </CardBody>
+      </Card>
+
+      {/* Trident + Bayesian panels */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card className="bg-white/5 border border-white/10">
           <CardHeader className="px-4 pt-4 pb-2">
@@ -214,7 +389,6 @@ export default function IntelligencePage() {
           </CardBody>
         </Card>
 
-        {/* Bayesian Intelligence */}
         <Card className="bg-white/5 border border-white/10">
           <CardHeader className="px-4 pt-4 pb-2">
             <h3 className="text-sm font-semibold text-white/80">Bayesian Intelligence</h3>
@@ -249,43 +423,6 @@ export default function IntelligencePage() {
           </CardBody>
         </Card>
       </div>
-
-      {/* Knowledge Graph — belief scatter plot */}
-      {graphData.length > 0 && (
-        <Card className="bg-white/5 border border-white/10">
-          <CardHeader className="px-4 pt-4 pb-2">
-            <h3 className="text-sm font-semibold text-white/80">Knowledge Graph — Belief Space</h3>
-            <span className="text-xs text-white/30 ml-2">x: confidence, y: avg return, size: observations</span>
-          </CardHeader>
-          <CardBody className="px-4 pb-4">
-            <ResponsiveContainer width="100%" height={300}>
-              <ScatterChart margin={{ top: 10, right: 10, bottom: 10, left: 10 }}>
-                <XAxis dataKey="x" name="Confidence" unit="%" stroke="#555" tick={{ fill: '#888', fontSize: 11 }} />
-                <YAxis dataKey="y" name="Avg Return" unit="%" stroke="#555" tick={{ fill: '#888', fontSize: 11 }} />
-                <ZAxis dataKey="z" range={[40, 400]} />
-                <Tooltip
-                  content={({ payload }) => {
-                    if (!payload?.[0]) return null;
-                    const d = payload[0].payload;
-                    return (
-                      <div className="bg-black/90 border border-white/10 rounded px-3 py-2 text-xs">
-                        <div className="text-white font-bold">{d.name}</div>
-                        <div className="text-white/60">Confidence: {d.x.toFixed(0)}%</div>
-                        <div className="text-white/60">Avg Return: {d.y.toFixed(1)}%</div>
-                      </div>
-                    );
-                  }}
-                />
-                <Scatter data={graphData}>
-                  {graphData.map((entry, i) => (
-                    <Cell key={i} fill={entry.fill} fillOpacity={0.7} />
-                  ))}
-                </Scatter>
-              </ScatterChart>
-            </ResponsiveContainer>
-          </CardBody>
-        </Card>
-      )}
 
       {/* Belief Rankings */}
       {barData.length > 0 && (
