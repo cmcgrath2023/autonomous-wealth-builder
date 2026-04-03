@@ -214,7 +214,7 @@ async function main(): Promise<void> {
 
   // 2. Brain MCP — single source of truth for trade intelligence
   const brainOk = await brain.checkHealth();
-  log(`Brain MCP: ${brainOk ? 'connected (brain.oceanicai.io)' : 'UNAVAILABLE — trades will not be recorded'}`);
+  log(`Brain MCP: ${brainOk ? `connected (${process.env.BRAIN_SERVER_URL || 'trident.cetaceanlabs.com'})` : 'UNAVAILABLE — trades will not be recorded'}`);
 
   // Seed Brain with trading rules (idempotent — Brain deduplicates)
   if (brainOk) {

@@ -11,6 +11,7 @@ import { MarketFACTCache } from '../../shared/src/fact-cache.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
+import { brain } from './brain-client.js';
 
 // FIX 1 & 3: Bayesian filter for research stars — adjust scores based on trade outcomes
 let _bayesian: BayesianIntelligence | null = null;
@@ -433,6 +434,25 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
   // 6. Expire stale stars
   const expired = store.clearExpiredStars(STAR_EXPIRY_HOURS);
   console.log(`[Research] Cycle ${Date.now() - t0}ms | stars=${starsWritten} expired=${expired} reports=${reportsWritten} news=${news.length} prices=${prices.size} errors=${errors.length}`);
+
+  // 7. Record research to Trident — learning coherence across sessions
+  if (starsWritten > 0) {
+    try {
+      const allStars = store.getResearchStars();
+      const topStars = allStars.sort((a: any, b: any) => b.score - a.score).slice(0, 10);
+      const summary = topStars.map((s: any) => `${s.symbol} (${s.sector}) score:${s.score.toFixed(2)} — ${s.catalyst || ''}`).join('\n');
+      const newsHeadlines = news.filter(n => n.sentiment === 'bullish').slice(0, 5).map(n => `[${n.source}] ${n.title}`).join('\n');
+
+      brain.recordResearchCycle({
+        date: new Date().toISOString(),
+        starsCount: allStars.length,
+        topStars: topStars.map((s: any) => ({ symbol: s.symbol, sector: s.sector, score: s.score })),
+        summary,
+        newsHeadlines,
+        errors,
+      }).catch(e => console.error(`[Research] Trident write failed: ${e.message}`));
+    } catch {}
+  }
 }
 
 // --- Lifecycle ---

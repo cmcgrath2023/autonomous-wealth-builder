@@ -7,44 +7,124 @@ import Image from 'next/image';
 import { Divider } from '@heroui/react';
 import { Squeeze as Hamburger } from 'hamburger-react';
 
-const navItems = [
+interface NavItem { href: string; label: string; icon: string }
+interface NavGroup { label: string; icon: string; items: NavItem[]; defaultOpen?: boolean }
+
+const navGroups: (NavItem | NavGroup)[] = [
   { href: '/', label: 'Dashboard', icon: '◉' },
-  { href: '/profit', label: 'Profit', icon: '⊹' },
-  { href: '/research', label: 'Research', icon: '⊙' },
-  { href: '/trading', label: 'Trading', icon: '⟁' },
-  { href: '/options', label: 'Options', icon: '⊘' },
-  { href: '/forex', label: 'Forex', icon: '⇄' },
-  { href: '/metals', label: 'Metals', icon: '◆' },
-  { href: '/commodities', label: 'Commodities', icon: '⏣' },
-  { href: '/global', label: 'Global Markets', icon: '⊕' },
-  { href: '/alternatives', label: 'Alternatives', icon: '◇' },
+  {
+    label: 'Stocks', icon: '⟁', defaultOpen: true, items: [
+      { href: '/trading', label: 'Trading', icon: '⟁' },
+      { href: '/profit', label: 'Profit & Loss', icon: '⊹' },
+      { href: '/options', label: 'Options', icon: '⊘' },
+      { href: '/research', label: 'Research', icon: '⊙' },
+      { href: '/global', label: 'Global Markets', icon: '⊕' },
+    ],
+  },
+  {
+    label: 'Forex & Commodities', icon: '⇄', items: [
+      { href: '/forex', label: 'Forex', icon: '⇄' },
+      { href: '/metals', label: 'Metals', icon: '◆' },
+      { href: '/commodities', label: 'Commodities', icon: '⏣' },
+    ],
+  },
   { href: '/realestate', label: 'Real Estate', icon: '⌂' },
-  { href: '/business', label: 'Business Ops', icon: '◈' },
-  { href: '/infrastructure', label: 'AI Infrastructure', icon: '⎔' },
-  { href: '/decisions', label: 'Decisions', icon: '⚖' },
-  { href: '/activity', label: 'Agent Activity', icon: '⚡' },
-  { href: '/agents', label: 'Agents', icon: '⬡' },
-  { href: '/strategy', label: 'Strategy Guide', icon: '⧫' },
-  { href: '/roadmap', label: 'Roadmap', icon: '⟿' },
+  {
+    label: 'Operations', icon: '◈', items: [
+      { href: '/business', label: 'Business Ops', icon: '◈' },
+      { href: '/agents', label: 'Agents', icon: '⬡' },
+    ],
+  },
+  {
+    label: 'Intelligence', icon: '⊙', items: [
+      { href: '/intelligence', label: 'Brain & Learnings', icon: '⊙' },
+    ],
+  },
+  {
+    label: 'Planning', icon: '⧫', items: [
+      { href: '/strategy', label: 'Strategy', icon: '⧫' },
+      { href: '/alternatives', label: 'Alternatives', icon: '◇' },
+    ],
+  },
 ];
+
+function isGroup(item: NavItem | NavGroup): item is NavGroup {
+  return 'items' in item;
+}
+
+function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
+  const active = pathname === item.href;
+  return (
+    <Link
+      href={item.href}
+      className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+        active
+          ? 'bg-blue-500/15 text-blue-400 font-medium'
+          : 'text-white/60 hover:bg-white/5 hover:text-white/90'
+      }`}
+    >
+      <span className="text-base">{item.icon}</span>
+      {item.label}
+    </Link>
+  );
+}
+
+function NavSection({ group, pathname, expanded, onToggle }: { group: NavGroup; pathname: string; expanded: boolean; onToggle: () => void }) {
+  const hasActive = group.items.some(i => pathname === i.href);
+  return (
+    <div>
+      <button
+        onClick={onToggle}
+        className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm w-full transition-colors ${
+          hasActive ? 'text-blue-400' : 'text-white/50 hover:text-white/80'
+        }`}
+      >
+        <span className="text-base">{group.icon}</span>
+        <span className="flex-1 text-left font-medium">{group.label}</span>
+        <span className={`text-[10px] transition-transform ${expanded ? 'rotate-90' : ''}`}>&#9654;</span>
+      </button>
+      {expanded && (
+        <div className="ml-4 mt-0.5 space-y-0.5 border-l border-white/5 pl-2">
+          {group.items.map(item => (
+            <NavLink key={item.href} item={item} pathname={pathname} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Sidebar() {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
+    const init: Record<string, boolean> = {};
+    for (const item of navGroups) {
+      if (isGroup(item)) init[item.label] = item.defaultOpen ?? false;
+    }
+    return init;
+  });
+
+  // Auto-expand group containing the active route
+  useEffect(() => {
+    for (const item of navGroups) {
+      if (isGroup(item) && item.items.some(i => pathname === i.href)) {
+        setExpanded(prev => ({ ...prev, [item.label]: true }));
+      }
+    }
+  }, [pathname]);
 
   // Close sidebar on navigation
-  useEffect(() => {
-    setIsOpen(false);
-  }, [pathname]);
+  useEffect(() => { setIsOpen(false); }, [pathname]);
 
   // Close on escape key
   useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIsOpen(false);
-    };
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsOpen(false); };
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
   }, []);
+
+  const toggle = (label: string) => setExpanded(prev => ({ ...prev, [label]: !prev[label] }));
 
   const navContent = (
     <>
@@ -63,24 +143,20 @@ export function Sidebar() {
         </div>
       </div>
       <Divider className="mb-4 bg-white/5" />
-      <nav className="space-y-1 flex-1 overflow-y-auto">
-        {navItems.map((item) => {
-          const active = pathname === item.href;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                active
-                  ? 'bg-blue-500/15 text-blue-400 font-medium'
-                  : 'text-white/60 hover:bg-white/5 hover:text-white/90'
-              }`}
-            >
-              <span className="text-base">{item.icon}</span>
-              {item.label}
-            </Link>
-          );
-        })}
+      <nav className="space-y-0.5 flex-1 overflow-y-auto">
+        {navGroups.map((entry) =>
+          isGroup(entry) ? (
+            <NavSection
+              key={entry.label}
+              group={entry}
+              pathname={pathname}
+              expanded={!!expanded[entry.label]}
+              onToggle={() => toggle(entry.label)}
+            />
+          ) : (
+            <NavLink key={entry.href} item={entry} pathname={pathname} />
+          )
+        )}
       </nav>
       <Divider className="my-4 bg-white/5" />
       <div className="text-xs text-white/30 px-3">

@@ -13,7 +13,7 @@
  *   POST /v1/transfer — { source_domain, query } — cross-domain reasoning
  */
 
-const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://brain.oceanicai.io';
+const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
 const SOURCE = 'mtwm';
 
 // Brain tags must be <= 30 chars
@@ -60,7 +60,11 @@ export class BrainClient {
 
   async checkHealth(): Promise<boolean> {
     const r = await brainFetch('/v1/health');
-    this.connected = !!r?.status;
+    // Must be Trident specifically — brain.oceanicai.io is a different server that doesn't persist
+    this.connected = !!(r?.status && (r?.service === 'trident' || r?.database === 'connected'));
+    if (r && !this.connected) {
+      console.error(`[brain] Health responded but NOT Trident (got: ${JSON.stringify(r).slice(0, 100)}). Check BRAIN_SERVER_URL.`);
+    }
     return this.connected;
   }
 
@@ -174,6 +178,7 @@ export class BrainClient {
       method: 'POST',
       body: JSON.stringify({
         source_domain: 'finance',
+        target_domain: 'finance',
         query: `Should MTWM trading desk buy ${ticker} which is up ${percentChange.toFixed(1)}% today? ${context}. This is a momentum day-trading strategy — buy movers at open, sell before close.`,
       }),
     });
@@ -211,6 +216,22 @@ export class BrainClient {
         content: `TRADING RULE: ${rule}`,
         tags: ['rule', 'trading', ruleSource],
         source: `${SOURCE}:rule`,
+      }),
+    });
+  }
+
+  // ── Record research cycle to Trident ────────────────────────────
+
+  async recordResearchCycle(data: { date: string; starsCount: number; topStars: Array<{ symbol: string; sector: string; score: number }>; summary: string; newsHeadlines: string; errors: string[] }): Promise<void> {
+    const topList = data.topStars.slice(0, 5).map(s => `${s.symbol}(${s.score.toFixed(2)})`).join(', ');
+    await brainFetch('/v1/memories', {
+      method: 'POST',
+      body: JSON.stringify({
+        category: 'finance',
+        title: `Research cycle: ${data.starsCount} stars — top: ${topList}`,
+        content: `RESEARCH CYCLE ${data.date}\nStars: ${data.starsCount}\n\nTop picks:\n${data.summary}\n\nBullish headlines:\n${data.newsHeadlines || 'None'}\n\nErrors: ${data.errors.length > 0 ? data.errors.join('; ') : 'None'}`,
+        tags: sanitizeTags(['research', 'cycle', 'stars', ...data.topStars.slice(0, 5).map(s => s.symbol.toLowerCase())]),
+        source: `${SOURCE}:research-worker`,
       }),
     });
   }

@@ -53,6 +53,32 @@ interface HeartbeatResult {
   actions: ActionResult[]; positionCount: number; totalDeployed: number; errors: string[];
 }
 
+// Cache Alpaca clock — refresh every 30 minutes to detect holidays
+let _alpacaClockCache: { isOpen: boolean; checkedAt: number } = { isOpen: false, checkedAt: 0 };
+
+async function checkAlpacaClock(): Promise<boolean | null> {
+  if (Date.now() - _alpacaClockCache.checkedAt < 1_800_000) return _alpacaClockCache.isOpen;
+  try {
+    const creds = loadCredentials();
+    if (!creds.alpaca) return null;
+    const r = await fetch(`${creds.alpaca.baseUrl}/v2/clock`, {
+      headers: { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.ok) {
+      const data = await r.json() as any;
+      const wasOpen = _alpacaClockCache.isOpen;
+      _alpacaClockCache = { isOpen: !!data.is_open, checkedAt: Date.now() };
+      if (!data.is_open) console.log(`[TradeEngine] Alpaca clock: MARKET CLOSED (next open: ${data.next_open})`);
+      else if (!wasOpen) console.log(`[TradeEngine] Alpaca clock: MARKET OPEN`);
+      return data.is_open;
+    }
+  } catch (e: any) {
+    console.error(`[TradeEngine] Alpaca clock check failed: ${e.message}`);
+  }
+  return null;
+}
+
 function getMarketContext() {
   const now = new Date();
   const fmt = (opt: Intl.DateTimeFormatOptions) =>
@@ -61,9 +87,12 @@ function getMarketContext() {
   const etMin = parseInt(fmt({ minute: '2-digit' }));
   const etDay = fmt({ weekday: 'short' });
   const isWeekday = !['Sat', 'Sun'].includes(etDay);
-  const isMarketOpen = isWeekday && ((etHour === 9 && etMin >= 30) || (etHour >= 10 && etHour < 16));
+  // Use Alpaca clock as authority (catches holidays), fall back to time-based
+  const alpacaSaysOpen = _alpacaClockCache.checkedAt > 0 ? _alpacaClockCache.isOpen : null;
+  const timeBased = isWeekday && ((etHour === 9 && etMin >= 30) || (etHour >= 10 && etHour < 16));
+  const isMarketOpen = alpacaSaysOpen !== null ? alpacaSaysOpen : timeBased;
   const isAfterHours = isWeekday && etHour >= 16 && etHour < 20;
-  return { etHour, etMin, etDay, isMarketOpen, isAfterHours };
+  return { etHour, etMin, etDay, isWeekday, isMarketOpen, isAfterHours };
 }
 
 function isCrypto(ticker: string): boolean {
@@ -467,11 +496,14 @@ export class TradeEngine {
 
   private _boughtToday = false;
   private _soldEod = false;
+  private _soldCryptoPremarket = false;
 
   private async heartbeat(): Promise<void> {
     if (this.stopping) return;
     this.hbCount++;
     const t0 = Date.now();
+    // Check Alpaca clock first (catches holidays like Good Friday)
+    await checkAlpacaClock();
     const mkt = getMarketContext();
     const actions: ActionResult[] = [];
     const errors: string[] = [];
@@ -482,6 +514,7 @@ export class TradeEngine {
     if (today !== lastTradeDate) {
       this._boughtToday = false;
       this._soldEod = false;
+      this._soldCryptoPremarket = false;
       // Session sells and recent buys auto-clear via date check in their getters
       this.store.set('trade_engine_last_date', today);
       console.log(`[TradeEngine] New trading day: ${today}`);
@@ -524,7 +557,32 @@ export class TradeEngine {
     try { const r = await this.manageForexPositions(); actions.push(r); if (r.status !== 'skipped') console.log(`  [1] ${r.detail} (${r.durationMs}ms)`); }
     catch (e: any) { errors.push(`manage_positions: ${e.message}`); }
 
-    // 2. EOD SELL — liquidate all equity positions at 3:50 PM ET
+    // 2a. PRE-MARKET CRYPTO LIQUIDATION — sell all crypto by 9:15 AM ET to free capital for equities
+    if (mkt.isWeekday && mkt.etHour === 9 && mkt.etMin >= 15 && mkt.etMin < 30 && !this._soldCryptoPremarket) {
+      this._soldCryptoPremarket = true;
+      try {
+        const creds = loadCredentials();
+        const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
+        const allPos = await this.executor.getPositions();
+        const cryptoPos = allPos.filter(p => isCrypto(p.ticker));
+        if (cryptoPos.length > 0) {
+          console.log(`  [PRE-MARKET] Liquidating ${cryptoPos.length} crypto positions to free capital for equities`);
+          for (const pos of cryptoPos) {
+            try {
+              // Alpaca DELETE /v2/positions uses raw symbol (AVAXUSD), not slash format
+              await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${encodeURIComponent(pos.ticker)}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
+              console.log(`  [PRE-MARKET] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
+              this.store.recordTrade({ ticker: pos.ticker, pnl: pos.unrealizedPnl, direction: 'long', reason: 'premarket_liquidation', openedAt: '', closedAt: new Date().toISOString() });
+              emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'premarket_liquidation' });
+              brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'premarket_liquidation', 'long').catch(() => {});
+            } catch (e: any) { console.log(`  [PRE-MARKET] FAILED ${pos.ticker}: ${e.message}`); }
+          }
+          actions.push({ action: 'premarket_crypto_liquidation', priority: 0, durationMs: Date.now() - t0, status: 'success', detail: `Liquidated ${cryptoPos.length} crypto positions before market open` });
+        }
+      } catch (e: any) { errors.push(`premarket_crypto_liquidation: ${e.message}`); }
+    }
+
+    // 2b. EOD SELL — liquidate all equity positions at 3:50 PM ET
     if (mkt.isMarketOpen && mkt.etHour === 15 && mkt.etMin >= 50 && !this._soldEod) {
       this._soldEod = true;
       try {
@@ -565,6 +623,7 @@ export class TradeEngine {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
     } else if (openSlots > 0 && budgetRemaining > 100 && (mkt.isMarketOpen ? (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30)) : true)) {
       // Equity: market hours only (before 3:30 PM). Crypto: 24/7 via research stars.
+      // IMPORTANT: On holidays (market closed per Alpaca clock), only trade crypto — skip equity
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
@@ -676,16 +735,19 @@ export class TradeEngine {
             }
           }
         } catch {}
-        for (const pt of planTickers) {
-          if (!gainers.some(g => g.symbol === pt)) {
-            try {
-              const snap = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${pt}&feed=iex`, { headers, signal: AbortSignal.timeout(5000) });
-              if (snap.ok) {
-                const sd = await snap.json() as any;
-                const price = sd[pt]?.latestTrade?.p;
-                if (price && price > 5) gainers.unshift({ symbol: pt, price, percent_change: 0 });
-              }
-            } catch {}
+        // Only add morning plan equity tickers when market is actually open
+        if (mkt.isMarketOpen) {
+          for (const pt of planTickers) {
+            if (!gainers.some(g => g.symbol === pt) && !isCrypto(pt)) {
+              try {
+                const snap = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${pt}&feed=iex`, { headers, signal: AbortSignal.timeout(5000) });
+                if (snap.ok) {
+                  const sd = await snap.json() as any;
+                  const price = sd[pt]?.latestTrade?.p;
+                  if (price && price > 5) gainers.unshift({ symbol: pt, price, percent_change: 0 });
+                }
+              } catch {}
+            }
           }
         }
 
@@ -755,8 +817,8 @@ export class TradeEngine {
             if (order.status === 'filled' || order.status === 'pending') {
               spentThisHeartbeat += qty * g.price;
               this._trackBuy(g.symbol);
+              brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
             }
-            brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
           } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
         }
         actions.push({ action: 'buy_movers', priority: 1, durationMs: Date.now() - t0, status: 'success', detail: `Bought movers` });

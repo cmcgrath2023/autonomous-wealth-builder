@@ -291,6 +291,49 @@ app.get('/api/intelligence/metrics', (_req: Request, res: Response) => {
   } catch { res.json({}); }
 });
 
+// Trident / Brain intelligence endpoint — proxies credentials from gateway env
+app.get('/api/intelligence/trident', async (_req: Request, res: Response) => {
+  const brainUrl = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
+  const brainKey = process.env.BRAIN_API_KEY || '';
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (brainKey) headers['Authorization'] = `Bearer ${brainKey}`;
+
+  try {
+    const [healthRes, memRes] = await Promise.allSettled([
+      fetch(`${brainUrl}/v1/health`, { headers, signal: AbortSignal.timeout(5000) }),
+      fetch(`${brainUrl}/v1/memories/search?q=trade+outcome+buy+research&limit=50`, { headers, signal: AbortSignal.timeout(8000) }),
+    ]);
+
+    const health = healthRes.status === 'fulfilled' && healthRes.value.ok ? await healthRes.value.json() : null;
+    const memories = memRes.status === 'fulfilled' && memRes.value.ok ? await memRes.value.json() : [];
+
+    const connected = !!(health?.status && (health.service === 'trident' || health.database === 'connected'));
+
+    // SONA ping for pattern count
+    let sona = { patterns: 0, pareto: 0, memories: 0 };
+    try {
+      const trainRes = await fetch(`${brainUrl}/v1/train`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ input: '__ping__', output: 'status' }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (trainRes.ok) {
+        const d = await trainRes.json() as any;
+        sona = { patterns: d.sona_patterns || 0, pareto: d.pareto_after || 0, memories: d.memory_count || 0 };
+      }
+    } catch {}
+
+    res.json({
+      memories: (Array.isArray(memories) ? memories : []).map((m: any) => ({
+        id: m.id, title: m.title, category: m.category, tags: m.tags || [],
+      })),
+      sona: { connected, tier: health?.tier || (connected ? 'builder' : 'unknown'), ...sona },
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message, memories: [], sona: null });
+  }
+});
+
 // Traits
 app.get('/api/traits', (_req: Request, res: Response) => {
   try {
