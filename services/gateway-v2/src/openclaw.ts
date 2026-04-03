@@ -182,7 +182,7 @@ export class OpenClawEngine {
     // Record OpenClaw activity to Brain every 10 heartbeats
     if (this.heartbeatCount % 10 === 0) {
       const actionsRun = this.activityLog.slice(-5).map(a => `${a.agent}:${a.action} → ${a.result}`).join('; ');
-      brain.recordRule(`OpenClaw heartbeat #${this.heartbeatCount}: ${actionsRun}`, 'openclaw').catch(() => {});
+      // Removed: was spamming Trident with heartbeat logs as fake "trading rules"
     }
 
     if (this.heartbeatCount % 20 === 1) {
