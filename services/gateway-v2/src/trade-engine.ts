@@ -897,6 +897,8 @@ export class TradeEngine {
       } catch (e: any) { errors.push(`check_exits: ${e.message}`); }
 
       // 4b. Trident LoRA exit consultation — ask trained model about remaining positions
+      // RULE: Manual trades (not tracked in _recentBuys) are ONLY auto-sold if losing.
+      // If a manual trade is winning, do NOT sell — owner must be consulted.
       try {
         const currentPos = await this.executor.getPositions();
         for (const pos of currentPos) {
@@ -906,7 +908,14 @@ export class TradeEngine {
           if (pnlPct > -0.02 && pnlPct < 0.05) continue;
 
           const entryTime = this._recentBuys.get(pos.ticker);
+          const isManualTrade = !entryTime; // Not in our buy tracker = manual/external buy
           const holdMinutes = entryTime ? (Date.now() - entryTime) / 60_000 : 120;
+
+          // PROTECT MANUAL TRADES: only auto-sell manual positions if they're losing
+          if (isManualTrade && pnlPct >= 0) {
+            console.log(`  [MANUAL TRADE] ${pos.ticker} +${(pnlPct*100).toFixed(1)}% — manual buy, keeping (owner must approve sale)`);
+            continue;
+          }
 
           try {
             const advice = await brain.shouldSell(pos.ticker, pnlPct, pos.unrealizedPnl, holdMinutes);
