@@ -624,7 +624,8 @@ export class TradeEngine {
       } catch (e: any) { errors.push(`pre_market_crypto: ${e.message}`); }
     }
 
-    // 2b. EOD SELL — liquidate all equity positions at 3:50 PM ET
+    // 2b. EOD SELL — liquidate SYSTEM-BOUGHT equity positions at 3:50 PM ET
+    // MANUAL TRADES: winning manual positions are KEPT overnight. Owner must approve sale.
     if (mkt.isMarketOpen && mkt.etHour === 15 && mkt.etMin >= 50 && !this._soldEod) {
       this._soldEod = true;
       try {
@@ -632,15 +633,30 @@ export class TradeEngine {
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
         const positions = await this.executor.getPositions();
         const equityPos = positions.filter(p => !isCrypto(p.ticker));
+        const recentBuys = this._recentBuys;
+        let soldCount = 0;
+        const keptManual: string[] = [];
         for (const pos of equityPos) {
+          const isSystemBought = recentBuys.has(pos.ticker);
+          const isManualAndWinning = !isSystemBought && pos.unrealizedPnl >= 0;
+
+          // Protect winning manual trades — owner must approve
+          if (isManualAndWinning) {
+            console.log(`  [EOD] KEPT ${pos.ticker} +$${pos.unrealizedPnl.toFixed(2)} — manual trade, owner must approve sale`);
+            keptManual.push(pos.ticker);
+            continue;
+          }
+
           try {
             await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
-            console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
+            console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}${isSystemBought ? '' : ' (manual, losing)'}`);
             emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
             brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'eod_close', 'long').catch(() => {});
+            soldCount++;
           } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
         }
-        actions.push({ action: 'eod_sell', priority: 0, durationMs: Date.now() - t0, status: 'success', detail: `EOD: sold ${equityPos.length} positions` });
+        const detail = `EOD: sold ${soldCount}${keptManual.length > 0 ? `, kept ${keptManual.join(',')} (manual winners)` : ''}`;
+        actions.push({ action: 'eod_sell', priority: 0, durationMs: Date.now() - t0, status: 'success', detail });
       } catch (e: any) { errors.push(`eod_sell: ${e.message}`); }
     }
 
