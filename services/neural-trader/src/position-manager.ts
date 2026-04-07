@@ -135,17 +135,29 @@ export class PositionManager {
       return actions;
     }
 
-    // ── EXIT LOGIC — Crypto vs Equity thresholds ──
+    // ── EXIT LOGIC — Crypto vs Equity vs Resilient thresholds ──
     // Crypto: -5% SL / +10% TP (volatile, cut faster, bank sooner)
     // Equity: -7% SL / +15% TP (room for intraday swings, let day-trend run)
-    const maxDailyLoss = 500;
+    // Resilient: -10% SL / +20% TP (proven sectors, hold through volatility)
+    const maxDailyLoss = 1000;
+
+    // Resilient sectors — wider thresholds, hold through dips
+    const resilientTickers = new Set([
+      'LMT','RTX','NOC','GD','BA','KTOS','HII','LHX',
+      'UNH','JNJ','PFE','ABBV','MRK','LLY','CVS','HUM','CI','ELV','CNC','MOH',
+      'NEE','DUK','SO','D','AEP','XEL','ED',
+      'PG','KO','PEP','WMT','COST','CL','GIS','K',
+      'CAT','DE','URI','VMC','MLM','PWR',
+      'GLD','SLV','GDX','NEM','GOLD','AEM',
+    ]);
 
     for (const pos of positions) {
       const pnlPct = pos.unrealizedPnlPercent / 100;
       const ticker = pos.ticker;
       const tickerIsCrypto = ticker.includes('USD') && ticker.length > 5;
-      const sl = tickerIsCrypto ? 0.05 : 0.07;
-      const tp = tickerIsCrypto ? 0.10 : 0.15;
+      const tickerIsResilient = resilientTickers.has(ticker);
+      const sl = tickerIsCrypto ? 0.05 : tickerIsResilient ? 0.10 : 0.07;
+      const tp = tickerIsCrypto ? 0.10 : tickerIsResilient ? 0.20 : 0.15;
 
       // Track entry time
       if (!this.entryTimes.has(ticker)) {
@@ -170,7 +182,8 @@ export class PositionManager {
 
       // HOLD — log status only
       const status = pnlPct >= 0 ? `+${(pnlPct*100).toFixed(1)}%` : `${(pnlPct*100).toFixed(1)}%`;
-      console.log(`[HOLD] ${ticker} ${status} ($${pos.unrealizedPnl.toFixed(2)}) [${tickerIsCrypto ? 'crypto' : 'equity'} SL:-${(sl*100).toFixed(0)}%/TP:+${(tp*100).toFixed(0)}%]`);
+      const tierLabel = tickerIsCrypto ? 'crypto' : tickerIsResilient ? 'RESILIENT' : 'equity';
+      console.log(`[HOLD] ${ticker} ${status} ($${pos.unrealizedPnl.toFixed(2)}) [${tierLabel} SL:-${(sl*100).toFixed(0)}%/TP:+${(tp*100).toFixed(0)}%]`);
     }
 
     // Circuit breaker: $500 daily loss limit

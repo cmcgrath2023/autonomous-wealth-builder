@@ -3,8 +3,8 @@
 ## Trading Panic Protocol (ALWAYS CHECK BEFORE ANY TRADE)
 
 ### Alpaca (US Equities + Crypto)
-- Max 6 positions. Count BEFORE buying.
-- Budget: $8K deployed max (2x margin on $4K). Check total deployed BEFORE every order.
+- Max 10 positions. Count BEFORE buying.
+- Budget: $25K deployed max. Check total deployed BEFORE every order.
 - SL dominance >70% → HALT all new entries
 - Only trade what Bayesian intelligence supports (prefer/avoid lists)
 - Catalysts required — no random momentum buys

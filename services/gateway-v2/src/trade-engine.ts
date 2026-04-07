@@ -44,12 +44,33 @@ function emitTradeClosed(payload: { ticker: string; success: boolean; returnPct:
 }
 
 const HEARTBEAT_MS = 120_000;
-const MAX_POSITIONS = 6;
-const BUDGET_MAX = 8_000;
-const DAILY_LOSS_LIMIT = -500; // Hard circuit breaker — halt everything if day P&L exceeds this
+const MAX_POSITIONS = 10;
+const BUDGET_MAX = 25_000;
+const DAILY_LOSS_LIMIT = -1_000; // Hard circuit breaker — scaled with $25K budget
 const FOREX_BANK = 50;
 const FOREX_CUT = -20;
 const SL_DOMINANCE_HALT = 0.70;
+
+// Resilient sectors/stocks — hold longer during volatility, wider SL thresholds
+// These have historically shown strength in downturns, tariff wars, and macro shocks
+const RESILIENT_TICKERS = new Set([
+  // Defense/Aerospace — government contracts, tariff-immune
+  'LMT', 'RTX', 'NOC', 'GD', 'BA', 'KTOS', 'HII', 'LHX',
+  // Healthcare — essential spending, policy tailwinds
+  'UNH', 'JNJ', 'PFE', 'ABBV', 'MRK', 'LLY', 'CVS', 'HUM', 'CI', 'ELV', 'CNC', 'MOH',
+  // Utilities — recession-proof, dividend
+  'NEE', 'DUK', 'SO', 'D', 'AEP', 'XEL', 'ED',
+  // Consumer staples — people still eat and clean
+  'PG', 'KO', 'PEP', 'WMT', 'COST', 'CL', 'GIS', 'K',
+  // Infrastructure/Industrial — reshoring, capex cycle
+  'CAT', 'DE', 'URI', 'VMC', 'MLM', 'PWR',
+  // Gold/commodities — inflation hedge
+  'GLD', 'SLV', 'GDX', 'NEM', 'GOLD', 'AEM',
+]);
+
+function isResilient(ticker: string): boolean {
+  return RESILIENT_TICKERS.has(ticker.replace(/-.*$/, '').toUpperCase());
+}
 
 interface ActionResult {
   action: string; priority: number; durationMs: number;
@@ -919,9 +940,11 @@ export class TradeEngine {
         const currentPos = await this.executor.getPositions();
         for (const pos of currentPos) {
           const pnlPct = pos.unrealizedPnlPercent / 100;
-          // Only consult Trident for positions in the danger zone (-2% to -5%) or holding gains (+5%+)
-          // Don't waste API calls on positions near breakeven
-          if (pnlPct > -0.02 && pnlPct < 0.05) continue;
+          // Resilient stocks get a wider hold zone — don't even consult Trident unless deep in trouble
+          const resilientStock = isResilient(pos.ticker);
+          const dangerFloor = resilientStock ? -0.05 : -0.02; // Resilient: only consult at -5%+
+          const gainCeiling = resilientStock ? 0.10 : 0.05;   // Resilient: hold gains longer
+          if (pnlPct > dangerFloor && pnlPct < gainCeiling) continue;
 
           const entryTime = this._recentBuys.get(pos.ticker);
           const isManualTrade = !entryTime; // Not in our buy tracker = manual/external buy
