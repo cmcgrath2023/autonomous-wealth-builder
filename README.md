@@ -116,6 +116,43 @@ Raw Signal (0.72) → Bayesian Adjustment (ticker prior: 0.85) → Pattern Boost
 (AgentDB: proven pattern found) → Final Confidence (0.76) → Execute if >= 0.60
 ```
 
+### Trident LoRA Integration (AI-Driven Buy/Sell Decisions)
+
+Every trade decision is gated by [Trident](https://trident.cetaceanlabs.com) — a LoRA-fine-tuned reasoning engine trained on MTWM's actual trade history via SONA (Self-Optimizing Neural Architecture).
+
+**Training loop (automatic):**
+```
+Trade closes → brain.recordTradeClose() → Trident memory
+  → Bayesian beliefs synced to SONA every 5 min
+  → LoRA weights update continuously (currently epoch 123+, 8,000+ patterns)
+```
+
+**Buy decision pipeline (6 gates):**
+
+| Gate | System | What It Does |
+|------|--------|-------------|
+| 1 | Research Stars | Score candidates from movers/most-actives/crypto |
+| 2 | Brain History | `getTickerHistory()` — win/loss record per ticker |
+| 3 | Bayesian Prior | Posterior adjustment from cross-agent belief sharing |
+| 4 | **Trident LoRA** | `shouldBuy()` — LoRA-trained reasoning on whether to enter |
+| 5 | Neural Trader | RSI/EMA/BB technical confirmation on 15-min bars |
+| 6 | Panic Protocol | Position count, budget, SL dominance checks |
+
+**Exit decision pipeline (3 layers):**
+
+| Layer | System | What It Does |
+|-------|--------|-------------|
+| 1 | Static SL/TP | Safety net — crypto -5%, equity -7% stop loss |
+| 2 | **Trident LoRA** | `shouldSell()` — LoRA-trained reasoning on hold vs cut |
+| 3 | EOD / Pre-market | Equity liquidation at 3:50 PM, losing crypto pre-market |
+
+**Trident capabilities used:**
+- `POST /v1/transfer` — Cross-domain reasoning with LoRA-trained weights
+- `POST /v1/train` — SONA training from Bayesian belief updates
+- `POST /v1/memories` — Trade outcome storage for pattern learning
+- `GET /v1/memories/search` — Ticker history retrieval
+- LoRA weights: rank-2 adapters, 128 hidden dims, federated sync
+
 ### Trait Engine (Per-Ticker Bayesian Modeling)
 
 ```

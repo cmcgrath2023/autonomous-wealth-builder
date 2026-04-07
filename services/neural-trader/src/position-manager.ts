@@ -27,9 +27,9 @@ export interface ClosedTrade {
 }
 
 const DEFAULT_RULES: PositionRules = {
-  stopLossPct: 0.07,        // 7% stop — room for volatile movers
-  takeProfitPct: 0.15,       // 15% take profit — let big movers run
-  trailingStopPct: 0.07,     // 7% trailing — match stop loss
+  stopLossPct: 0.10,        // 10% stop — wide, room to breathe
+  takeProfitPct: 0.20,       // 20% take profit — let winners run
+  trailingStopPct: 0.10,     // unused — kept for interface compat
   maxDailyLossPct: 0.05,     // 5% max daily loss
 };
 
@@ -119,7 +119,6 @@ export class PositionManager {
 
   async checkPositions(executor: TradeExecutor): Promise<string[]> {
     const positions = await executor.getPositions();
-    const account = await executor.getAccount();
     const actions: string[] = [];
 
     // Reset daily P&L tracking
@@ -130,107 +129,54 @@ export class PositionManager {
       this.circuitBreakerTripped = false;
     }
 
-    // Check circuit breaker
+    // Circuit breaker active — no exits, no new trades
     if (this.circuitBreakerTripped) {
       actions.push('Circuit breaker active — no new trades until tomorrow');
       return actions;
     }
 
-    // Calculate daily goal pressure for this cycle
-    const pressure = this.calculatePressure();
-    const thresholds = this.getPressureThresholds(pressure);
-
-    // Circuit breaker: $500 daily loss limit (matches trade-engine DAILY_LOSS_LIMIT)
+    // ── EXIT LOGIC — Crypto vs Equity thresholds ──
+    // Crypto: -5% SL / +10% TP (volatile, cut faster, bank sooner)
+    // Equity: -7% SL / +15% TP (room for intraday swings, let day-trend run)
     const maxDailyLoss = 500;
 
     for (const pos of positions) {
       const pnlPct = pos.unrealizedPnlPercent / 100;
       const ticker = pos.ticker;
+      const tickerIsCrypto = ticker.includes('USD') && ticker.length > 5;
+      const sl = tickerIsCrypto ? 0.05 : 0.07;
+      const tp = tickerIsCrypto ? 0.10 : 0.15;
 
       // Track entry time
       if (!this.entryTimes.has(ticker)) {
         this.entryTimes.set(ticker, Date.now());
       }
 
-      // Update peak price for trailing stop
-      const currentPeak = this.peakPrices.get(ticker) || pos.avgPrice;
-      if (pos.currentPrice > currentPeak) {
-        this.peakPrices.set(ticker, pos.currentPrice);
-      }
-      const peak = this.peakPrices.get(ticker) || pos.currentPrice;
-
-      // Check stop-loss
-      if (pnlPct <= -this.rules.stopLossPct) {
+      // STOP LOSS
+      if (pnlPct <= -sl) {
+        console.log(`[EXIT] ${ticker} ${(pnlPct*100).toFixed(1)}% — stop loss at -${(sl*100).toFixed(0)}% (${tickerIsCrypto ? 'crypto' : 'equity'})`);
         const result = await this.closePosition(executor, pos, 'stop_loss');
         if (result) actions.push(result);
         continue;
       }
 
-      const isCryptoPos = ticker.includes('USD') && ticker.length > 5;
-
-      // ── Crypto exit logic ──
-      if (isCryptoPos) {
-        if (pnlPct > 0) {
-          // Micro-bank: at high pressure, bank any crypto position with $10+ unrealized gain
-          if (pos.unrealizedPnl >= thresholds.microBankMin) {
-            console.log(`[GoalBank] ${ticker} +$${pos.unrealizedPnl.toFixed(2)} — micro-bank (pressure=${pressure.toFixed(2)}, daily=$${this.dailyPnl.toFixed(2)}/${this.goalConfig.targetDailyPnl})`);
-            const result = await this.closePosition(executor, pos, 'daily_goal_bank');
-            if (result) actions.push(result);
-            continue;
-          }
-
-          // Hard cap (pressure-adjusted: 10% at no pressure, 4% at max)
-          if (pnlPct >= thresholds.cryptoHardCap) {
-            console.log(`[CryptoScalp] ${ticker} +${(pnlPct*100).toFixed(1)}% — hard cap (${(thresholds.cryptoHardCap*100).toFixed(0)}%), banking gains`);
-            const result = await this.closePosition(executor, pos, 'take_profit');
-            if (result) actions.push(result);
-            continue;
-          }
-
-          // Trailing stop (pressure-adjusted activation and width)
-          if (pnlPct >= thresholds.cryptoTrailActivation) {
-            const dropFromPeak = peak > pos.avgPrice ? (peak - pos.currentPrice) / peak : 0;
-            const trailWidth = pnlPct >= thresholds.cryptoHighGainThreshold
-              ? thresholds.cryptoTrailHigh
-              : thresholds.cryptoTrailLow;
-
-            if (dropFromPeak >= trailWidth) {
-              console.log(`[CryptoScalp] ${ticker} +${(pnlPct*100).toFixed(1)}% — trailing stop hit (${(dropFromPeak*100).toFixed(1)}% off peak, trail=${(trailWidth*100).toFixed(1)}%, pressure=${pressure.toFixed(2)})`);
-              const result = await this.closePosition(executor, pos, 'trailing_stop');
-              if (result) actions.push(result);
-              continue;
-            }
-          }
-        } else {
-          // Crypto LOSING — apply stop loss (same 3% as equity)
-          // Don't let crypto bleed without a stop just because it's below water
-          console.log(`[CryptoWatch] ${ticker} ${(pnlPct*100).toFixed(2)}% — monitoring (stop at -${(this.rules.stopLossPct*100).toFixed(0)}%)`);
-        }
-        continue; // Skip equity logic for crypto
+      // TAKE PROFIT
+      if (pnlPct >= tp) {
+        console.log(`[EXIT] ${ticker} +${(pnlPct*100).toFixed(1)}% — take profit at +${(tp*100).toFixed(0)}% (${tickerIsCrypto ? 'crypto' : 'equity'})`);
+        const result = await this.closePosition(executor, pos, 'take_profit');
+        if (result) actions.push(result);
+        continue;
       }
 
-      // ── Equity exit logic ──
-      // Strategy: buy at open, hold all day, sell at EOD (3:50 PM ET).
-      // Only mid-day exit on STOP LOSS. No mid-day take profit.
-      // If trending up, let winners run. EOD sell banks all gains.
-      // Trailing stop only activates on severe reversal (>8% drop from peak).
-
-      if (peak > pos.avgPrice) {
-        const dropFromPeak = (peak - pos.currentPrice) / peak;
-        // Only trail if drop from peak exceeds the stop loss % — severe reversal
-        if (dropFromPeak >= this.rules.stopLossPct) {
-          console.log(`[TrailingStop] ${ticker} dropped ${(dropFromPeak*100).toFixed(1)}% from peak — closing`);
-          const result = await this.closePosition(executor, pos, 'trailing_stop');
-          if (result) actions.push(result);
-          continue;
-        }
-      }
+      // HOLD — log status only
+      const status = pnlPct >= 0 ? `+${(pnlPct*100).toFixed(1)}%` : `${(pnlPct*100).toFixed(1)}%`;
+      console.log(`[HOLD] ${ticker} ${status} ($${pos.unrealizedPnl.toFixed(2)}) [${tickerIsCrypto ? 'crypto' : 'equity'} SL:-${(sl*100).toFixed(0)}%/TP:+${(tp*100).toFixed(0)}%]`);
     }
 
-    // Check daily loss circuit breaker
+    // Circuit breaker: $500 daily loss limit
     if (this.dailyPnl < -maxDailyLoss) {
       this.circuitBreakerTripped = true;
-      actions.push(`CIRCUIT BREAKER: daily loss $${Math.abs(this.dailyPnl).toFixed(2)} exceeds ${(this.rules.maxDailyLossPct * 100)}% limit`);
+      actions.push(`CIRCUIT BREAKER: daily loss $${Math.abs(this.dailyPnl).toFixed(2)} exceeds $${maxDailyLoss} limit`);
       eventBus.emit('risk:alert', {
         metric: 'daily_loss',
         value: this.dailyPnl,

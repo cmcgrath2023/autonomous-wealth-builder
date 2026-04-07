@@ -595,6 +595,22 @@ export class BayesianIntelligence {
     };
   }
 
+  /** Serialize belief state for IPC transfer across process boundaries */
+  serialize(): { beliefs: [string, BayesianBelief][] } {
+    return { beliefs: Array.from(this.beliefs.entries()) };
+  }
+
+  /** Reconstruct from serialized beliefs (IPC from parent) */
+  static fromSerialized(data: { beliefs: [string, BayesianBelief][] }): BayesianIntelligence {
+    const instance = new BayesianIntelligence();
+    if (data.beliefs) {
+      for (const [id, belief] of data.beliefs) {
+        instance.beliefs.set(id, belief);
+      }
+    }
+    return instance;
+  }
+
   /** Serialize for persistence */
   toJSON(): { beliefs: [string, BayesianBelief][]; insightLog: AgentInsight[]; learningSnapshots?: any[]; predictionLog?: any[]; cumulativeRegret?: number } {
     return {

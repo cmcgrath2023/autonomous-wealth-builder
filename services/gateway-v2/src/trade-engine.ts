@@ -25,9 +25,17 @@ import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 
-// Shared Bayesian instance — populated by gateway index.ts via eventBus
+// Shared Bayesian instance — populated via IPC from parent process
 let _bayesian: BayesianIntelligence | null = null;
 eventBus.on('intelligence:ready' as any, (bi: BayesianIntelligence) => { _bayesian = bi; });
+
+// IPC handler: receive belief updates from orchestrator (index.ts)
+process.on('message', (msg: any) => {
+  if (msg?.type === 'intelligence:beliefs' && msg.beliefs) {
+    _bayesian = BayesianIntelligence.fromSerialized(msg.beliefs);
+    console.log(`[TradeEngine] Intelligence updated via IPC: ${msg.beliefs.beliefs?.length || 0} beliefs`);
+  }
+});
 
 // Forward trade:closed to parent process via IPC (Bayesian + Brain learning)
 function emitTradeClosed(payload: { ticker: string; success: boolean; returnPct: number; reason: string }) {
@@ -418,27 +426,59 @@ export class TradeEngine {
       if (stars.length > 0) console.log(`  [scan] ${stars.length} stars, ${eligibleStars.length} eligible, owned: ${[...owned].join(',')}, market: ${mkt.isMarketOpen ? 'open' : 'closed'}`);
 
       for (const star of eligibleStars) {
+        // Gate 1: Session sells — don't rebuy anything we or the user sold today
+        if (this._sessionSells.has(star.symbol)) { details.push(`SKIP ${star.symbol} — sold this session`); continue; }
+
+        // Gate 2: Position limits and budget
         const fresh = await this.executor.getPositions();
         if (budgetPositionCount(fresh, mkt.isMarketOpen) >= maxPos) { details.push('Max positions — done'); break; }
         const deployed = totalDeployed(fresh, mkt.isMarketOpen);
         if (deployed >= budget) { details.push('Budget full — done'); break; }
 
-        // FIX 1: Bayesian filter — adjustSignalConfidence before every buy
+        // Gate 3: Brain/Trident history check — reject tickers with poor win/loss record
+        try {
+          const history = await brain.getTickerHistory(star.symbol);
+          if (history.shouldAvoid) {
+            details.push(`SKIP ${star.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
+            continue;
+          }
+        } catch {}
+
+        // Gate 4: Bayesian intelligence — reject tickers with poor history
         let adjustedScore = star.score;
         if (_bayesian) {
           adjustedScore = _bayesian.adjustSignalConfidence(star.symbol, star.score, 'buy');
           const prior = _bayesian.getTickerPrior(star.symbol);
-          // Hard reject: if Bayesian has enough data and posterior < 0.35, skip this ticker
-          if (prior.observations >= 5 && prior.posterior < 0.35) {
-            details.push(`SKIP ${star.symbol} — Bayesian reject (${(prior.posterior*100).toFixed(0)}% win rate, ${prior.observations} obs)`);
+          // Reject: if Bayesian has 3+ observations and win rate < 40%, skip
+          if (prior.observations >= 3 && prior.posterior < 0.40) {
+            details.push(`SKIP ${star.symbol} — intelligence reject (${(prior.posterior*100).toFixed(0)}% win, ${prior.observations} obs)`);
             continue;
+          }
+          // Boost: if Bayesian says >70% win rate, increase confidence
+          if (prior.observations >= 3 && prior.posterior > 0.70) {
+            adjustedScore = Math.min(adjustedScore * 1.1, 0.99);
           }
         }
 
-        // FIX 2: Use MinCut allocations for position sizing
+        // Gate 5: Minimum confidence after intelligence adjustment
+        if (adjustedScore < 0.60) {
+          details.push(`SKIP ${star.symbol} — low confidence (${adjustedScore.toFixed(2)})`);
+          continue;
+        }
+
+        // Gate 6: Trident LoRA reasoning — ask trained model if this is a good buy
+        try {
+          const tridentAdvice = await brain.shouldBuy(star.symbol, star.score * 10, `score=${adjustedScore.toFixed(2)}, research_star`);
+          if (!tridentAdvice.should) {
+            details.push(`SKIP ${star.symbol} — Trident says no: ${tridentAdvice.reason.slice(0, 80)}`);
+            continue;
+          }
+          details.push(`${star.symbol} Trident OK: ${tridentAdvice.reason.slice(0, 60)}`);
+        } catch {}
+
+        // Position sizing: 20% of remaining budget per position, max $1400
         const remaining = budget - deployed;
-        const riskPct = this._lastStrategy?.riskBudget ?? 100;
-        const size = Math.min(remaining * 0.20 * (riskPct / 100), this._lastStrategy?.takeProfitTarget ? 1400 : 1400);
+        const size = Math.min(remaining * 0.20, 1400);
         if (size < 50) continue;
 
         try {
@@ -454,14 +494,14 @@ export class TradeEngine {
             direction: 'buy' as const, confidence: adjustedScore, timeframe: '1h' as const,
             indicators: {}, pattern: 'research_star', timestamp: new Date(), source: 'momentum' as const,
           };
-          // Don't rebuy tickers we already sold this session
-          if (this._sessionSells.has(star.symbol)) { details.push(`SKIP ${star.symbol} — sold this session`); continue; }
 
           const order = await this.executor.execute(signal, qty, size);
-          details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}${adjustedScore !== star.score ? ` (adj: ${adjustedScore.toFixed(2)})` : ''}`);
+          details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}${adjustedScore !== star.score ? ` (intel: ${adjustedScore.toFixed(2)})` : ''}`);
           if (order.status === 'filled' || order.status === 'pending') {
             owned.add(star.symbol);
             this._trackBuy(star.symbol);
+            // Record to brain for learning
+            brain.recordBuy(star.symbol, qty, price, `research_star score=${adjustedScore.toFixed(2)}`).catch(() => {});
           }
         } catch (e: any) { details.push(`${star.symbol}: ${e.message}`); }
       }
@@ -557,29 +597,31 @@ export class TradeEngine {
     try { const r = await this.manageForexPositions(); actions.push(r); if (r.status !== 'skipped') console.log(`  [1] ${r.detail} (${r.durationMs}ms)`); }
     catch (e: any) { errors.push(`manage_positions: ${e.message}`); }
 
-    // 2a. PRE-MARKET CRYPTO LIQUIDATION — sell all crypto by 9:15 AM ET to free capital for equities
-    if (mkt.isWeekday && mkt.etHour === 9 && mkt.etMin >= 15 && mkt.etMin < 30 && !this._soldCryptoPremarket) {
-      this._soldCryptoPremarket = true;
+    // 2a. PRE-MARKET CRYPTO LIQUIDATION — Smart: only sell LOSING crypto before market open to free capital for equities
+    if (mkt.isWeekday && mkt.etHour >= 8 && mkt.etHour < 9 && !this._soldCryptoPremarket) {
       try {
-        const creds = loadCredentials();
-        const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
-        const allPos = await this.executor.getPositions();
-        const cryptoPos = allPos.filter(p => isCrypto(p.ticker));
-        if (cryptoPos.length > 0) {
-          console.log(`  [PRE-MARKET] Liquidating ${cryptoPos.length} crypto positions to free capital for equities`);
-          for (const pos of cryptoPos) {
+        const preMarketPos = await this.executor.getPositions();
+        const cryptoPositions = preMarketPos.filter(p => isCrypto(p.ticker));
+        const losingCrypto = cryptoPositions.filter(p => p.unrealizedPnl < 0);
+        const winningCrypto = cryptoPositions.filter(p => p.unrealizedPnl >= 0);
+        if (losingCrypto.length > 0) {
+          this._soldCryptoPremarket = true;
+          const creds = loadCredentials();
+          const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
+          for (const pos of losingCrypto) {
             try {
-              // Alpaca DELETE /v2/positions uses raw symbol (AVAXUSD), not slash format
               await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${encodeURIComponent(pos.ticker)}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
-              console.log(`  [PRE-MARKET] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
-              this.store.recordTrade({ ticker: pos.ticker, pnl: pos.unrealizedPnl, direction: 'long', reason: 'premarket_liquidation', openedAt: '', closedAt: new Date().toISOString() });
-              emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'premarket_liquidation' });
-              brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'premarket_liquidation', 'long').catch(() => {});
+              console.log(`  [PRE-MARKET] SOLD losing crypto ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
+              emitTradeClosed({ ticker: pos.ticker, success: false, returnPct: pos.unrealizedPnlPercent / 100, reason: 'pre_market_liquidation' });
+              brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'pre_market_liquidation', 'long').catch(() => {});
             } catch (e: any) { console.log(`  [PRE-MARKET] FAILED ${pos.ticker}: ${e.message}`); }
           }
-          actions.push({ action: 'premarket_crypto_liquidation', priority: 0, durationMs: Date.now() - t0, status: 'success', detail: `Liquidated ${cryptoPos.length} crypto positions before market open` });
+          if (winningCrypto.length > 0) {
+            console.log(`  [PRE-MARKET] KEPT ${winningCrypto.length} winning crypto: ${winningCrypto.map(p => `${p.ticker} +$${p.unrealizedPnl.toFixed(2)}`).join(', ')}`);
+          }
+          actions.push({ action: 'pre_market_crypto', priority: 0, durationMs: Date.now() - t0, status: 'success', detail: `Sold ${losingCrypto.length} losing crypto, kept ${winningCrypto.length} winners` });
         }
-      } catch (e: any) { errors.push(`premarket_crypto_liquidation: ${e.message}`); }
+      } catch (e: any) { errors.push(`pre_market_crypto: ${e.message}`); }
     }
 
     // 2b. EOD SELL — liquidate all equity positions at 3:50 PM ET
@@ -610,6 +652,17 @@ export class TradeEngine {
     const eqSlDominance = equityTrades.length > 0 ? eqSlCount / equityTrades.length : 0;
 
     const positions = await this.executor.getPositions();
+
+    // DETECT MANUAL LIQUIDATIONS: if we bought something and it's no longer a position, user closed it manually — do NOT rebuy
+    const currentTickers = new Set(positions.map(p => p.ticker));
+    const recentBuys = this._recentBuys;
+    for (const [ticker] of recentBuys) {
+      if (!currentTickers.has(ticker) && !this._sessionSells.has(ticker)) {
+        console.log(`  [MANUAL CLOSE DETECTED] ${ticker} was bought but no longer a position — blocking rebuy`);
+        this._addSessionSell(ticker);
+      }
+    }
+
     const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
     const openSlots = MAX_POSITIONS - equityCount;
     const totalDeployedNow = positions.reduce((s, p) => s + Math.abs(p.marketValue || p.costBasis || 0), 0);
@@ -805,6 +858,16 @@ export class TradeEngine {
               } catch {}
             }
 
+            // Trident LoRA reasoning — ask trained model before buying
+            try {
+              const tridentAdvice = await brain.shouldBuy(g.symbol, g.percent_change, `top_mover +${g.percent_change.toFixed(1)}%`);
+              if (!tridentAdvice.should) {
+                console.log(`  [BUY] SKIP ${g.symbol} — Trident LoRA: ${tridentAdvice.reason.slice(0, 80)}`);
+                continue;
+              }
+              console.log(`  [BUY] ${g.symbol} Trident OK: ${tridentAdvice.reason.slice(0, 60)}`);
+            } catch {}
+
             const qty = Math.floor(perPosition / g.price);
             if (qty <= 0) continue;
             const signal = {
@@ -832,6 +895,42 @@ export class TradeEngine {
         actions.push(r);
         if (r.status !== 'skipped') console.log(`  [EXITS] ${r.detail} (${r.durationMs}ms)`);
       } catch (e: any) { errors.push(`check_exits: ${e.message}`); }
+
+      // 4b. Trident LoRA exit consultation — ask trained model about remaining positions
+      try {
+        const currentPos = await this.executor.getPositions();
+        for (const pos of currentPos) {
+          const pnlPct = pos.unrealizedPnlPercent / 100;
+          // Only consult Trident for positions in the danger zone (-2% to -5%) or holding gains (+5%+)
+          // Don't waste API calls on positions near breakeven
+          if (pnlPct > -0.02 && pnlPct < 0.05) continue;
+
+          const entryTime = this._recentBuys.get(pos.ticker);
+          const holdMinutes = entryTime ? (Date.now() - entryTime) / 60_000 : 120;
+
+          try {
+            const advice = await brain.shouldSell(pos.ticker, pnlPct, pos.unrealizedPnl, holdMinutes);
+            if (advice.should) {
+              console.log(`  [TRIDENT EXIT] ${pos.ticker} ${(pnlPct*100).toFixed(1)}% — LoRA says sell: ${advice.reason.slice(0, 80)}`);
+              const sellSymbol = isCrypto(pos.ticker) ? pos.ticker.replace(/USD$/, '/USD') : pos.ticker;
+              const tif = isCrypto(pos.ticker) ? 'gtc' : 'day';
+              const creds = loadCredentials();
+              const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret, 'Content-Type': 'application/json' };
+              await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
+                method: 'POST', headers,
+                body: JSON.stringify({ symbol: sellSymbol, qty: String(Math.abs(pos.shares)), side: 'sell', type: 'market', time_in_force: tif }),
+                signal: AbortSignal.timeout(10_000),
+              });
+              emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pnlPct, reason: 'trident_exit' });
+              brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pnlPct, 'trident_exit', 'long').catch(() => {});
+              this._addSessionSell(pos.ticker);
+              actions.push({ action: 'trident_exit', priority: 2, durationMs: 0, status: pos.unrealizedPnl > 0 ? 'success' : 'error', detail: `Trident EXIT ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)}: ${advice.reason.slice(0, 60)}` });
+            } else {
+              console.log(`  [TRIDENT HOLD] ${pos.ticker} ${(pnlPct*100).toFixed(1)}% — LoRA says hold: ${advice.reason.slice(0, 60)}`);
+            }
+          } catch {}
+        }
+      } catch (e: any) { console.log(`  [TRIDENT EXIT] Error: ${e.message}`); }
 
       // Monitor
       if (this.hbCount % 5 === 0) {

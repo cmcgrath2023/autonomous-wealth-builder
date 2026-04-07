@@ -190,6 +190,25 @@ export class BrainClient {
     return { should: !isNegative, reason: response.substring(0, 200) };
   }
 
+  // ── Reasoning — ask Brain whether to SELL a position ─────────────
+
+  async shouldSell(ticker: string, pnlPct: number, pnlDollars: number, holdTimeMinutes: number): Promise<{ should: boolean; reason: string }> {
+    const r = await brainFetch('/v1/transfer', {
+      method: 'POST',
+      body: JSON.stringify({
+        source_domain: 'finance',
+        target_domain: 'finance',
+        query: `Should MTWM trading desk sell ${ticker}? Current P&L: ${(pnlPct * 100).toFixed(1)}% ($${pnlDollars.toFixed(2)}). Held for ${holdTimeMinutes.toFixed(0)} minutes. Consider learned patterns from past trades on this ticker and similar tickers. Is the position likely to recover or deteriorate further?`,
+      }),
+    });
+
+    if (!r?.response) return { should: false, reason: 'Brain unavailable — default hold' };
+
+    const response = typeof r.response === 'string' ? r.response : JSON.stringify(r.response);
+    const isSellSignal = /sell|exit|close|cut|dump|take profit|lock in|deteriorat/i.test(response);
+    return { should: isSellSignal, reason: response.substring(0, 200) };
+  }
+
   // ── Record daily summary ───────────────────────────────────────────
 
   async recordDailySummary(date: string, pnl: number, trades: number, winners: number, losers: number): Promise<void> {

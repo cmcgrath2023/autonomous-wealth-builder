@@ -242,6 +242,9 @@ async function main(): Promise<void> {
     } catch (e: any) { log(`Bayesian seed from Brain failed: ${e.message} — starting fresh`); }
   }
 
+  // Emit intelligence:ready for in-process listeners
+  eventBus.emit('intelligence:ready' as any, bayesianIntel);
+
   // Expose Bayesian intel on the status endpoint via config keys
   const origGet = stateStore.get.bind(stateStore);
   (stateStore as any).get = (key: string) => {
@@ -355,6 +358,23 @@ async function main(): Promise<void> {
     workers.push(state);
     spawnWorker(state);
   }
+
+  // Push initial Bayesian beliefs to trade-engine worker via IPC
+  const sendBeliefsToTradeEngine = () => {
+    const tradeWorker = workers.find(w => w.config.name === 'trade-engine');
+    if (tradeWorker?.process?.connected) {
+      try {
+        tradeWorker.process.send({ type: 'intelligence:beliefs', beliefs: bayesianIntel.serialize() });
+      } catch {}
+    }
+  };
+  // Send after a short delay to let worker initialize
+  setTimeout(sendBeliefsToTradeEngine, 3000);
+
+  // Push updated beliefs to trade-engine on every trade:closed (keeps intelligence fresh)
+  eventBus.on('trade:closed' as any, () => {
+    sendBeliefsToTradeEngine();
+  });
 
   log(`Orchestrator ready — ${workers.length} worker(s) spawned`);
 }
