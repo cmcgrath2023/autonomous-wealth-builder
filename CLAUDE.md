@@ -2,29 +2,59 @@
 
 ## Trading Panic Protocol (ALWAYS CHECK BEFORE ANY TRADE)
 
-### Alpaca (US Equities + Crypto)
+### Alpaca (US Equities)
 - Max 10 positions. Count BEFORE buying.
 - Budget: $25K deployed max. Check total deployed BEFORE every order.
+- Minimum stock price: $10 — NO penny stocks
+- Max 1 buy per ticker per day — NO churn
+- Crypto buys: DISABLED (re-enable when market recovers)
 - SL dominance >70% → HALT all new entries
-- Only trade what Bayesian intelligence supports (prefer/avoid lists)
-- Catalysts required — no random momentum buys
+- Circuit breaker: -$1,000 daily loss limit
+
+### Buy Gates (all must pass)
+1. Anti-churn — not already bought today
+2. Session sells — not sold by owner today
+3. Brain history — `getTickerHistory()` win/loss check
+4. Bayesian posterior — reject <40% win rate (3+ observations)
+5. Trident LoRA — `shouldBuy()` reasoning from trained model
+6. Position limits + budget
+
+### Exit Logic (3 tiers)
+| Tier | SL | TP | Applies To |
+|------|-----|------|-----------|
+| Crypto | -5% | +10% | BTC, ETH, etc. (when enabled) |
+| Standard equity | -7% | +15% | Most stocks |
+| Resilient sectors | -10% | +20% | Defense, healthcare, utilities, staples, infrastructure, gold |
+- Trident LoRA exit consultation on positions outside neutral zone
+- EOD: system-bought equity sold at 3:50 PM ET
+- Manual trades: NEVER auto-sold if winning — owner must approve
+
+### Manual Trade Protection
+- Positions not bought by the system are detected and flagged as manual
+- Manual trades that are winning are KEPT through EOD, exits, and rotations
+- Only losing manual trades can be auto-exited
+- Persistent `_manualTrades` set survives across heartbeats
 
 ### OANDA (Forex)
-- Max 2 positions (adaptive intelligence limit)
+- Max 4 positions
 - Budget: $1K account, 25K units per trade at 25:1 leverage
-- Only trade Bayesian preferred pairs (currently EUR/JPY). Avoid blacklisted pairs (EUR/USD).
-- Bank profits at $50+ per position — manage_positions runs priority 1
+- 7 pairs: EUR/USD, GBP/USD, USD/JPY, AUD/JPY, NZD/JPY, EUR/GBP, AUD/NZD
+- Signals require 3/4 indicators (RSI, EMA, momentum, BB) to agree
+- Trident LoRA gates every forex entry
+- Bank profits at $50+ per position, cut at -$20
 
 ### When Things Go Wrong (STOP → ASSESS → ACT)
 1. **STOP** — Do NOT place more trades to "fix" the situation
 2. **ASSESS** — Count positions, total deployed vs budget, SL dominance, intelligence state
-3. **ACT** — Cut worst losers FIRST to get within budget. Only then consider new entries (max 2 per heartbeat).
+3. **ACT** — Cut worst losers FIRST to get within budget. Only then consider new entries.
 
 ### NEVER
-- Place 10+ orders without checking results
+- Buy stocks under $10
+- Buy the same ticker twice in one day
+- Buy crypto (currently disabled)
 - Exceed budget "because we have buying power"
-- Let daily goal pressure override risk management
 - Sell winners to fund speculative losers
+- Sell manual trades that are profitable without owner approval
 - Buy without checking position count and budget first
 
 ## Behavioral Rules (Always Enforced)

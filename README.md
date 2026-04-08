@@ -7,7 +7,7 @@ Autonomous wealth generation system combining algorithmic trading, real estate a
 - **Warren Buffett** — Buy quality at a discount, compound winners, cut losers fast, let the star run
 - **Robert Allen** — *Nothing Down* real estate acquisition, *Multiple Streams of Income* cross-pollination between trading profits and real estate capital deployment
 
-**Target:** 100% return in 30 days (paper proving strategy), then real capital deployment.
+**Target:** 25-30% annual returns on $350K capital. Beat 17-18% mutual fund benchmark.
 
 ## System Architecture
 
@@ -181,7 +181,9 @@ Additional gates:
 - **Confidence floor:** 60% minimum (4+ of 7 indicators confirming)
 - **Confirmation count:** 3+ distinct confirmations required
 - **Expected value check:** Reward/risk ratio must be >= 1.5:1
-- **Concentration limit:** Max 4 positions per asset class
+- **Position limit:** Max 10 positions, $25K budget
+- **Price floor:** Minimum $10/share — no penny stocks
+- **Anti-churn:** Max 1 buy per ticker per day
 
 ### Short Selling
 
@@ -204,9 +206,9 @@ The system does NOT use a hardcoded portfolio. Three agents work together to dis
 
 **Analyst Agent (deep_scan):**
 1. **Alpaca Screener APIs** — most-actives (by trades + volume), top movers (gainers + losers)
-2. **Gem Scanner** — 10%+ penny stock breakouts, recent IPOs (VRDN, MANE, OLOX), small-cap momentum
+2. **Quality Filter** — Minimum $10/share, no penny stocks, max 1 buy per ticker per day
 3. **Sector/ETF Universe** — 160+ symbols across all sectors, commodities, metals, inverse ETFs
-4. **Crypto Universe** — 18 major pairs on Alpaca
+4. **Crypto** — Currently disabled (market downturn). Re-enable when recovery starts.
 5. **Oversold bounces** — RSI < 32, short candidates RSI > 72
 6. **Bayesian prioritization** — deprioritize tickers with low win rates
 
@@ -243,7 +245,7 @@ Goal-Oriented Action Planning with A* pathfinding toward financial objectives.
 | **Neural Trader** | 7-vote technical + neural signal generation | RSI, MACD, BB, EMA, momentum, mean reversion, LSTM+GRU |
 | **MinCut** | Portfolio optimization | Kelly criterion, correlation analysis, position sizing |
 | **Trade Executor** | Order execution via Alpaca | Market/limit orders, position tracking, short selling |
-| **Position Manager** | Stop-loss, take-profit, circuit breaker | Rule-based exits, PnL tracking, daily loss limits |
+| **Position Manager** | Tiered exits (crypto/equity/resilient) | Crypto -5%, equity -7%, resilient -10% SL, Trident LoRA exits |
 | **Analyst Agent** | 24/7 dynamic opportunity discovery | Alpaca screener APIs, oversold/overbought scanning |
 | **Strategic Planner** | Outcome-based goal planning | Goalie GOAP + A* pathfinding + MinCut Kelly sizing |
 
@@ -374,7 +376,9 @@ Target market: Thurston County, WA (Olympia, Tumwater, Lacey)
 | Backend | Express gateway, TypeScript, EventEmitter3 |
 | Vector Store | AgentDB v3 (RuVector HNSW, SONA, .rvf format) |
 | Storage | SQLite (RVF containers, witness chain) |
-| Broker | Alpaca Markets (paper + live trading) |
+| Equity Broker | Alpaca Markets (paper + live trading) |
+| Forex Broker | OANDA (7 pairs, 25:1 leverage) |
+| Trade Intelligence | Trident (LoRA-trained reasoning, SONA adaptive learning) |
 | Neural | ruv-swarm (LSTM, GRU — CPU-native WASM) |
 | Planning | Goalie GOAP (A* pathfinding, STRIPS-style) |
 | Optimization | sublinear-time-solver (Rust/WASM) |
@@ -409,8 +413,11 @@ Target market: Thurston County, WA (Olympia, Tumwater, Lacey)
 ## Running
 
 ```bash
-# Gateway (port 3001)
-cd services && npx tsx gateway/src/server.ts
+# Gateway V2 — orchestrator + trade engine + data feed + research worker (port 3001)
+cd services && npx tsx gateway-v2/src/index.ts
+
+# Forex Service — OANDA connection (port 3003)
+cd services && npx tsx forex-scanner/src/server.ts
 
 # UI (port 3000)
 cd mtwm-ui && npm run dev
@@ -421,7 +428,8 @@ cd mtwm-ui && npm run dev
 ```
 mtwm/
 ├── services/
-│   ├── gateway/src/          # Express API gateway + autonomy engine
+│   ├── gateway-v2/src/       # V2 orchestrator + trade engine + workers
+│   ├── gateway/src/          # Legacy gateway (deprecated)
 │   ├── midstream/src/        # Market data (Alpaca) + dynamic watchlist
 │   ├── neural-trader/src/    # 7-vote signal engine + neural forecast + executor
 │   ├── mincut/src/           # Portfolio optimizer + strategic planner (GOAP)
