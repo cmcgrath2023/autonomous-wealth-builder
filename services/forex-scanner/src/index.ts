@@ -166,6 +166,19 @@ export class ForexScanner extends EventEmitter {
    * Runs on ALL pairs during ANY active session — not just session opens.
    * Requires minimum 50 data points for reliable signals.
    */
+  /** Get price history length for a symbol */
+  getPriceHistoryLength(symbol: string): number {
+    return this.priceHistory.get(symbol)?.length || 0;
+  }
+
+  /** Add a historical price point (for seeding from candles) */
+  addPricePoint(symbol: string, price: number): void {
+    const history = this.priceHistory.get(symbol) ?? [];
+    history.push(price);
+    if (history.length > 200) history.shift();
+    this.priceHistory.set(symbol, history);
+  }
+
   evaluateSessionMomentum(): ForexSignal[] {
     const signals: ForexSignal[] = [];
     const session = this.getActiveSession();

@@ -255,8 +255,18 @@ export class TradeEngine {
             const r = await fetch(`http://localhost:3003/api/forex/position/${inst}/close`, { method: 'POST' });
             return r.json();
           };
-          if (prop === 'evaluateSessionMomentum') return async () => [];
+          if (prop === 'evaluateSessionMomentum') return async () => {
+            try {
+              const r = await fetch('http://localhost:3003/api/forex/signals', { signal: AbortSignal.timeout(5000) });
+              if (r.ok) { const d = await r.json() as any; return d.signals || []; }
+            } catch {}
+            return [];
+          };
           if (prop === 'evaluateCarryTrades') return async () => [];
+          if (prop === 'fetchQuotes') return async () => {
+            try { await fetch('http://localhost:3003/api/forex/refresh', { method: 'POST', signal: AbortSignal.timeout(5000) }); } catch {}
+            return [];
+          };
           if (prop === 'placeOrder') return async (inst: string, units: number, sl?: number, tp?: number) => {
             const r = await fetch('http://localhost:3003/api/forex/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instrument: inst, units, stopLoss: sl, takeProfit: tp }) });
             return r.json();

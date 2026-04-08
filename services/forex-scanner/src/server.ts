@@ -7,6 +7,7 @@ import { ForexScanner } from './index.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, '../../gateway/.env') });
 config({ path: resolve(__dirname, '../../gateway/.env.local'), override: true });
+config({ path: resolve(__dirname, '../../.env.webhook') });
 
 const app = express();
 app.use(express.json());
@@ -140,6 +141,89 @@ app.post('/api/forex/scan', async (_req, res) => {
       signals: [...momentum, ...carry],
       total: momentum.length + carry.length,
     });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Signals — seed history from OANDA candles, then evaluate
+app.get('/api/forex/signals', async (_req, res) => {
+  try {
+    // Seed price history from OANDA 15-min candles if scanner has < 50 data points
+    const pairs = ['EUR_USD', 'GBP_USD', 'USD_JPY', 'AUD_JPY', 'NZD_JPY', 'EUR_GBP', 'AUD_NZD'];
+    for (const inst of pairs) {
+      const sym = inst.replace('_', '/');
+      const existing = scanner.getPriceHistoryLength(sym);
+      if (existing < 50) {
+        try {
+          const resp = await fetch(
+            `${oandaBase}/v3/instruments/${inst}/candles?granularity=M15&count=100`,
+            { headers: oandaHeaders, signal: AbortSignal.timeout(5000) },
+          );
+          if (resp.ok) {
+            const data = await resp.json() as any;
+            const candles = (data.candles || []).filter((c: any) => c.complete);
+            for (const c of candles) {
+              scanner.addPricePoint(sym, parseFloat(c.mid.c));
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // Fetch live quotes
+    await scanner.fetchQuotes();
+    const signals = scanner.evaluateSessionMomentum();
+
+    // Ask Trident about each signal
+    const brainUrl = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
+    const brainKey = process.env.BRAIN_API_KEY || '';
+    const enriched = [];
+    for (const sig of signals) {
+      let tridentApproved = true;
+      let tridentReason = '';
+      try {
+        const r = await fetch(`${brainUrl}/v1/transfer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(brainKey ? { 'Authorization': `Bearer ${brainKey}` } : {}) },
+          body: JSON.stringify({
+            source_domain: 'finance',
+            target_domain: 'finance',
+            query: `Should MTWM forex desk ${sig.direction} ${sig.symbol}? Confidence: ${(sig.confidence * 100).toFixed(0)}%. Rationale: ${sig.rationale}`,
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (r.ok) {
+          const data = await r.json() as any;
+          const resp = typeof data.response === 'string' ? data.response : JSON.stringify(data.response);
+          tridentReason = resp.substring(0, 200);
+          tridentApproved = !/avoid|no|don't|skip|risky/i.test(resp);
+        }
+      } catch {}
+
+      if (tridentApproved) {
+        enriched.push({ ...sig, tridentApproved, tridentReason });
+      } else {
+        console.log(`[Forex] Trident REJECTED ${sig.direction} ${sig.symbol}: ${tridentReason.substring(0, 80)}`);
+      }
+    }
+
+    res.json({
+      session: scanner.getActiveSession(),
+      signals: enriched,
+      total: enriched.length,
+      rejected: signals.length - enriched.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Refresh quotes
+app.post('/api/forex/refresh', async (_req, res) => {
+  try {
+    await scanner.fetchQuotes();
+    res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
