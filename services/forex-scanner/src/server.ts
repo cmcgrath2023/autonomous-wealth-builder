@@ -175,36 +175,39 @@ app.get('/api/forex/signals', async (_req, res) => {
     await scanner.fetchQuotes();
     const signals = scanner.evaluateSessionMomentum();
 
-    // Ask Trident about each signal
+    // Check Brain history for each signal's pair
     const brainUrl = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
     const brainKey = process.env.BRAIN_API_KEY || '';
     const enriched = [];
     for (const sig of signals) {
-      let tridentApproved = true;
-      let tridentReason = '';
+      let approved = true;
+      let reason = 'no history';
       try {
-        const r = await fetch(`${brainUrl}/v1/transfer`, {
-          method: 'POST',
+        const pair = sig.symbol.replace('/', '');
+        const r = await fetch(`${brainUrl}/v1/memories/search?q=${encodeURIComponent(pair + ' trade outcome')}&limit=20`, {
           headers: { 'Content-Type': 'application/json', ...(brainKey ? { 'Authorization': `Bearer ${brainKey}` } : {}) },
-          body: JSON.stringify({
-            source_domain: 'finance',
-            target_domain: 'finance',
-            query: `Should MTWM forex desk ${sig.direction} ${sig.symbol}? Confidence: ${(sig.confidence * 100).toFixed(0)}%. Rationale: ${sig.rationale}`,
-          }),
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(5000),
         });
         if (r.ok) {
-          const data = await r.json() as any;
-          const resp = typeof data.response === 'string' ? data.response : JSON.stringify(data.response);
-          tridentReason = resp.substring(0, 200);
-          tridentApproved = !/avoid|no|don't|skip|risky/i.test(resp);
+          const results = await r.json() as any[];
+          const pairTag = pair.toLowerCase();
+          const outcomes = results.filter((m: any) => m.tags?.includes(pairTag) && m.tags?.includes('outcome'));
+          const wins = outcomes.filter((m: any) => m.tags?.includes('win')).length;
+          const losses = outcomes.filter((m: any) => m.tags?.includes('loss')).length;
+          const total = wins + losses;
+          if (total >= 3 && wins / total < 0.35) {
+            approved = false;
+            reason = `${wins}W/${losses}L — reject`;
+          } else if (total > 0) {
+            reason = `${wins}W/${losses}L — OK`;
+          }
         }
-      } catch {}
+      } catch (e: any) { reason = `Brain error: ${e.message?.substring(0, 40)}`; }
 
-      if (tridentApproved) {
-        enriched.push({ ...sig, tridentApproved, tridentReason });
+      if (approved) {
+        enriched.push({ ...sig, brainApproved: true, brainReason: reason });
       } else {
-        console.log(`[Forex] Trident REJECTED ${sig.direction} ${sig.symbol}: ${tridentReason.substring(0, 80)}`);
+        console.log(`[Forex] Brain REJECTED ${sig.direction} ${sig.symbol}: ${reason}`);
       }
     }
 

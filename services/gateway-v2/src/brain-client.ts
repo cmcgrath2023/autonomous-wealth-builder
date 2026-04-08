@@ -171,42 +171,72 @@ export class BrainClient {
     }
   }
 
-  // ── Reasoning — ask Brain for trading advice ───────────────────────
+  // ── Reasoning — should we buy this ticker? ───────────────────────
+  // Uses Brain memory search to find past trade outcomes + SONA training data.
+  // NOT the /v1/transfer endpoint (that does domain transfer, not reasoning).
 
   async shouldBuy(ticker: string, percentChange: number, context: string): Promise<{ should: boolean; reason: string }> {
-    const r = await brainFetch('/v1/transfer', {
-      method: 'POST',
-      body: JSON.stringify({
-        source_domain: 'finance',
-        target_domain: 'finance',
-        query: `Should MTWM trading desk buy ${ticker} which is up ${percentChange.toFixed(1)}% today? ${context}. This is a momentum day-trading strategy — buy movers at open, sell before close.`,
-      }),
-    });
+    // Query Brain for ALL mentions of this ticker
+    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&limit=20`);
+    if (!results || !Array.isArray(results) || results.length === 0) {
+      return { should: true, reason: `No Brain history for ${ticker} — allowing (new ticker)` };
+    }
 
-    if (!r?.response) return { should: true, reason: 'Brain unavailable — default allow' };
+    // Count trade outcomes
+    const tickerLower = ticker.toLowerCase();
+    const outcomes = results.filter((m: any) => m.tags?.includes(tickerLower) && m.tags?.includes('outcome'));
+    const wins = outcomes.filter((m: any) => m.tags?.includes('win')).length;
+    const losses = outcomes.filter((m: any) => m.tags?.includes('loss')).length;
+    const total = wins + losses;
 
-    const response = typeof r.response === 'string' ? r.response : JSON.stringify(r.response);
-    const isNegative = /avoid|no|don't|skip|risky|overextended/i.test(response);
-    return { should: !isNegative, reason: response.substring(0, 200) };
+    if (total === 0) {
+      // Check for negative mentions (rules, warnings)
+      const negMentions = results.filter((m: any) =>
+        m.content?.toLowerCase().includes('avoid') || m.content?.toLowerCase().includes('loss') || m.content?.toLowerCase().includes('bad')
+      ).length;
+      if (negMentions >= 2) {
+        return { should: false, reason: `${ticker}: ${negMentions} negative mentions in Brain — avoiding` };
+      }
+      return { should: true, reason: `${ticker}: no trade history, ${results.length} mentions — allowing` };
+    }
+
+    const winRate = wins / total;
+    // Reject: <35% win rate with 3+ trades (statistically meaningful)
+    if (total >= 3 && winRate < 0.35) {
+      return { should: false, reason: `${ticker}: ${wins}W/${losses}L (${(winRate*100).toFixed(0)}%) — reject (below 35% threshold)` };
+    }
+    // Caution: 35-50% with 5+ trades
+    if (total >= 5 && winRate < 0.50) {
+      return { should: false, reason: `${ticker}: ${wins}W/${losses}L (${(winRate*100).toFixed(0)}%) — reject (below 50% with ${total} trades)` };
+    }
+
+    return { should: true, reason: `${ticker}: ${wins}W/${losses}L (${(winRate*100).toFixed(0)}%) — approved` };
   }
 
-  // ── Reasoning — ask Brain whether to SELL a position ─────────────
+  // ── Reasoning — should we sell this position? ─────────────────
 
   async shouldSell(ticker: string, pnlPct: number, pnlDollars: number, holdTimeMinutes: number): Promise<{ should: boolean; reason: string }> {
-    const r = await brainFetch('/v1/transfer', {
-      method: 'POST',
-      body: JSON.stringify({
-        source_domain: 'finance',
-        target_domain: 'finance',
-        query: `Should MTWM trading desk sell ${ticker}? Current P&L: ${(pnlPct * 100).toFixed(1)}% ($${pnlDollars.toFixed(2)}). Held for ${holdTimeMinutes.toFixed(0)} minutes. Consider learned patterns from past trades on this ticker and similar tickers. Is the position likely to recover or deteriorate further?`,
-      }),
-    });
+    const history = await this.getTickerHistory(ticker);
 
-    if (!r?.response) return { should: false, reason: 'Brain unavailable — default hold' };
+    // If ticker has strong loss history, cut faster
+    if (history.wins + history.losses >= 3 && history.avgReturn < -0.03) {
+      if (pnlPct < 0) {
+        return { should: true, reason: `${ticker}: losing (${(pnlPct*100).toFixed(1)}%) + bad history (avg ${(history.avgReturn*100).toFixed(1)}%) — sell` };
+      }
+    }
 
-    const response = typeof r.response === 'string' ? r.response : JSON.stringify(r.response);
-    const isSellSignal = /sell|exit|close|cut|dump|take profit|lock in|deteriorat/i.test(response);
-    return { should: isSellSignal, reason: response.substring(0, 200) };
+    // If ticker historically wins and we're down small, hold
+    if (history.wins > history.losses && pnlPct > -0.03) {
+      return { should: false, reason: `${ticker}: ${(pnlPct*100).toFixed(1)}% but ${history.wins}W/${history.losses}L — hold (historically wins)` };
+    }
+
+    // If held too long with no progress (>3 hours, still near breakeven), consider selling
+    if (holdTimeMinutes > 180 && Math.abs(pnlPct) < 0.01) {
+      return { should: true, reason: `${ticker}: flat after ${(holdTimeMinutes/60).toFixed(1)}h — sell (dead money)` };
+    }
+
+    // Default: hold
+    return { should: false, reason: `${ticker}: ${(pnlPct*100).toFixed(1)}% — hold (no sell signal)` };
   }
 
   // ── Record daily summary ───────────────────────────────────────────
