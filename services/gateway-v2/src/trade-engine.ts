@@ -50,6 +50,8 @@ const DAILY_LOSS_LIMIT = -1_000; // Hard circuit breaker — scaled with $25K bu
 const FOREX_BANK = 50;
 const FOREX_CUT = -20;
 const SL_DOMINANCE_HALT = 0.70;
+const MIN_STOCK_PRICE = 10; // No penny stocks — minimum $10/share
+const MAX_BUYS_PER_TICKER_PER_DAY = 1; // Buy each ticker AT MOST once per day
 
 // Resilient sectors/stocks — hold longer during volatility, wider SL thresholds
 // These have historically shown strength in downturns, tariff wars, and macro shocks
@@ -186,6 +188,24 @@ export class TradeEngine {
     const obj: Record<string, number> = {};
     for (const [k, v] of buys) obj[k] = v;
     this.store.set('recent_buys_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), buys: obj }));
+  }
+
+  // Manual trades — positions that exist but weren't bought by the system
+  // Detected on each heartbeat: if a position exists but isn't in _recentBuys, it's manual
+  private get _manualTrades(): Set<string> {
+    try {
+      const raw = this.store.get('manual_trades_today');
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data.date === new Date().toISOString().slice(0, 10)) return new Set(data.tickers);
+      }
+    } catch {}
+    return new Set();
+  }
+  private _addManualTrade(ticker: string): void {
+    const manual = this._manualTrades;
+    manual.add(ticker);
+    this.store.set('manual_trades_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), tickers: [...manual] }));
   }
 
   // Persisted to state store — survives restarts
@@ -367,7 +387,7 @@ export class TradeEngine {
             const moversData = await moversRes.json() as any;
             const ownedSet = new Set(positions.map(p => p.ticker));
             const gainers = (moversData.gainers || [])
-              .filter((m: any) => m.percent_change > 2 && m.price > 5 && m.price < 500)
+              .filter((m: any) => m.percent_change > 2 && m.price >= MIN_STOCK_PRICE && m.price < 500)
               .filter((m: any) => !ownedSet.has(m.symbol))
               .slice(0, 5);
             for (const mover of gainers) {
@@ -447,6 +467,8 @@ export class TradeEngine {
       if (stars.length > 0) console.log(`  [scan] ${stars.length} stars, ${eligibleStars.length} eligible, owned: ${[...owned].join(',')}, market: ${mkt.isMarketOpen ? 'open' : 'closed'}`);
 
       for (const star of eligibleStars) {
+        // Gate 0: Anti-churn — max 1 buy per ticker per day
+        if (this._recentBuys.has(star.symbol)) { details.push(`SKIP ${star.symbol} — already bought today`); continue; }
         // Gate 1: Session sells — don't rebuy anything we or the user sold today
         if (this._sessionSells.has(star.symbol)) { details.push(`SKIP ${star.symbol} — sold this session`); continue; }
 
@@ -654,12 +676,12 @@ export class TradeEngine {
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
         const positions = await this.executor.getPositions();
         const equityPos = positions.filter(p => !isCrypto(p.ticker));
-        const recentBuys = this._recentBuys;
+        const manualTrades = this._manualTrades;
         let soldCount = 0;
         const keptManual: string[] = [];
         for (const pos of equityPos) {
-          const isSystemBought = recentBuys.has(pos.ticker);
-          const isManualAndWinning = !isSystemBought && pos.unrealizedPnl >= 0;
+          const isManual = manualTrades.has(pos.ticker);
+          const isManualAndWinning = isManual && pos.unrealizedPnl >= 0;
 
           // Protect winning manual trades — owner must approve
           if (isManualAndWinning) {
@@ -670,7 +692,7 @@ export class TradeEngine {
 
           try {
             await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
-            console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}${isSystemBought ? '' : ' (manual, losing)'}`);
+            console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}${isManual ? ' (manual, losing)' : ''}`);
             emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
             brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'eod_close', 'long').catch(() => {});
             soldCount++;
@@ -690,9 +712,17 @@ export class TradeEngine {
 
     const positions = await this.executor.getPositions();
 
-    // DETECT MANUAL LIQUIDATIONS: if we bought something and it's no longer a position, user closed it manually — do NOT rebuy
+    // DETECT MANUAL TRADES: positions that exist but weren't bought by the system today
     const currentTickers = new Set(positions.map(p => p.ticker));
     const recentBuys = this._recentBuys;
+    for (const pos of positions) {
+      if (!recentBuys.has(pos.ticker) && !this._manualTrades.has(pos.ticker)) {
+        console.log(`  [MANUAL TRADE DETECTED] ${pos.ticker} — not system-bought, protecting from auto-sell`);
+        this._addManualTrade(pos.ticker);
+      }
+    }
+
+    // DETECT MANUAL LIQUIDATIONS: if we bought something and it's no longer a position, user closed it manually — do NOT rebuy
     for (const [ticker] of recentBuys) {
       if (!currentTickers.has(ticker) && !this._sessionSells.has(ticker)) {
         console.log(`  [MANUAL CLOSE DETECTED] ${ticker} was bought but no longer a position — blocking rebuy`);
@@ -737,7 +767,7 @@ export class TradeEngine {
                   const snap = snapData[star.symbol];
                   if (!snap) continue;
                   const price = snap.latestTrade?.p || snap.latestQuote?.ap;
-                  if (!price || price < 5 || price > 500) continue;
+                  if (!price || price < MIN_STOCK_PRICE || price > 500) continue;
                   const pctMatch = star.catalyst.match(/\+?([\d.]+)%/);
                   const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
                   gainers.push({ symbol: star.symbol, price, percent_change: pct });
@@ -786,7 +816,7 @@ export class TradeEngine {
             if (moversRes.ok) {
               const moversData = await moversRes.json() as any;
               gainers = (moversData.gainers || [])
-                .filter((m: any) => m.percent_change > 2 && m.price > 5 && m.price < 500 && (m.trade_count || 0) > 5000)
+                .filter((m: any) => m.percent_change > 2 && m.price >= MIN_STOCK_PRICE && m.price < 500 && (m.trade_count || 0) > 5000)
                 .slice(0, openSlots);
             }
             if (gainers.length > 0) console.log('  [BUY] Using Alpaca movers direct (no research stars)');
@@ -804,7 +834,7 @@ export class TradeEngine {
               const yahooData = await yahooRes.json() as any;
               const quotes = yahooData?.finance?.result?.[0]?.quotes || [];
               gainers = quotes
-                .filter((q: any) => q.regularMarketPrice > 5 && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 5)
+                .filter((q: any) => q.regularMarketPrice >= MIN_STOCK_PRICE && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 5)
                 .map((q: any) => ({ symbol: q.symbol, price: q.regularMarketPrice, percent_change: q.regularMarketChangePercent }))
                 .slice(0, openSlots);
             }
@@ -834,7 +864,7 @@ export class TradeEngine {
                 if (snap.ok) {
                   const sd = await snap.json() as any;
                   const price = sd[pt]?.latestTrade?.p;
-                  if (price && price > 5) gainers.unshift({ symbol: pt, price, percent_change: 0 });
+                  if (price && price >= MIN_STOCK_PRICE) gainers.unshift({ symbol: pt, price, percent_change: 0 });
                 }
               } catch {}
             }
@@ -860,6 +890,16 @@ export class TradeEngine {
             // Skip tickers we sold this session
             if (this._sessionSells.has(g.symbol)) {
               console.log(`  [BUY] SKIP ${g.symbol} — sold this session`);
+              continue;
+            }
+            // Anti-churn: max 1 buy per ticker per day
+            if (this._recentBuys.has(g.symbol)) {
+              console.log(`  [BUY] SKIP ${g.symbol} — already bought today (anti-churn)`);
+              continue;
+            }
+            // Price floor: no penny stocks
+            if (!isCrypto(g.symbol) && g.price < MIN_STOCK_PRICE) {
+              console.log(`  [BUY] SKIP ${g.symbol} — price $${g.price.toFixed(2)} below $${MIN_STOCK_PRICE} min`);
               continue;
             }
             const history = await brain.getTickerHistory(g.symbol);
@@ -947,7 +987,7 @@ export class TradeEngine {
           if (pnlPct > dangerFloor && pnlPct < gainCeiling) continue;
 
           const entryTime = this._recentBuys.get(pos.ticker);
-          const isManualTrade = !entryTime; // Not in our buy tracker = manual/external buy
+          const isManualTrade = this._manualTrades.has(pos.ticker); // Persistent manual trade detection
           const holdMinutes = entryTime ? (Date.now() - entryTime) / 60_000 : 120;
 
           // PROTECT MANUAL TRADES: only auto-sell manual positions if they're losing
