@@ -903,70 +903,61 @@ export class TradeEngine {
         }
 
         let spentThisHeartbeat = 0;
+        const buyAudit: string[] = [];
         for (const g of gainers.slice(0, openSlots)) {
           if (spentThisHeartbeat + perPosition > budgetRemaining) {
-            console.log(`  [BUY] Budget exhausted this heartbeat — stopping`);
+            buyAudit.push('Budget exhausted');
             break;
           }
           try {
-            // Skip tickers we sold this session
-            if (this._sessionSells.has(g.symbol)) {
-              console.log(`  [BUY] SKIP ${g.symbol} — sold this session`);
-              continue;
-            }
-            // Anti-churn: max 1 buy per ticker per day
-            if (this._recentBuys.has(g.symbol)) {
-              console.log(`  [BUY] SKIP ${g.symbol} — already bought today (anti-churn)`);
-              continue;
-            }
-            // Price floor: no penny stocks
-            if (!isCrypto(g.symbol) && g.price < MIN_STOCK_PRICE) {
-              console.log(`  [BUY] SKIP ${g.symbol} — price $${g.price.toFixed(2)} below $${MIN_STOCK_PRICE} min`);
-              continue;
-            }
-            const history = await brain.getTickerHistory(g.symbol);
-            if (history.shouldAvoid) {
-              console.log(`  [BUY] SKIP ${g.symbol} — Trident says avoid (${history.wins}W/${history.losses}L)`);
-              continue;
-            }
-            // Neural trader technical confirmation — fetch recent bars and analyze
-            {
-              try {
-                const isCryptoSym = isCrypto(g.symbol);
-                const barsUrl = isCryptoSym
-                  ? `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=${g.symbol.replace('-', '/')}&timeframe=15Min&limit=50`
-                  : `https://data.alpaca.markets/v2/stocks/${g.symbol}/bars?timeframe=15Min&limit=50&feed=iex`;
-                const barsRes = await fetch(barsUrl, { headers, signal: AbortSignal.timeout(5000) });
-                if (barsRes.ok) {
-                  const barsData = await barsRes.json() as any;
-                  const rawBars = isCryptoSym
-                    ? (barsData.bars?.[g.symbol.replace('-', '/')] || [])
-                    : (barsData.bars || []);
-                  if (rawBars.length >= 30) {
-                    for (const bar of rawBars) this.neural.addBar(g.symbol, bar.c, bar.v || 0);
-                    const neuralSignal = await this.neural.analyze(g.symbol);
-                    if (neuralSignal && neuralSignal.direction !== 'buy') {
-                      console.log(`  [BUY] SKIP ${g.symbol} — neural says ${neuralSignal.direction} (${(neuralSignal.confidence*100).toFixed(0)}%)`);
-                      continue;
-                    }
-                    if (neuralSignal) {
-                      console.log(`  [BUY] ${g.symbol} neural CONFIRMED: ${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}% — ${neuralSignal.pattern}`);
-                    }
-                  }
-                }
-              } catch {}
-            }
+            // Gate 0: Session sells
+            if (this._sessionSells.has(g.symbol)) { buyAudit.push(`${g.symbol}: SKIP sold-today`); continue; }
+            // Gate 1: Anti-churn
+            if (this._recentBuys.has(g.symbol)) { buyAudit.push(`${g.symbol}: SKIP already-bought`); continue; }
+            // Gate 2: Price floor
+            if (!isCrypto(g.symbol) && g.price < MIN_STOCK_PRICE) { buyAudit.push(`${g.symbol}: SKIP price $${g.price.toFixed(2)}<$${MIN_STOCK_PRICE}`); continue; }
+            // Gate 3: Crypto disabled
+            if (isCrypto(g.symbol) && !CRYPTO_BUYS_ENABLED) { buyAudit.push(`${g.symbol}: SKIP crypto-disabled`); continue; }
 
-            // Trident LoRA reasoning — ask trained model before buying
+            // Gate 4: Brain history
+            try {
+              const history = await brain.getTickerHistory(g.symbol);
+              if (history.shouldAvoid) { buyAudit.push(`${g.symbol}: SKIP Brain-avoid ${history.wins}W/${history.losses}L`); continue; }
+              if (history.wins + history.losses > 0) buyAudit.push(`${g.symbol}: Brain ${history.wins}W/${history.losses}L`);
+            } catch (e: any) { buyAudit.push(`${g.symbol}: Brain FAILED ${e.message?.substring(0, 30)}`); }
+
+            // Gate 5: Neural technical confirmation
+            let neuralResult = 'no-data';
+            try {
+              const barsUrl = `https://data.alpaca.markets/v2/stocks/${g.symbol}/bars?timeframe=15Min&limit=50&feed=iex`;
+              const barsRes = await fetch(barsUrl, { headers, signal: AbortSignal.timeout(5000) });
+              if (barsRes.ok) {
+                const barsData = await barsRes.json() as any;
+                const rawBars = barsData.bars || [];
+                if (rawBars.length >= 30) {
+                  for (const bar of rawBars) this.neural.addBar(g.symbol, bar.c, bar.v || 0);
+                  const neuralSignal = await this.neural.analyze(g.symbol);
+                  if (neuralSignal && neuralSignal.direction !== 'buy') {
+                    buyAudit.push(`${g.symbol}: SKIP neural-${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}%`);
+                    continue;
+                  }
+                  neuralResult = neuralSignal ? `${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}%` : 'no-signal';
+                } else { neuralResult = `${rawBars.length}-bars`; }
+              }
+            } catch (e: any) { neuralResult = `FAILED ${e.message?.substring(0, 20)}`; }
+
+            // Gate 6: Trident LoRA reasoning
+            let tridentResult = 'not-called';
             try {
               const tridentAdvice = await brain.shouldBuy(g.symbol, g.percent_change, `top_mover +${g.percent_change.toFixed(1)}%`);
               if (!tridentAdvice.should) {
-                console.log(`  [BUY] SKIP ${g.symbol} — Trident LoRA: ${tridentAdvice.reason.slice(0, 80)}`);
+                buyAudit.push(`${g.symbol}: SKIP Trident-reject: ${tridentAdvice.reason.slice(0, 50)}`);
                 continue;
               }
-              console.log(`  [BUY] ${g.symbol} Trident OK: ${tridentAdvice.reason.slice(0, 60)}`);
-            } catch {}
+              tridentResult = `APPROVED: ${tridentAdvice.reason.slice(0, 40)}`;
+            } catch (e: any) { tridentResult = `FAILED ${e.message?.substring(0, 30)}`; }
 
+            // ALL GATES PASSED — execute buy
             const qty = Math.floor(perPosition / g.price);
             if (qty <= 0) continue;
             const signal = {
@@ -975,15 +966,18 @@ export class TradeEngine {
               indicators: {}, pattern: 'top_mover', timestamp: new Date(), source: 'momentum' as const,
             };
             const order = await this.executor.execute(signal, qty, perPosition);
-            console.log(`  [BUY] ${qty} ${g.symbol} @$${g.price.toFixed(2)} (+${g.percent_change.toFixed(1)}%) — ${order.status}`);
+            buyAudit.push(`${g.symbol}: BUY ${qty}@$${g.price.toFixed(2)} neural=${neuralResult} trident=${tridentResult} → ${order.status}`);
             if (order.status === 'filled' || order.status === 'pending') {
               spentThisHeartbeat += qty * g.price;
               this._trackBuy(g.symbol);
               brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
             }
-          } catch (e: any) { console.log(`  [BUY] ${g.symbol} FAILED: ${e.message}`); }
+          } catch (e: any) { buyAudit.push(`${g.symbol}: ERROR ${e.message?.substring(0, 50)}`); }
         }
-        actions.push({ action: 'buy_movers', priority: 1, durationMs: Date.now() - t0, status: 'success', detail: `Bought movers` });
+        // Write full gate audit to state store
+        try { this.store.set('buy_gate_audit', JSON.stringify({ date: new Date().toISOString(), heartbeat: this.hbCount, audit: buyAudit })); } catch {}
+        console.log(`  [BUY AUDIT] ${buyAudit.join(' | ')}`);
+        actions.push({ action: 'buy_movers', priority: 1, durationMs: Date.now() - t0, status: buyAudit.some(a => a.includes('BUY ')) ? 'success' : 'skipped', detail: buyAudit.join('; ').substring(0, 500) });
       } catch (e: any) { errors.push(`buy_movers: ${e.message}`); }
     }
 
