@@ -497,22 +497,30 @@ export class TradeEngine {
             details.push(`SKIP ${star.symbol} — Brain says avoid (${history.wins}W/${history.losses}L)`);
             continue;
           }
-        } catch {}
+          if (history.wins + history.losses > 0) {
+            details.push(`${star.symbol} Brain: ${history.wins}W/${history.losses}L`);
+          }
+        } catch (e: any) {
+          details.push(`${star.symbol} Brain: FAILED (${e.message?.substring(0, 40)}) — proceeding without`);
+        }
 
         // Gate 4: Bayesian intelligence — reject tickers with poor history
         let adjustedScore = star.score;
         if (_bayesian) {
           adjustedScore = _bayesian.adjustSignalConfidence(star.symbol, star.score, 'buy');
           const prior = _bayesian.getTickerPrior(star.symbol);
-          // Reject: if Bayesian has 3+ observations and win rate < 40%, skip
           if (prior.observations >= 3 && prior.posterior < 0.40) {
-            details.push(`SKIP ${star.symbol} — intelligence reject (${(prior.posterior*100).toFixed(0)}% win, ${prior.observations} obs)`);
+            details.push(`SKIP ${star.symbol} — Bayesian reject (${(prior.posterior*100).toFixed(0)}% win, ${prior.observations} obs)`);
             continue;
           }
-          // Boost: if Bayesian says >70% win rate, increase confidence
           if (prior.observations >= 3 && prior.posterior > 0.70) {
             adjustedScore = Math.min(adjustedScore * 1.1, 0.99);
           }
+          if (prior.observations > 0) {
+            details.push(`${star.symbol} Bayesian: ${(prior.posterior*100).toFixed(0)}% (${prior.observations} obs)`);
+          }
+        } else {
+          details.push(`${star.symbol} Bayesian: NULL — intelligence not connected`);
         }
 
         // Gate 5: Minimum confidence after intelligence adjustment
@@ -528,8 +536,10 @@ export class TradeEngine {
             details.push(`SKIP ${star.symbol} — Trident says no: ${tridentAdvice.reason.slice(0, 80)}`);
             continue;
           }
-          details.push(`${star.symbol} Trident OK: ${tridentAdvice.reason.slice(0, 60)}`);
-        } catch {}
+          details.push(`${star.symbol} Trident APPROVED: ${tridentAdvice.reason.slice(0, 60)}`);
+        } catch (e: any) {
+          details.push(`${star.symbol} Trident: FAILED (${e.message?.substring(0, 40)}) — proceeding without`);
+        }
 
         // Position sizing: 20% of remaining budget per position, max $1400
         const remaining = budget - deployed;
@@ -1067,13 +1077,19 @@ export class TradeEngine {
     const dur = Date.now() - t0;
     const result: HeartbeatResult = { heartbeatNumber: this.hbCount, startedAt: new Date(t0).toISOString(), durationMs: dur, actions, positionCount: posCount, totalDeployed: deployed, errors };
 
-    // 6. Write status to state store
+    // 6. Write status to state store — includes full gate audit trail
     try {
+      const gateAudit = actions
+        .filter(a => a.detail && a.detail.length > 5)
+        .map(a => a.detail)
+        .join(' | ');
       this.store.set('trade_engine_status', JSON.stringify({
         heartbeatNumber: this.hbCount, lastHeartbeat: result.startedAt, durationMs: dur,
         positionCount: posCount, totalDeployed: deployed,
         actionSummary: actions.map((a) => `${a.action}:${a.status}`).join(','),
         errors, recentActivity: actions.filter((a) => a.status !== 'skipped').map((a) => a.detail).slice(0, 5),
+        gateAudit: gateAudit.substring(0, 2000),
+        intelligence: _bayesian ? { beliefs: _bayesian.query({}).length, connected: true } : { beliefs: 0, connected: false },
       }));
     } catch (e) { console.error('[TradeEngine] Status write failed:', e); }
 
