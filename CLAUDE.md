@@ -1,4 +1,12 @@
-# Claude Code Configuration - RuFlo V3
+# MTWM — Autonomous Wealth Builder
+
+## Session Start (ALWAYS DO FIRST)
+
+On every new conversation, before doing anything else:
+1. Call `mcp__trident__cognitive_status` — check Trident health, LoRA epoch, SONA patterns, drift status
+2. Call `mcp__trident__search_knowledge` with query relevant to the user's first message
+3. Check memory files in `.claude/projects/-Users-cmcgrath-Documents-mtwm/memory/MEMORY.md` for relevant context
+4. State what you found briefly — don't hide it
 
 ## Trading Panic Protocol (ALWAYS CHECK BEFORE ANY TRADE)
 
