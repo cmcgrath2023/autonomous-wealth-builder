@@ -763,9 +763,9 @@ export class TradeEngine {
       console.log(`  [BUY] EQUITY SL DOMINANCE ${(eqSlDominance * 100).toFixed(0)}% (${eqSlCount}/${equityTrades.length}) > 70% — HALTING equity entries`);
     } else if (totalDeployedNow >= BUDGET_MAX) {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
-    } else if (openSlots > 0 && budgetRemaining > 100 && (mkt.isMarketOpen ? (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30)) : true)) {
-      // Equity: market hours only (before 3:30 PM). Crypto: 24/7 via research stars.
-      // IMPORTANT: On holidays (market closed per Alpaca clock), only trade crypto — skip equity
+    } else if (openSlots > 0 && budgetRemaining > 100 && mkt.isMarketOpen && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+      // Equity: market hours only, 9:30 AM - 3:30 PM ET. NO after-hours buying.
+      // Crypto buys controlled by CRYPTO_BUYS_ENABLED flag (currently disabled).
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
