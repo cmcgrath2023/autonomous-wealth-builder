@@ -52,6 +52,7 @@ const FOREX_CUT = -20;
 const SL_DOMINANCE_HALT = 0.70;
 const MIN_STOCK_PRICE = 10; // No penny stocks — minimum $10/share
 const MAX_BUYS_PER_TICKER_PER_DAY = 1; // Buy each ticker AT MOST once per day
+const CRYPTO_BUYS_ENABLED = false; // Disabled — crypto in downturn, re-enable when recovery starts
 
 // Resilient sectors/stocks — hold longer during volatility, wider SL thresholds
 // These have historically shown strength in downturns, tariff wars, and macro shocks
@@ -461,6 +462,7 @@ export class TradeEngine {
       // Equity/Crypto from research stars + movers (already sorted by score)
       const eligibleStars = stars
         .filter((s) => !owned.has(s.symbol))
+        .filter((s) => !isCrypto(s.symbol) || CRYPTO_BUYS_ENABLED) // Skip crypto when disabled
         .filter((s) => mkt.isMarketOpen || isCrypto(s.symbol))
         .sort((a, b) => b.score - a.score)
         .slice(0, 5);
@@ -754,7 +756,7 @@ export class TradeEngine {
 
         if (researchStars.length > 0) {
           const equityStars = researchStars.filter(s => !isCrypto(s.symbol));
-          const cryptoStars = researchStars.filter(s => isCrypto(s.symbol));
+          const cryptoStars = CRYPTO_BUYS_ENABLED ? researchStars.filter(s => isCrypto(s.symbol)) : [];
 
           // Fetch equity prices
           if (equityStars.length > 0) {
