@@ -543,7 +543,7 @@ export class TradeEngine {
 
         // Position sizing: 20% of remaining budget per position, max $1400
         const remaining = budget - deployed;
-        const size = Math.min(remaining * 0.20, 1400);
+        const size = Math.min(remaining * 0.20, 2500);
         if (size < 50) continue;
 
         try {
@@ -893,9 +893,9 @@ export class TradeEngine {
           }
         }
 
-        // Cap per-position to remaining budget / slots, never exceeding $1,400 per position
+        // Cap per-position to remaining budget / slots, max $2,500 per position
         const slotsToFill = Math.min(gainers.length || 1, openSlots);
-        const perPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), 1400);
+        const perPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), 2500);
         console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition}/pos, budget left: $${budgetRemaining.toFixed(0)}`);
 
         if (perPosition < 50) {
