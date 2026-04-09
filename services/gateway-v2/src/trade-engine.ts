@@ -941,8 +941,9 @@ export class TradeEngine {
                     buyAudit.push(`${g.symbol}: SKIP neural-${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}%`);
                     continue;
                   }
-                  neuralResult = neuralSignal ? `${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}%` : 'no-signal';
-                } else { neuralResult = `${rawBars.length}-bars`; }
+                  neuralResult = neuralSignal ? `${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}% ${neuralSignal.pattern || ''}` : 'no-signal';
+                  buyAudit.push(`${g.symbol}: neural=${neuralResult}`);
+                } else { neuralResult = `${rawBars.length}-bars (need 30)`; buyAudit.push(`${g.symbol}: neural=${neuralResult}`); }
               }
             } catch (e: any) { neuralResult = `FAILED ${e.message?.substring(0, 20)}`; }
 
@@ -974,8 +975,18 @@ export class TradeEngine {
             }
           } catch (e: any) { buyAudit.push(`${g.symbol}: ERROR ${e.message?.substring(0, 50)}`); }
         }
-        // Write full gate audit to state store
-        try { this.store.set('buy_gate_audit', JSON.stringify({ date: new Date().toISOString(), heartbeat: this.hbCount, audit: buyAudit })); } catch {}
+        // Write gate audit — append to history (keep last 10 heartbeats with buys)
+        try {
+          this.store.set('buy_gate_audit', JSON.stringify({ date: new Date().toISOString(), heartbeat: this.hbCount, audit: buyAudit }));
+          // Also append to persistent audit log if any buys happened
+          if (buyAudit.some(a => a.includes('BUY '))) {
+            const existing = this.store.get('buy_audit_history') || '[]';
+            const history = JSON.parse(existing);
+            history.push({ date: new Date().toISOString(), hb: this.hbCount, audit: buyAudit });
+            if (history.length > 20) history.splice(0, history.length - 20);
+            this.store.set('buy_audit_history', JSON.stringify(history));
+          }
+        } catch {}
         console.log(`  [BUY AUDIT] ${buyAudit.join(' | ')}`);
         actions.push({ action: 'buy_movers', priority: 1, durationMs: Date.now() - t0, status: buyAudit.some(a => a.includes('BUY ')) ? 'success' : 'skipped', detail: buyAudit.join('; ').substring(0, 500) });
       } catch (e: any) { errors.push(`buy_movers: ${e.message}`); }
