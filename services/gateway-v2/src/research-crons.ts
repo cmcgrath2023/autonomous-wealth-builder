@@ -325,6 +325,102 @@ async function mvRefresh(
   console.log('[mv-refresh] Views refreshed');
 }
 
+// ── Crypto Signal Scan (24/7) ──────────────────────────────────────
+
+const CRYPTO_UNIVERSE = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'AVAX/USD', 'LINK/USD', 'DOT/USD', 'DOGE/USD'];
+
+async function scanCryptoSignals(
+  pgQuery: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>,
+  alpacaHeaders: Record<string, string>,
+): Promise<void> {
+  console.log('[crypto-scan] Starting 4-hourly crypto scan...');
+
+  // 1. Volume spike detection — 24h volume vs moving average
+  for (const pair of CRYPTO_UNIVERSE) {
+    const alpacaPair = pair.replace('/', '');
+    try {
+      const url = `https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=${encodeURIComponent(pair)}`;
+      const res = await fetch(url, { headers: alpacaHeaders, signal: AbortSignal.timeout(5000) });
+      if (!res.ok) continue;
+      const data = await res.json() as any;
+      const snap = data.snapshots?.[pair] || data[pair];
+      if (!snap) continue;
+
+      const price = snap.latestTrade?.p || 0;
+      const dailyVol = snap.dailyBar?.v || 0;
+      const prevVol = snap.prevDailyBar?.v || 1;
+      const relVolume = prevVol > 0 ? dailyVol / prevVol : 1;
+
+      // Volume spike signal (>3x average)
+      if (relVolume > 3) {
+        try {
+          await pgQuery(`
+            INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+              metadata, created_by, detected_at)
+            VALUES ($1, 'crypto', 'volume_surge', $2, 12, $3, 'crypto_scan', NOW())
+          `, [
+            pair,
+            Math.min(0.9, 0.5 + (relVolume - 3) * 0.1),
+            JSON.stringify({ rel_volume: relVolume, daily_vol: dailyVol, price }),
+          ]);
+          console.log(`[crypto-scan] ${pair} volume surge: ${relVolume.toFixed(1)}x average`);
+        } catch {}
+      }
+
+      // Price momentum signal (>5% daily move)
+      const dailyChange = snap.dailyBar?.c && snap.prevDailyBar?.c
+        ? ((snap.dailyBar.c - snap.prevDailyBar.c) / snap.prevDailyBar.c) * 100
+        : 0;
+      if (Math.abs(dailyChange) > 5) {
+        try {
+          await pgQuery(`
+            INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+              metadata, created_by, detected_at)
+            VALUES ($1, 'crypto', 'momentum_breakout', $2, 24, $3, 'crypto_scan', NOW())
+          `, [
+            pair,
+            Math.min(0.85, 0.5 + Math.abs(dailyChange) / 50),
+            JSON.stringify({ daily_change_pct: dailyChange, price }),
+          ]);
+          console.log(`[crypto-scan] ${pair} momentum: ${dailyChange.toFixed(1)}% daily`);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // 2. BTC/SPY correlation check (crypto decoupling signal)
+  try {
+    // Simple: compare BTC daily % vs SPY daily %
+    const btcSnap = await fetch(`https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=BTC/USD`, {
+      headers: alpacaHeaders, signal: AbortSignal.timeout(5000),
+    });
+    const spySnap = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=SPY&feed=sip`, {
+      headers: alpacaHeaders, signal: AbortSignal.timeout(5000),
+    });
+    if (btcSnap.ok && spySnap.ok) {
+      const btcData = await btcSnap.json() as any;
+      const spyData = await spySnap.json() as any;
+      const btc = btcData.snapshots?.['BTC/USD'] || btcData['BTC/USD'];
+      const spy = spyData['SPY'];
+      if (btc?.dailyBar?.c && btc?.prevDailyBar?.c && spy?.latestTrade?.p && spy?.prevDailyBar?.c) {
+        const btcPct = ((btc.dailyBar.c - btc.prevDailyBar.c) / btc.prevDailyBar.c) * 100;
+        const spyPct = ((spy.latestTrade.p - spy.prevDailyBar.c) / spy.prevDailyBar.c) * 100;
+        // Decoupling: BTC and SPY moving in opposite directions by >2% each
+        if (Math.sign(btcPct) !== Math.sign(spyPct) && Math.abs(btcPct) > 2 && Math.abs(spyPct) > 1) {
+          await pgQuery(`
+            INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+              metadata, created_by, detected_at)
+            VALUES ('BTC/USD', 'crypto', 'correlation_break', 0.7, 48, $1, 'crypto_scan', NOW())
+          `, [JSON.stringify({ btc_pct: btcPct, spy_pct: spyPct, decoupled: true })]);
+          console.log(`[crypto-scan] BTC/SPY decoupling: BTC ${btcPct.toFixed(1)}% vs SPY ${spyPct.toFixed(1)}%`);
+        }
+      }
+    }
+  } catch {}
+
+  console.log('[crypto-scan] Scan complete');
+}
+
 // ── Overnight Catalyst Scan (forex-aware) ──────────────────────────
 
 async function runOvernightCatalystScan(
@@ -447,6 +543,22 @@ export function startResearchCrons(
   scheduleRecurring('catalyst_overnight', 6, 0, 'pre-market', true,
     () => runOvernightCatalystScan(pgQuery, sqliteStore, alpacaHeaders, 'premarket'),
     log);
+
+  // 4c. Crypto signal scan — every 4 hours, 24/7 (crypto never closes)
+  for (const hour of [0, 4, 8, 12, 16, 20]) {
+    scheduleRecurring('crypto_signal_scan', hour, 0, `${hour}:00`,
+      false, // runs every day including weekends
+      () => scanCryptoSignals(pgQuery, alpacaHeaders),
+      log);
+  }
+
+  // Set crypto phase to observe if not already set
+  try {
+    if (!sqliteStore.get('crypto_trading_phase')) {
+      sqliteStore.set('crypto_trading_phase', 'observe');
+      log('[research-crons] Crypto trading phase initialized: observe');
+    }
+  } catch {}
 
   // 4. MV Refresh — every 30 min, 24/7 (not just weekdays — views should stay fresh)
   for (const min of [0, 30]) {

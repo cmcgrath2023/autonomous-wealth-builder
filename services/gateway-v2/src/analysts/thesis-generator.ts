@@ -14,8 +14,24 @@ import type { SignalCluster, ConvictionResult } from './conviction-scorer.js';
 
 const CLUSTER_WINDOW_HOURS = 4;
 const MIN_CLUSTER_SIZE = 2;
-const PROMOTE_THRESHOLD = 65;   // conviction score to promote → Authority Matrix (act)
-const SUGGEST_THRESHOLD = 50;   // conviction score to surface as suggestion
+
+// Asset-class-specific thresholds (per Opus crypto re-enablement spec)
+const THRESHOLDS = {
+  equity: { act: 65, suggest: 50, observe: 0 },
+  crypto: { act: 70, suggest: 60, observe: 0 },  // higher bar — thesis-driven only
+  forex:  { act: 65, suggest: 50, observe: 0 },
+};
+const CRYPTO_MIN_SOURCES = 3; // crypto requires 3+ independent signal sources
+
+function isCryptoTicker(ticker: string): boolean {
+  return ticker.includes('/USD') || ticker.endsWith('USD') && ticker.length > 5;
+}
+
+function getAssetClass(ticker: string): 'equity' | 'crypto' | 'forex' {
+  if (ticker.includes('/') && !isCryptoTicker(ticker)) return 'forex';
+  if (isCryptoTicker(ticker)) return 'crypto';
+  return 'equity';
+}
 
 // ── Cluster Detection ──────────────────────────────────────────────
 
@@ -89,10 +105,22 @@ export async function generateThesis(
   // 1. Score conviction
   const conviction = await scoreConviction(cluster, pgQuery, sqliteStore);
 
+  const assetClass = getAssetClass(cluster.ticker);
+  const thresholds = THRESHOLDS[assetClass];
+
   // Skip low-conviction clusters
   if (conviction.compositeScore < 30) {
     console.log(`[thesis] ${cluster.ticker}: conviction ${conviction.compositeScore} < 30 — skipped`);
     return null;
+  }
+
+  // Crypto-specific: require 3+ independent signal sources
+  if (assetClass === 'crypto') {
+    const uniqueSources = new Set(cluster.signals.map(s => s.source_type || s.signal_type));
+    if (uniqueSources.size < CRYPTO_MIN_SOURCES) {
+      console.log(`[thesis] Crypto ${cluster.ticker} rejected: ${uniqueSources.size} sources (need ${CRYPTO_MIN_SOURCES}+)`);
+      return null;
+    }
   }
 
   // 2. Get Trident Brain context
@@ -121,11 +149,27 @@ export async function generateThesis(
 
   const title = `${cluster.ticker}: ${cluster.signals[0]?.signal_type || 'multi-signal'} cluster (conviction ${conviction.compositeScore})`;
 
-  // 4. Authority action
-  const authorityAction =
-    conviction.compositeScore >= PROMOTE_THRESHOLD ? 'act' :
-    conviction.compositeScore >= SUGGEST_THRESHOLD ? 'suggest' :
-    'observe';
+  // 4. Authority action (asset-class aware)
+  let authorityAction: string;
+  if (assetClass === 'crypto') {
+    // Crypto uses phased re-enablement: disabled → observe → suggest → act
+    // Read from SQLite config; default to 'observe' per spec
+    const cryptoPhase = sqliteStore.get?.('crypto_trading_phase') || 'observe';
+    if (cryptoPhase === 'disabled' || cryptoPhase === 'observe') {
+      authorityAction = 'observe'; // always observe regardless of score
+    } else if (cryptoPhase === 'suggest' && conviction.compositeScore >= thresholds.act) {
+      authorityAction = 'suggest'; // surface for manual approval
+    } else if (cryptoPhase === 'act' && conviction.compositeScore >= thresholds.act) {
+      authorityAction = 'act'; // auto-execute
+    } else {
+      authorityAction = 'observe';
+    }
+  } else {
+    authorityAction =
+      conviction.compositeScore >= thresholds.act ? 'act' :
+      conviction.compositeScore >= thresholds.suggest ? 'suggest' :
+      'observe';
+  }
 
   // 5. Route to service
   const routedTo = determineRouting(cluster);
