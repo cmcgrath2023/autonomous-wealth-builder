@@ -76,23 +76,40 @@ export async function GET() {
 
     // Build graph nodes
     const sectorColors: Record<string, string> = {
-      'Tech': '#3b82f6', 'Semis': '#8b5cf6', 'Finance': '#22c55e',
-      'Energy': '#f59e0b', 'Defense': '#ef4444', 'Health': '#ec4899',
-      'Biotech': '#d946ef', 'Consumer': '#06b6d4', 'Materials': '#a78bfa',
-      'Industrial': '#78716c', 'Transport': '#fb923c', 'Crypto': '#fbbf24',
-      'Forex': '#34d399', 'Solar': '#facc15', 'EV': '#4ade80',
+      // Seed script industry groups
+      'Semis': '#8b5cf6', 'BigTech': '#3b82f6', 'CloudSaaS': '#60a5fa',
+      'FinancialsBanks': '#22c55e', 'FinancialsFintech': '#34d399',
+      'EnergyMajors': '#f59e0b', 'EnergyServices': '#fbbf24', 'EnergyPipelines': '#d97706',
+      'DefensePrimes': '#ef4444', 'DefenseTech': '#f87171',
+      'Airlines': '#fb923c', 'CruiseLines': '#fdba74',
+      'Biotech': '#d946ef', 'PharmaMajor': '#ec4899',
+      'CryptoMiners': '#eab308', 'EVAutomakers': '#4ade80',
+      'RetailBigBox': '#06b6d4', 'GoldMiners': '#fcd34d',
+      'CopperComplex': '#a78bfa', 'Solar': '#facc15', 'NuclearPower': '#10b981',
+      // General sectors
+      'Tech': '#3b82f6', 'Finance': '#22c55e', 'Energy': '#f59e0b',
+      'Defense': '#ef4444', 'Health': '#ec4899', 'Consumer': '#06b6d4',
+      'Materials': '#a78bfa', 'Industrial': '#78716c', 'Transport': '#fb923c',
+      'Crypto': '#fbbf24', 'Forex': '#34d399', 'EV': '#4ade80',
+      'Major': '#fbbf24', 'AltL1': '#c084fc', 'Infrastructure': '#2dd4bf',
+      'Meme': '#f472b6', 'SafeHaven': '#a3e635', 'Commodity': '#d97706',
+      'Carry': '#14b8a6', 'Cross': '#818cf8', 'Index': '#94a3b8',
       'default': '#6b7280',
     };
 
-    const nodes = companies.map((c: any) => ({
-      id: c.symbol,
-      name: `${c.symbol} ${c.name ? '(' + c.name.slice(0, 20) + ')' : ''}`,
-      group: c.sector || 'Other',
-      color: sectorColors[c.industry] || sectorColors[c.sector] || sectorColors.default,
-      val: c.market_cap_tier === 'mega' ? 8 : c.market_cap_tier === 'large' ? 5 : 3,
-      sector: c.sector,
-      industry: c.industry,
-    }));
+    const nodes = companies.map((c: any) => {
+      // Use industry (from seed script sector groups) or sector, with fallback
+      const group = c.industry || c.sector || 'Other';
+      return {
+        id: c.symbol,
+        name: `${c.symbol}${c.name ? ' (' + c.name.slice(0, 25) + ')' : ''}`,
+        group,
+        color: sectorColors[group] || sectorColors[c.sector] || sectorColors.default,
+        val: c.market_cap_tier === 'mega' ? 10 : c.market_cap_tier === 'large' ? 6 : 3,
+        sector: c.sector,
+        industry: c.industry,
+      };
+    });
 
     const links = relationships.map((r: any) => ({
       source: r.symbol_a,

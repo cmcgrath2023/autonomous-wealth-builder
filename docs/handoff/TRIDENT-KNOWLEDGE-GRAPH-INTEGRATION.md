@@ -263,7 +263,82 @@ All code is in the AWB repository (`autonomous-wealth-builder`):
 
 ---
 
-## 8. Next Steps
+## 8. External Database as Knowledge Source
+
+A key architectural insight from this integration: **Trident can ingest structured data from external databases as a first-class knowledge source.** AWB demonstrates this with PostgreSQL, but the pattern generalizes:
+
+### 8.1 The Pattern
+
+```
+External DB (PostgreSQL, MongoDB, Neo4j, etc.)
+  │
+  │ Nightly sync / real-time webhook / GraphQL subscription
+  ▼
+Trident /v1/memories + /v1/train
+  │
+  │ Structured tags (relationship, propagation, driver)
+  ▼
+LoRA Reasoning (shouldBuy, shouldSell, thesis scoring)
+  │
+  │ Decisions informed by graph + patterns + memory
+  ▼
+Application Layer (trade execution, CRM actions, risk alerts)
+```
+
+### 8.2 Why This Matters
+
+Without external DB integration, Trident's knowledge comes ONLY from:
+- Application-level writes (recordTradeClose, recordBuy, etc.)
+- SONA training on belief priors
+
+With external DB integration, Trident gains:
+- **Structured relationships** that the LoRA can reason over (supply chains, competitive dynamics, regulatory dependencies)
+- **Graph traversal** via tagged memories (find 2-hop neighbors by searching for relationship tags)
+- **Quantified propagation patterns** from observation data (SONA learns causal delays and magnitudes)
+- **Domain-specific knowledge** that would be expensive to encode manually but is cheap to extract from structured data
+
+### 8.3 GraphQL / API Feed Option
+
+For deployments that prefer real-time over batch sync, Trident could expose (or consume) a GraphQL subscription:
+
+```graphql
+# Trident as GraphQL consumer — subscribes to external knowledge updates
+subscription OnRelationshipDiscovered {
+  relationshipDiscovered {
+    source { symbol name sector }
+    target { symbol name sector }
+    type
+    strength
+    evidence
+  }
+}
+
+# Trident as GraphQL provider — exposes knowledge graph to applications
+query BlastRadius($symbol: String!, $depth: Int!) {
+  blastRadius(symbol: $symbol, depth: $depth) {
+    neighbor { symbol name }
+    relationship
+    strength
+    lagDays
+    path
+  }
+}
+```
+
+This makes the knowledge graph available as a service — any application (AWB, Oceanic CRM, Vanguard Console) can query Trident for "what's connected to X?" without maintaining its own graph.
+
+### 8.4 Multi-Tenant Knowledge Sharing
+
+When multiple AWB deployments run, each discovers relationships independently:
+- Deployment A discovers "INTC announcement → AMAT moves in 2 days"
+- Deployment B discovers "ASML supply constraint → TSM delays → NVDA shortage"
+- Deployment C discovers "Fed rate hike → XLF rises but XLRE drops"
+
+If these propagation observations are pooled in Trident (with proper tenant isolation for trade data but shared knowledge graph), ALL deployments benefit from collective discovery. This is the network effect that makes the platform more valuable with each deployment.
+
+---
+
+## 9. Next Steps
 
 1. **Trident team reviews** this document and confirms/adjusts the integration approach
 2. **Tag reliability fix** — search results should include tags (currently undefined)
