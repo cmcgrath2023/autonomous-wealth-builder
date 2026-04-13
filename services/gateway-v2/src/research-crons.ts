@@ -325,6 +325,78 @@ async function mvRefresh(
   console.log('[mv-refresh] Views refreshed');
 }
 
+// ── Overnight Catalyst Scan (forex-aware) ──────────────────────────
+
+async function runOvernightCatalystScan(
+  pgQuery: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>,
+  sqliteStore: GatewayStateStore,
+  alpacaHeaders: Record<string, string>,
+  session: 'asia' | 'europe' | 'premarket',
+): Promise<void> {
+  console.log(`[overnight-catalyst] Starting ${session} scan...`);
+
+  // 1. Run the catalyst hunter
+  try {
+    const { CatalystHunter } = await import('./analysts/index.js');
+    const hunter = new CatalystHunter(sqliteStore);
+    const result = await hunter.scan(alpacaHeaders);
+    console.log(`[overnight-catalyst] ${session}: ${result.candidates.length} catalysts found`);
+
+    // 2. For each catalyst, check forex_pair_drivers for affected currency pairs
+    for (const c of result.candidates) {
+      const headline = (c.catalyst + ' ' + c.catalystType).toLowerCase();
+
+      try {
+        const { rows: drivers } = await pgQuery(`
+          SELECT pair, direction, strength, reasoning
+          FROM forex_pair_drivers
+          WHERE $1 LIKE '%' || driver_keyword || '%'
+          ORDER BY strength DESC
+        `, [headline]);
+
+        if (drivers.length > 0) {
+          const forexPairs = drivers.map((d: any) => d.pair);
+          console.log(`[overnight-catalyst] ${c.symbol} → forex impact: ${forexPairs.join(', ')}`);
+
+          // Write a forex-tagged research signal to PG
+          try {
+            await pgQuery(`
+              INSERT INTO research_signals (
+                ticker, sector, signal_type, confidence, decay_hours,
+                related_tickers, metadata, created_by, detected_at
+              ) VALUES ($1, 'Forex', $2, $3, 24, $4, $5, 'overnight_catalyst', NOW())
+            `, [
+              c.symbol,
+              `forex_${c.catalystType}`,
+              c.confidence,
+              forexPairs,
+              JSON.stringify({
+                session,
+                headline: c.catalyst,
+                forex_drivers: drivers.map((d: any) => ({
+                  pair: d.pair,
+                  direction: d.direction,
+                  strength: d.strength,
+                  reasoning: d.reasoning,
+                })),
+              }),
+            ]);
+          } catch {}
+        }
+      } catch {}
+    }
+  } catch (e: any) {
+    console.log(`[overnight-catalyst] ${session} scan failed: ${e.message}`);
+  }
+
+  // 3. Also run signal scan to process any new clusters
+  try {
+    await signalScan(pgQuery, sqliteStore);
+  } catch {}
+
+  console.log(`[overnight-catalyst] ${session} scan complete`);
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 export function startResearchCrons(
@@ -363,6 +435,18 @@ export function startResearchCrons(
     () => thesisResolution(pgQuery, alpacaHeaders),
     log,
   );
+
+  // 4b. Overnight catalyst scans — catch Asia open, EU open, pre-market
+  // These tag forex-relevant catalysts with affected currency pairs
+  scheduleRecurring('catalyst_overnight', 22, 0, 'asia-open', true,
+    () => runOvernightCatalystScan(pgQuery, sqliteStore, alpacaHeaders, 'asia'),
+    log);
+  scheduleRecurring('catalyst_overnight', 4, 0, 'eu-open', true,
+    () => runOvernightCatalystScan(pgQuery, sqliteStore, alpacaHeaders, 'europe'),
+    log);
+  scheduleRecurring('catalyst_overnight', 6, 0, 'pre-market', true,
+    () => runOvernightCatalystScan(pgQuery, sqliteStore, alpacaHeaders, 'premarket'),
+    log);
 
   // 4. MV Refresh — every 30 min, 24/7 (not just weekdays — views should stay fresh)
   for (const min of [0, 30]) {
