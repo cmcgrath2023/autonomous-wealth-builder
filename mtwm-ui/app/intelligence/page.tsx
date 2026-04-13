@@ -4,8 +4,8 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Card, CardBody, CardHeader, Chip, Spinner, Progress } from '@heroui/react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import dynamic from 'next/dynamic';
+import { BrainSummary } from '@/components/intelligence/BrainSummary';
 
-// Force-graph must be loaded client-side only (uses WebGL)
 const ForceGraph3D = dynamic(() => import('react-force-graph-3d'), { ssr: false });
 
 interface Belief {
@@ -36,6 +36,7 @@ interface TridentMemory {
   title: string;
   category: string;
   tags: string[];
+  content?: string;
 }
 
 interface SonaStatus {
@@ -44,6 +45,33 @@ interface SonaStatus {
   pareto: number;
   connected: boolean;
   tier: string;
+  ewcTasks: number;
+  bufferSuccessRate: number;
+  trajectoriesBuffered: number;
+}
+
+interface CognitiveStatus {
+  graphNodes: number;
+  graphEdges: number;
+  clusters: number;
+  avgQuality: number;
+  driftStatus: string;
+  loraEpoch: number;
+  sonaPatterns: number;
+  sonaTrajectories: number;
+  metaPlateau: string;
+  embeddingDim: number;
+  knowledgeVelocity: number;
+  gwtAvgSalience: number;
+}
+
+interface TridentCounts {
+  outcomes: number;
+  entries: number;
+  research: number;
+  rules: number;
+  dailies: number;
+  total: number;
 }
 
 interface GraphNode {
@@ -52,6 +80,7 @@ interface GraphNode {
   group: string;
   val: number;
   color: string;
+  memory?: TridentMemory;
 }
 
 interface GraphLink {
@@ -60,93 +89,157 @@ interface GraphLink {
   color: string;
 }
 
+interface SelectedNode {
+  node: GraphNode;
+  memory?: TridentMemory;
+}
+
 const REFRESH_MS = 30_000;
 
-// Build knowledge graph from Trident memories + Bayesian beliefs
-function buildGraph(memories: TridentMemory[], beliefs: Belief[]): { nodes: GraphNode[]; links: GraphLink[] } {
+const GROUP_COLORS: Record<string, string> = {
+  hub: '#3b82f6',
+  'hub-trading': '#3b82f6',
+  'hub-research': '#8b5cf6',
+  'hub-rules': '#f59e0b',
+  'hub-sona': '#06b6d4',
+  'hub-daily': '#10b981',
+  'hub-entries': '#f97316',
+  outcome: '#22c55e',
+  'outcome-loss': '#ef4444',
+  entry: '#f97316',
+  research: '#8b5cf6',
+  rule: '#f59e0b',
+  daily: '#10b981',
+  ticker: '#60a5fa',
+  'ticker-win': '#22c55e',
+  'ticker-lose': '#ef4444',
+  'ticker-neutral': '#eab308',
+  sector: '#a78bfa',
+  belief: '#06b6d4',
+};
+
+function buildDenseGraph(memories: TridentMemory[], beliefs: Belief[]): { nodes: GraphNode[]; links: GraphLink[] } {
   const nodes: GraphNode[] = [];
   const links: GraphLink[] = [];
   const nodeIds = new Set<string>();
 
-  const addNode = (id: string, name: string, group: string, val: number, color: string) => {
+  const addNode = (id: string, name: string, group: string, val: number, color: string, memory?: TridentMemory) => {
     if (nodeIds.has(id)) return;
     nodeIds.add(id);
-    nodes.push({ id, name, group, val, color });
+    nodes.push({ id, name, group, val, color, memory });
   };
 
-  // Central hub nodes
-  addNode('hub:trading', 'Trading', 'hub', 12, '#3b82f6');
-  addNode('hub:research', 'Research', 'hub', 10, '#8b5cf6');
-  addNode('hub:rules', 'Rules', 'hub', 8, '#f59e0b');
-  addNode('hub:sona', 'SONA', 'hub', 10, '#06b6d4');
+  // ── Central brain hub ──
+  addNode('hub:brain', 'MTWM Brain', 'hub', 20, '#60a5fa');
 
-  // Bayesian beliefs → ticker nodes
-  for (const b of beliefs) {
-    const color = b.posterior > 0.6 ? '#22c55e' : b.posterior < 0.4 ? '#ef4444' : '#eab308';
-    const size = Math.max(3, Math.min(b.observations * 1.5, 15));
-    addNode(`ticker:${b.subject}`, b.subject, 'ticker', size, color);
-    links.push({ source: 'hub:trading', target: `ticker:${b.subject}`, color: color + '60' });
+  // ── Category hubs (large orbiting nodes) ──
+  addNode('hub:trading', 'Trading', 'hub-trading', 14, '#3b82f6');
+  addNode('hub:research', 'Research', 'hub-research', 12, '#8b5cf6');
+  addNode('hub:rules', 'Rules', 'hub-rules', 10, '#f59e0b');
+  addNode('hub:sona', 'SONA', 'hub-sona', 12, '#06b6d4');
+  addNode('hub:daily', 'Daily', 'hub-daily', 10, '#10b981');
+  addNode('hub:entries', 'Entries', 'hub-entries', 10, '#f97316');
+
+  // Connect hubs to brain
+  for (const hub of ['trading', 'research', 'rules', 'sona', 'daily', 'entries']) {
+    links.push({ source: 'hub:brain', target: `hub:${hub}`, color: GROUP_COLORS[`hub-${hub}`] + '80' });
   }
 
-  // Trident memories → categorized nodes
-  const tickerCounts: Record<string, { wins: number; losses: number }> = {};
+  // ── Parse all memories into structured nodes ──
+  const tickerStats: Record<string, { wins: number; losses: number; entries: number; researched: boolean }> = {};
   const sectors = new Set<string>();
-  const researchTickers = new Set<string>();
 
   for (const m of memories) {
     const tags = m.tags || [];
 
     if (tags.includes('outcome')) {
-      // Trade outcome — extract ticker from tags
-      const ticker = tags.find(t => !['trade', 'outcome', 'win', 'loss', 'stop_loss', 'take_profit', 'eod_close', 'trailing_stop', 'rotation', 'premarket_liquidation', 'historical_seed', 'long', 'short', 'momentum', 'entry', 'buy'].includes(t) && t.length >= 1 && t.length <= 10);
+      // Trade outcome node
+      const ticker = extractTicker(tags);
       if (ticker) {
-        const sym = ticker.toUpperCase().replace('_', '/');
-        if (!tickerCounts[sym]) tickerCounts[sym] = { wins: 0, losses: 0 };
-        if (tags.includes('win')) tickerCounts[sym].wins++;
-        else if (tags.includes('loss')) tickerCounts[sym].losses++;
+        if (!tickerStats[ticker]) tickerStats[ticker] = { wins: 0, losses: 0, entries: 0, researched: false };
+        if (tags.includes('win')) tickerStats[ticker].wins++;
+        else if (tags.includes('loss')) tickerStats[ticker].losses++;
       }
+      const isWin = tags.includes('win');
+      const nodeId = `outcome:${m.id.slice(0, 8)}`;
+      addNode(nodeId, m.title.slice(0, 40), isWin ? 'outcome' : 'outcome-loss', isWin ? 4 : 3, isWin ? '#22c55e' : '#ef4444', m);
+      links.push({ source: 'hub:trading', target: nodeId, color: (isWin ? '#22c55e' : '#ef4444') + '30' });
+      if (ticker && nodeIds.has(`ticker:${ticker}`)) {
+        links.push({ source: `ticker:${ticker}`, target: nodeId, color: '#ffffff15' });
+      }
+    } else if (tags.includes('entry') || tags.includes('buy')) {
+      const ticker = extractTicker(tags);
+      if (ticker) {
+        if (!tickerStats[ticker]) tickerStats[ticker] = { wins: 0, losses: 0, entries: 0, researched: false };
+        tickerStats[ticker].entries++;
+      }
+      const nodeId = `entry:${m.id.slice(0, 8)}`;
+      addNode(nodeId, m.title.slice(0, 40), 'entry', 3, '#f97316', m);
+      links.push({ source: 'hub:entries', target: nodeId, color: '#f9731630' });
     } else if (tags.includes('research') || tags.includes('cycle')) {
-      // Research cycle — extract mentioned tickers
+      const nodeId = `research:${m.id.slice(0, 8)}`;
+      addNode(nodeId, m.title.slice(0, 50), 'research', 4, '#8b5cf6', m);
+      links.push({ source: 'hub:research', target: nodeId, color: '#8b5cf630' });
+      // Cross-link research to tickers mentioned
       for (const t of tags) {
         if (t.length >= 2 && t.length <= 8 && !['research', 'cycle', 'stars'].includes(t)) {
-          researchTickers.add(t.toUpperCase());
+          const sym = t.toUpperCase();
+          if (tickerStats[sym]) tickerStats[sym].researched = true;
         }
       }
     } else if (tags.includes('rule')) {
-      const ruleId = `rule:${m.id.slice(0, 8)}`;
-      addNode(ruleId, m.title.slice(0, 30), 'rule', 4, '#f59e0b');
-      links.push({ source: 'hub:rules', target: ruleId, color: '#f59e0b40' });
+      const nodeId = `rule:${m.id.slice(0, 8)}`;
+      addNode(nodeId, m.title.slice(0, 40), 'rule', 3, '#f59e0b', m);
+      links.push({ source: 'hub:rules', target: nodeId, color: '#f59e0b30' });
+    } else if (tags.includes('daily') || tags.includes('summary')) {
+      const nodeId = `daily:${m.id.slice(0, 8)}`;
+      addNode(nodeId, m.title.slice(0, 40), 'daily', 3, '#10b981', m);
+      links.push({ source: 'hub:daily', target: nodeId, color: '#10b98130' });
     }
   }
 
-  // Create ticker nodes from trade history
-  for (const [sym, counts] of Object.entries(tickerCounts)) {
-    const total = counts.wins + counts.losses;
-    const winRate = total > 0 ? counts.wins / total : 0.5;
+  // ── Ticker aggregate nodes (large, represent instruments) ──
+  for (const [sym, stats] of Object.entries(tickerStats)) {
+    const total = stats.wins + stats.losses;
+    const winRate = total > 0 ? stats.wins / total : 0.5;
+    const group = winRate > 0.5 ? 'ticker-win' : winRate < 0.35 ? 'ticker-lose' : 'ticker-neutral';
     const color = winRate > 0.5 ? '#22c55e' : winRate < 0.35 ? '#ef4444' : '#eab308';
-    const size = Math.max(3, Math.min(total * 2, 15));
-    addNode(`ticker:${sym}`, `${sym} (${counts.wins}W/${counts.losses}L)`, 'ticker', size, color);
-    links.push({ source: 'hub:trading', target: `ticker:${sym}`, color: color + '50' });
-  }
-
-  // Research connections
-  for (const ticker of researchTickers) {
-    if (nodeIds.has(`ticker:${ticker}`)) {
-      links.push({ source: 'hub:research', target: `ticker:${ticker}`, color: '#8b5cf640' });
-    } else {
-      addNode(`ticker:${ticker}`, ticker, 'research-star', 3, '#8b5cf6');
-      links.push({ source: 'hub:research', target: `ticker:${ticker}`, color: '#8b5cf640' });
+    const size = Math.max(4, Math.min(total * 1.5 + stats.entries, 16));
+    addNode(`ticker:${sym}`, `${sym} (${stats.wins}W/${stats.losses}L)`, group, size, color);
+    links.push({ source: 'hub:trading', target: `ticker:${sym}`, color: color + '40' });
+    if (stats.researched) {
+      links.push({ source: 'hub:research', target: `ticker:${sym}`, color: '#8b5cf630' });
     }
   }
 
-  // SONA connections to beliefs
-  for (const b of beliefs.filter(b => b.observations >= 3)) {
-    if (nodeIds.has(`ticker:${b.subject}`)) {
-      links.push({ source: 'hub:sona', target: `ticker:${b.subject}`, color: '#06b6d440' });
+  // ── Bayesian beliefs → SONA connections ──
+  for (const b of beliefs) {
+    const color = b.posterior > 0.6 ? '#22c55e' : b.posterior < 0.4 ? '#ef4444' : '#eab308';
+    const nodeId = `belief:${b.subject}`;
+    if (!nodeIds.has(`ticker:${b.subject}`)) {
+      addNode(nodeId, `${b.subject} (${(b.posterior * 100).toFixed(0)}%)`, 'belief', Math.max(3, b.observations), color);
+    }
+    const target = nodeIds.has(`ticker:${b.subject}`) ? `ticker:${b.subject}` : nodeId;
+    links.push({ source: 'hub:sona', target, color: '#06b6d430' });
+  }
+
+  // ── Cross-connections: link outcome nodes to their tickers ──
+  for (const n of nodes) {
+    if (n.group === 'outcome' || n.group === 'outcome-loss' || n.group === 'entry') {
+      const ticker = n.memory ? extractTicker(n.memory.tags) : null;
+      if (ticker && nodeIds.has(`ticker:${ticker}`) && n.id !== `ticker:${ticker}`) {
+        links.push({ source: n.id, target: `ticker:${ticker}`, color: '#ffffff10' });
+      }
     }
   }
 
   return { nodes, links };
+}
+
+function extractTicker(tags: string[]): string | null {
+  const knownTags = new Set(['trade', 'outcome', 'win', 'loss', 'stop_loss', 'take_profit', 'eod_close', 'trailing_stop', 'circuit_breaker', 'rotation', 'premarket_liquidation', 'historical_seed', 'long', 'short', 'momentum', 'entry', 'buy', 'research', 'cycle', 'stars', 'rule', 'trading', 'escalation', 'daily', 'summary', 'profit', 'loss']);
+  const ticker = tags.find(t => !knownTags.has(t) && t.length >= 1 && t.length <= 10);
+  return ticker ? ticker.toUpperCase().replace('_', '/') : null;
 }
 
 export default function IntelligencePage() {
@@ -155,17 +248,19 @@ export default function IntelligencePage() {
   const [beliefs, setBeliefs] = useState<Belief[]>([]);
   const [tridentMemories, setTridentMemories] = useState<TridentMemory[]>([]);
   const [sonaStatus, setSonaStatus] = useState<SonaStatus | null>(null);
+  const [cognitive, setCognitive] = useState<CognitiveStatus | null>(null);
+  const [counts, setCounts] = useState<TridentCounts | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
   const graphRef = useRef<HTMLDivElement>(null);
-  const [graphDimensions, setGraphDimensions] = useState({ width: 800, height: 500 });
+  const [graphDimensions, setGraphDimensions] = useState({ width: 800, height: 600 });
 
-  // Responsive graph sizing
   useEffect(() => {
     const updateSize = () => {
       if (graphRef.current) {
         setGraphDimensions({
           width: graphRef.current.offsetWidth,
-          height: Math.min(500, window.innerHeight * 0.45),
+          height: Math.min(650, window.innerHeight * 0.55),
         });
       }
     };
@@ -176,11 +271,12 @@ export default function IntelligencePage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [statusRes, metricsRes, topRes, worstRes] = await Promise.allSettled([
+      const [statusRes, metricsRes, topRes, worstRes, tridentRes] = await Promise.allSettled([
         fetch('/api/gateway/status'),
         fetch('/api/gateway/intelligence/metrics'),
         fetch('/api/gateway/intelligence/top-performers'),
         fetch('/api/gateway/intelligence/worst-performers'),
+        fetch('/api/gateway/intelligence/trident'),
       ]);
 
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
@@ -203,15 +299,13 @@ export default function IntelligencePage() {
       }
       setBeliefs(allBeliefs);
 
-      // Trident memories via gateway proxy
-      try {
-        const tridentRes = await fetch('/api/gateway/intelligence/trident');
-        if (tridentRes.ok) {
-          const d = await tridentRes.json();
-          setTridentMemories(d.memories || []);
-          setSonaStatus(d.sona || null);
-        }
-      } catch {}
+      if (tridentRes.status === 'fulfilled' && tridentRes.value.ok) {
+        const d = await tridentRes.value.json();
+        setTridentMemories(d.memories || []);
+        setSonaStatus(d.sona || null);
+        setCognitive(d.cognitive || null);
+        setCounts(d.counts || null);
+      }
     } catch (e) {
       console.error('Intelligence refresh failed:', e);
     } finally {
@@ -225,7 +319,7 @@ export default function IntelligencePage() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const graphData = useMemo(() => buildGraph(tridentMemories, beliefs), [tridentMemories, beliefs]);
+  const graphData = useMemo(() => buildDenseGraph(tridentMemories, beliefs), [tridentMemories, beliefs]);
 
   if (loading) return <div className="flex justify-center items-center h-64"><Spinner size="lg" /></div>;
 
@@ -243,126 +337,279 @@ export default function IntelligencePage() {
       color: b.posterior > 0.6 ? '#22c55e' : b.posterior < 0.4 ? '#ef4444' : '#eab308',
     }));
 
-  const catCounts: Record<string, number> = {};
-  for (const m of tridentMemories) {
-    const cat = m.tags?.includes('outcome') ? 'Trade Outcomes' :
-                m.tags?.includes('entry') ? 'Trade Entries' :
-                m.tags?.includes('research') ? 'Research' :
-                m.tags?.includes('rule') ? 'Rules' :
-                m.tags?.includes('daily') ? 'Daily Summaries' : 'Other';
-    catCounts[cat] = (catCounts[cat] || 0) + 1;
-  }
-
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-white">Intelligence</h1>
-        <p className="text-white/50 text-sm mt-1">Brain, Bayesian learnings, and SONA training status</p>
+        <p className="text-white/50 text-sm mt-1">What the system has learned, what it&apos;s watching, and what it would do right now</p>
       </div>
 
-      {/* Top metrics row */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-        <Card className="bg-white/5 border border-white/10">
-          <CardBody className="p-4">
-            <div className="text-white/40 text-xs mb-1">Beliefs</div>
-            <div className="text-2xl font-bold text-white">{bayesian?.totalBeliefs ?? 0}</div>
-          </CardBody>
-        </Card>
-        <Card className="bg-white/5 border border-white/10">
-          <CardBody className="p-4">
-            <div className="text-white/40 text-xs mb-1">Observations</div>
-            <div className="text-2xl font-bold text-white">{bayesian?.totalObservations ?? 0}</div>
-          </CardBody>
-        </Card>
-        <Card className="bg-white/5 border border-white/10">
-          <CardBody className="p-4">
-            <div className="text-white/40 text-xs mb-1">Accuracy</div>
-            <div className="text-2xl font-bold text-white">{metrics ? `${(metrics.currentAccuracy * 100).toFixed(0)}%` : '--'}</div>
-          </CardBody>
-        </Card>
-        <Card className="bg-white/5 border border-white/10">
-          <CardBody className="p-4">
-            <div className="text-white/40 text-xs mb-1">SONA Patterns</div>
-            <div className="text-2xl font-bold text-white">{sonaStatus?.patterns?.toLocaleString() ?? '--'}</div>
-          </CardBody>
-        </Card>
-        <Card className="bg-white/5 border border-white/10">
-          <CardBody className="p-4">
-            <div className="text-white/40 text-xs mb-1">Trident Memories</div>
-            <div className="text-2xl font-bold text-white">{tridentMemories.length || '--'}</div>
-          </CardBody>
-        </Card>
+      {/* Brain Summary — plain English, "for dummies" view */}
+      <BrainSummary />
+
+      {/* Detailed metrics (collapsed below summary) */}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+        <MetricCard label="Beliefs" value={bayesian?.totalBeliefs ?? 0} />
+        <MetricCard label="Observations" value={bayesian?.totalObservations ?? 0} />
+        <MetricCard label="Accuracy" value={metrics ? `${(metrics.currentAccuracy * 100).toFixed(0)}%` : '--'} />
+        <MetricCard label="SONA Patterns" value={(cognitive?.sonaPatterns || sonaStatus?.patterns || 0).toLocaleString()} sub={cognitive ? `${cognitive.sonaTrajectories} trajectories` : undefined} />
+        <MetricCard label="Trident Memories" value={counts?.total || tridentMemories.length || '--'} sub={cognitive ? `Quality: ${(cognitive.avgQuality * 100).toFixed(0)}%` : undefined} />
+        <MetricCard label="Knowledge Graph" value={cognitive?.graphNodes ?? graphData.nodes.length} sub={`${(cognitive?.graphEdges ?? graphData.links.length).toLocaleString()} edges`} />
       </div>
 
-      {/* Knowledge Graph */}
-      <Card className="bg-white/5 border border-white/10">
-        <CardHeader className="px-4 pt-4 pb-2">
-          <h3 className="text-sm font-semibold text-white/80">Knowledge Graph</h3>
-          <div className="flex gap-3 ml-auto text-[10px]">
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#22c55e]" /> Winning</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#ef4444]" /> Losing</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#3b82f6]" /> Trading</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#8b5cf6]" /> Research</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#f59e0b]" /> Rules</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#06b6d4]" /> SONA</span>
-          </div>
-        </CardHeader>
-        <CardBody className="p-0 overflow-hidden" style={{ height: graphDimensions.height }}>
-          <div ref={graphRef} className="w-full h-full">
-            {graphData.nodes.length > 0 && (
-              <ForceGraph3D
-                width={graphDimensions.width}
-                height={graphDimensions.height}
-                graphData={graphData}
-                nodeLabel={(node: any) => node.name}
-                nodeColor={(node: any) => node.color}
-                nodeVal={(node: any) => node.val}
-                nodeOpacity={0.9}
-                linkColor={(link: any) => link.color}
-                linkOpacity={0.4}
-                linkWidth={1}
-                backgroundColor="rgba(0,0,0,0)"
-                showNavInfo={false}
-                enableNodeDrag={true}
-                enableNavigationControls={true}
-                nodeThreeObjectExtend={true}
-                nodeThreeObject={(node: any) => {
-                  // Add text labels to hub nodes
-                  if (node.group === 'hub') {
-                    const THREE = require('three');
-                    const sprite = new THREE.Sprite(
-                      new THREE.SpriteMaterial({
-                        map: new THREE.CanvasTexture((() => {
-                          const canvas = document.createElement('canvas');
-                          canvas.width = 128;
-                          canvas.height = 48;
-                          const ctx = canvas.getContext('2d')!;
-                          ctx.fillStyle = node.color;
-                          ctx.font = 'bold 20px sans-serif';
-                          ctx.textAlign = 'center';
-                          ctx.fillText(node.name, 64, 30);
-                          return canvas;
-                        })()),
-                        transparent: true,
-                      })
-                    );
-                    sprite.scale.set(20, 8, 1);
-                    sprite.position.y = 8;
-                    return sprite;
-                  }
-                  return false;
-                }}
-              />
+      {/* Knowledge Graph + Detail Flyout */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Card className="bg-white/5 border border-white/10 lg:col-span-2">
+          <CardHeader className="px-4 pt-4 pb-2 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-white/80">Knowledge Graph</h3>
+            <div className="flex gap-3 ml-auto text-[10px] flex-wrap">
+              <Legend color="#3b82f6" label="Trading" />
+              <Legend color="#8b5cf6" label="Research" />
+              <Legend color="#f59e0b" label="Rules" />
+              <Legend color="#06b6d4" label="SONA" />
+              <Legend color="#10b981" label="Daily" />
+              <Legend color="#f97316" label="Entries" />
+              <Legend color="#22c55e" label="Win" />
+              <Legend color="#ef4444" label="Loss" />
+            </div>
+          </CardHeader>
+          <CardBody className="p-0 overflow-hidden" style={{ height: graphDimensions.height }}>
+            <div ref={graphRef} className="w-full h-full">
+              {graphData.nodes.length > 0 && (
+                <ForceGraph3D
+                  width={graphDimensions.width}
+                  height={graphDimensions.height}
+                  graphData={graphData}
+                  nodeLabel={(node: any) => `${node.name} [${node.group}]`}
+                  nodeColor={(node: any) => node.color}
+                  nodeVal={(node: any) => node.val}
+                  nodeOpacity={0.9}
+                  linkColor={(link: any) => link.color}
+                  linkOpacity={0.3}
+                  linkWidth={0.5}
+                  backgroundColor="rgba(0,0,0,0)"
+                  showNavInfo={false}
+                  enableNodeDrag={true}
+                  enableNavigationControls={true}
+                  nodeThreeObjectExtend={true}
+                  onNodeClick={(node: any) => {
+                    setSelectedNode({ node, memory: node.memory });
+                  }}
+                  nodeThreeObject={(node: any) => {
+                    if (node.group?.startsWith('hub')) {
+                      const THREE = require('three');
+                      const canvas = document.createElement('canvas');
+                      canvas.width = 256;
+                      canvas.height = 64;
+                      const ctx = canvas.getContext('2d')!;
+                      ctx.fillStyle = node.color;
+                      ctx.font = `bold ${node.id === 'hub:brain' ? '28' : '22'}px sans-serif`;
+                      ctx.textAlign = 'center';
+                      ctx.fillText(node.name, 128, 42);
+                      const sprite = new THREE.Sprite(
+                        new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                      );
+                      sprite.scale.set(node.id === 'hub:brain' ? 30 : 22, node.id === 'hub:brain' ? 8 : 6, 1);
+                      sprite.position.y = node.id === 'hub:brain' ? 12 : 8;
+                      return sprite;
+                    }
+                    // Ticker nodes get small labels
+                    if (node.group?.startsWith('ticker')) {
+                      const THREE = require('three');
+                      const canvas = document.createElement('canvas');
+                      canvas.width = 128;
+                      canvas.height = 32;
+                      const ctx = canvas.getContext('2d')!;
+                      ctx.fillStyle = node.color;
+                      ctx.font = 'bold 14px sans-serif';
+                      ctx.textAlign = 'center';
+                      ctx.fillText(node.name.split(' ')[0], 64, 20);
+                      const sprite = new THREE.Sprite(
+                        new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                      );
+                      sprite.scale.set(14, 4, 1);
+                      sprite.position.y = 5;
+                      return sprite;
+                    }
+                    return false;
+                  }}
+                  d3AlphaDecay={0.02}
+                  d3VelocityDecay={0.3}
+                  warmupTicks={50}
+                  cooldownTicks={100}
+                />
+              )}
+            </div>
+          </CardBody>
+        </Card>
+
+        {/* Detail Flyout Panel */}
+        <Card className="bg-white/5 border border-white/10">
+          <CardHeader className="px-4 pt-4 pb-2">
+            <h3 className="text-sm font-semibold text-white/80">
+              {selectedNode ? 'Node Detail' : 'Click a node'}
+            </h3>
+          </CardHeader>
+          <CardBody className="px-4 pb-4 overflow-y-auto" style={{ maxHeight: graphDimensions.height - 60 }}>
+            {selectedNode ? (
+              <div className="space-y-3">
+                <div>
+                  <div className="text-lg font-bold" style={{ color: selectedNode.node.color }}>{selectedNode.node.name}</div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <Chip size="sm" variant="flat">{selectedNode.node.group}</Chip>
+                    <button className="text-xs text-white/30 hover:text-white/60" onClick={() => setSelectedNode(null)}>close</button>
+                  </div>
+                </div>
+                {selectedNode.memory && (
+                  <>
+                    <div>
+                      <div className="text-xs text-white/40 mb-1">Title</div>
+                      <div className="text-sm text-white/80">{selectedNode.memory.title}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-white/40 mb-1">Category</div>
+                      <Chip size="sm" variant="flat" color="primary">{selectedNode.memory.category || 'uncategorized'}</Chip>
+                    </div>
+                    {selectedNode.memory.content && (
+                      <div>
+                        <div className="text-xs text-white/40 mb-1">Content</div>
+                        <div className="text-xs text-white/60 whitespace-pre-wrap leading-relaxed bg-white/5 rounded p-2 max-h-64 overflow-y-auto font-mono">
+                          {selectedNode.memory.content}
+                        </div>
+                      </div>
+                    )}
+                    <div>
+                      <div className="text-xs text-white/40 mb-1">Tags</div>
+                      <div className="flex flex-wrap gap-1">
+                        {selectedNode.memory.tags.map((t, i) => (
+                          <Chip key={i} size="sm" variant="flat" color={
+                            t === 'win' ? 'success' : t === 'loss' ? 'danger' : t === 'research' ? 'primary' : t === 'entry' || t === 'buy' ? 'warning' : 'default'
+                          }>{t}</Chip>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-white/40 mb-1">Connections</div>
+                      <div className="text-xs text-white/50">
+                        {graphData.links.filter(l =>
+                          (typeof l.source === 'string' ? l.source : (l.source as any).id) === selectedNode!.node.id ||
+                          (typeof l.target === 'string' ? l.target : (l.target as any).id) === selectedNode!.node.id
+                        ).length} edges
+                      </div>
+                    </div>
+                    <div className="text-xs text-white/30 font-mono">ID: {selectedNode.memory.id}</div>
+                  </>
+                )}
+                {!selectedNode.memory && selectedNode.node.group?.startsWith('hub') && (
+                  <div className="space-y-2">
+                    <div className="text-sm text-white/50">
+                      Hub node — central connector for {selectedNode.node.name.toLowerCase()} memories.
+                    </div>
+                    <div className="text-xs text-white/40">
+                      Connected edges: {graphData.links.filter(l =>
+                        (typeof l.source === 'string' ? l.source : (l.source as any).id) === selectedNode!.node.id ||
+                        (typeof l.target === 'string' ? l.target : (l.target as any).id) === selectedNode!.node.id
+                      ).length}
+                    </div>
+                    {selectedNode.node.id === 'hub:sona' && cognitive && (
+                      <div className="space-y-1.5 pt-2 border-t border-white/5">
+                        <div className="text-xs font-medium text-cyan-400">SONA Stats</div>
+                        <div className="text-xs text-white/50">Patterns: <span className="text-white">{cognitive.sonaPatterns.toLocaleString()}</span></div>
+                        <div className="text-xs text-white/50">Trajectories: <span className="text-white">{cognitive.sonaTrajectories}</span></div>
+                        <div className="text-xs text-white/50">LoRA Epoch: <span className="text-white">{cognitive.loraEpoch}</span></div>
+                        <div className="text-xs text-white/50">Meta: <span className={cognitive.metaPlateau === 'learning' ? 'text-green-400' : 'text-white'}>{cognitive.metaPlateau}</span></div>
+                      </div>
+                    )}
+                    {selectedNode.node.id === 'hub:brain' && cognitive && (
+                      <div className="space-y-1.5 pt-2 border-t border-white/5">
+                        <div className="text-xs font-medium text-blue-400">Cognitive Status</div>
+                        <div className="text-xs text-white/50">Graph: <span className="text-white">{cognitive.graphNodes} nodes / {cognitive.graphEdges.toLocaleString()} edges</span></div>
+                        <div className="text-xs text-white/50">Clusters: <span className="text-white">{cognitive.clusters}</span></div>
+                        <div className="text-xs text-white/50">Avg Quality: <span className="text-white">{(cognitive.avgQuality * 100).toFixed(1)}%</span></div>
+                        <div className="text-xs text-white/50">Drift: <span className={cognitive.driftStatus === 'stable' ? 'text-green-400' : 'text-yellow-400'}>{cognitive.driftStatus}</span></div>
+                        <div className="text-xs text-white/50">Velocity: <span className="text-white">{cognitive.knowledgeVelocity}</span></div>
+                        <div className="text-xs text-white/50">Salience: <span className="text-white">{cognitive.gwtAvgSalience.toFixed(2)}</span></div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!selectedNode.memory && selectedNode.node.group?.startsWith('ticker') && (
+                  <div className="space-y-2">
+                    <div className="text-sm text-white/50">
+                      Ticker aggregate — represents all trades for this instrument.
+                    </div>
+                    {(() => {
+                      const ticker = selectedNode.node.name.split(' ')[0];
+                      const belief = beliefs.find(b => b.subject === ticker);
+                      if (!belief) return null;
+                      return (
+                        <div className="space-y-1.5 pt-2 border-t border-white/5">
+                          <div className="text-xs font-medium" style={{ color: selectedNode.node.color }}>Bayesian Belief</div>
+                          <div className="text-xs text-white/50">Posterior: <span className="text-white">{(belief.posterior * 100).toFixed(1)}%</span></div>
+                          <div className="text-xs text-white/50">Observations: <span className="text-white">{belief.observations}</span></div>
+                          <div className="text-xs text-white/50">Avg Return: <span className={belief.avgReturn >= 0 ? 'text-green-400' : 'text-red-400'}>{(belief.avgReturn * 100).toFixed(2)}%</span></div>
+                        </div>
+                      );
+                    })()}
+                    <div className="text-xs text-white/40">
+                      Connected: {graphData.links.filter(l =>
+                        (typeof l.source === 'string' ? l.source : (l.source as any).id) === selectedNode!.node.id ||
+                        (typeof l.target === 'string' ? l.target : (l.target as any).id) === selectedNode!.node.id
+                      ).length} edges
+                    </div>
+                  </div>
+                )}
+                {!selectedNode.memory && selectedNode.node.group === 'belief' && (
+                  <div className="space-y-2">
+                    <div className="text-sm text-white/50">Bayesian belief from SONA training.</div>
+                    {(() => {
+                      const ticker = selectedNode.node.name.split(' ')[0];
+                      const belief = beliefs.find(b => b.subject === ticker);
+                      if (!belief) return null;
+                      return (
+                        <div className="space-y-1.5 pt-2 border-t border-white/5">
+                          <div className="text-xs text-white/50">Posterior: <span className="text-white">{(belief.posterior * 100).toFixed(1)}%</span></div>
+                          <div className="text-xs text-white/50">Observations: <span className="text-white">{belief.observations}</span></div>
+                          <div className="text-xs text-white/50">Avg Return: <span className={belief.avgReturn >= 0 ? 'text-green-400' : 'text-red-400'}>{(belief.avgReturn * 100).toFixed(2)}%</span></div>
+                          <div className="text-xs text-white/50">Domain: <span className="text-white">{belief.domain}</span></div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-white/40">Click any node in the graph to view its details here.</p>
+                <div className="text-xs text-white/30 space-y-1">
+                  <div>Large nodes = category hubs (Trading, Research, etc.)</div>
+                  <div>Medium nodes = tickers/instruments</div>
+                  <div>Small nodes = individual memories</div>
+                  <div>Green = winning trades</div>
+                  <div>Red = losing trades</div>
+                  <div>Drag to rotate, scroll to zoom</div>
+                </div>
+                {counts && (
+                  <div className="mt-3 space-y-1.5">
+                    <div className="text-xs text-white/40 font-medium">Memory Breakdown</div>
+                    <BreakdownRow label="Trade Outcomes" count={counts.outcomes} max={counts.total} color="success" />
+                    <BreakdownRow label="Entries" count={counts.entries} max={counts.total} color="warning" />
+                    <BreakdownRow label="Research" count={counts.research} max={counts.total} color="secondary" />
+                    <BreakdownRow label="Rules" count={counts.rules} max={counts.total} color="primary" />
+                    <BreakdownRow label="Dailies" count={counts.dailies} max={counts.total} color="default" />
+                  </div>
+                )}
+              </div>
             )}
-          </div>
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </div>
 
       {/* Trident + Bayesian panels */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card className="bg-white/5 border border-white/10">
           <CardHeader className="px-4 pt-4 pb-2">
-            <h3 className="text-sm font-semibold text-white/80">Trident (Brain MCP)</h3>
+            <h3 className="text-sm font-semibold text-white/80">Trident Cognitive Engine</h3>
             <Chip size="sm" color={sonaStatus?.connected ? 'success' : 'danger'} variant="flat" className="ml-auto">
               {sonaStatus?.connected ? 'Connected' : 'Disconnected'}
             </Chip>
@@ -371,19 +618,27 @@ export default function IntelligencePage() {
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div><span className="text-white/40">Tier:</span> <span className="text-white ml-1">{sonaStatus?.tier || 'unknown'}</span></div>
               <div><span className="text-white/40">Memories:</span> <span className="text-white ml-1">{sonaStatus?.memories?.toLocaleString() || 0}</span></div>
-              <div><span className="text-white/40">SONA Patterns:</span> <span className="text-white ml-1">{sonaStatus?.patterns?.toLocaleString() || 0}</span></div>
-              <div><span className="text-white/40">Pareto Front:</span> <span className="text-white ml-1">{sonaStatus?.pareto?.toLocaleString() || 0}</span></div>
+              <div><span className="text-white/40">SONA Patterns:</span> <span className="text-white ml-1">{(cognitive?.sonaPatterns || sonaStatus?.patterns || 0).toLocaleString()}</span></div>
+              <div><span className="text-white/40">LoRA Epoch:</span> <span className="text-white ml-1">{cognitive?.loraEpoch ?? '--'}</span></div>
+              <div><span className="text-white/40">Drift Status:</span> <span className={`ml-1 ${cognitive?.driftStatus === 'stable' ? 'text-green-400' : cognitive?.driftStatus === 'drifting' ? 'text-yellow-400' : 'text-white'}`}>{cognitive?.driftStatus ?? '--'}</span></div>
+              <div><span className="text-white/40">Meta Learning:</span> <span className={`ml-1 ${cognitive?.metaPlateau === 'learning' ? 'text-green-400' : 'text-white'}`}>{cognitive?.metaPlateau ?? '--'}</span></div>
+              <div><span className="text-white/40">Clusters:</span> <span className="text-white ml-1">{cognitive?.clusters ?? '--'}</span></div>
+              <div><span className="text-white/40">Avg Quality:</span> <span className="text-white ml-1">{cognitive ? `${(cognitive.avgQuality * 100).toFixed(1)}%` : '--'}</span></div>
             </div>
-            {Object.keys(catCounts).length > 0 && (
-              <div className="space-y-1.5 mt-2">
-                <div className="text-xs text-white/40 mb-1">Memory Breakdown</div>
-                {Object.entries(catCounts).sort((a, b) => b[1] - a[1]).map(([cat, count]) => (
-                  <div key={cat} className="flex items-center gap-2 text-xs">
-                    <span className="text-white/60 w-28">{cat}</span>
-                    <Progress value={count} maxValue={Math.max(...Object.values(catCounts))} size="sm" className="flex-1" color="primary" />
-                    <span className="text-white/50 w-8 text-right">{count}</span>
-                  </div>
-                ))}
+            {cognitive && (
+              <div className="grid grid-cols-3 gap-2 pt-2 border-t border-white/5">
+                <div className="text-center">
+                  <div className="text-lg font-bold text-cyan-400">{cognitive.graphNodes}</div>
+                  <div className="text-[10px] text-white/40">Graph Nodes</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-lg font-bold text-cyan-400">{cognitive.graphEdges.toLocaleString()}</div>
+                  <div className="text-[10px] text-white/40">Graph Edges</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-lg font-bold text-cyan-400">{cognitive.knowledgeVelocity}</div>
+                  <div className="text-[10px] text-white/40">Knowledge Velocity</div>
+                </div>
               </div>
             )}
           </CardBody>
@@ -464,22 +719,26 @@ export default function IntelligencePage() {
       {tridentMemories.length > 0 && (
         <Card className="bg-white/5 border border-white/10">
           <CardHeader className="px-4 pt-4 pb-2">
-            <h3 className="text-sm font-semibold text-white/80">Recent Trident Memories</h3>
+            <h3 className="text-sm font-semibold text-white/80">Recent Trident Memories ({tridentMemories.length})</h3>
           </CardHeader>
           <CardBody className="px-4 pb-4">
             <div className="space-y-1.5 max-h-64 overflow-y-auto">
-              {tridentMemories.slice(0, 30).map((m) => (
-                <div key={m.id} className="flex items-center gap-2 text-xs py-1 border-b border-white/5">
+              {tridentMemories.slice(0, 50).map((m) => (
+                <div key={m.id} className="flex items-center gap-2 text-xs py-1 border-b border-white/5 cursor-pointer hover:bg-white/5 rounded px-1"
+                  onClick={() => setSelectedNode({ node: { id: m.id, name: m.title, group: 'memory', val: 3, color: '#888', memory: m }, memory: m })}
+                >
                   <Chip size="sm" variant="flat" color={
                     m.tags?.includes('win') ? 'success' :
                     m.tags?.includes('loss') ? 'danger' :
                     m.tags?.includes('research') ? 'primary' :
+                    m.tags?.includes('entry') ? 'warning' :
                     'default'
                   }>
                     {m.tags?.includes('outcome') ? 'Trade' :
                      m.tags?.includes('entry') ? 'Buy' :
                      m.tags?.includes('research') ? 'Research' :
-                     m.tags?.includes('rule') ? 'Rule' : 'Memory'}
+                     m.tags?.includes('rule') ? 'Rule' :
+                     m.tags?.includes('daily') ? 'Daily' : 'Memory'}
                   </Chip>
                   <span className="text-white/70 flex-1 truncate">{m.title}</span>
                 </div>
@@ -488,6 +747,37 @@ export default function IntelligencePage() {
           </CardBody>
         </Card>
       )}
+    </div>
+  );
+}
+
+function MetricCard({ label, value, sub }: { label: string; value: string | number; sub?: string }) {
+  return (
+    <Card className="bg-white/5 border border-white/10">
+      <CardBody className="p-3">
+        <div className="text-white/40 text-xs mb-1">{label}</div>
+        <div className="text-xl font-bold text-white">{value}</div>
+        {sub && <div className="text-xs text-white/30 mt-0.5">{sub}</div>}
+      </CardBody>
+    </Card>
+  );
+}
+
+function Legend({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+      {label}
+    </span>
+  );
+}
+
+function BreakdownRow({ label, count, max, color }: { label: string; count: number; max: number; color: 'success' | 'warning' | 'secondary' | 'primary' | 'default' }) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="text-white/60 w-28">{label}</span>
+      <Progress value={count} maxValue={max || 1} size="sm" className="flex-1" color={color} />
+      <span className="text-white/50 w-8 text-right">{count}</span>
     </div>
   );
 }
