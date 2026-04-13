@@ -273,6 +273,15 @@ async function main(): Promise<void> {
   // here and never referenced again anywhere in the codebase. Per Trident →
   // this functionality is covered by the Brain memory + SONA training loop.
 
+  // 2d. Initialize Research Database (PostgreSQL + pgvector)
+  try {
+    const { initResearchDb } = await import('../../research-db/src/index.js');
+    await initResearchDb();
+    log('Research database connected (PostgreSQL + pgvector)');
+  } catch (e: any) {
+    log(`Research database not available: ${e.message} — running without PG (SQLite fallback)`);
+  }
+
   // 3. Start API server in-process (lightweight, no need for separate process)
   await startApiServer(stateStore);
 

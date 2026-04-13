@@ -37,3 +37,8 @@ export type { ExitPlan } from './exit-analyst.js';
 
 export { SectorRotator } from './sector-rotator.js';
 export type { SectorBias, SectorRotationResult } from './sector-rotator.js';
+
+export { scoreConviction } from './conviction-scorer.js';
+export type { SignalCluster, ActiveSignal, ConvictionResult } from './conviction-scorer.js';
+
+export { detectSignalClusters, generateThesis, runResearchCycle } from './thesis-generator.js';
