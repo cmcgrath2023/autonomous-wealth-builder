@@ -215,8 +215,8 @@ export class OpenClawEngine {
       }
     } catch {}
 
-    // 3. Check manager health
-    for (const name of ['fin', 'liza', 'ferd']) {
+    // 3. Check manager health (Liza + Ferd stripped 2026-04-10 — unintegrated)
+    for (const name of ['fin']) {
       const status = this.store.get(`manager:${name}:status`) || this.store.get(`manager_${name}_status`);
       if (!status) continue;
       try {

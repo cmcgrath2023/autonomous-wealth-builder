@@ -104,18 +104,30 @@ export class BrainClient {
   // We parse win/loss from tags and content instead.
 
   async getTickerHistory(ticker: string): Promise<{ wins: number; losses: number; avgReturn: number; shouldAvoid: boolean }> {
-    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' trade outcome')}&limit=30`);
+    // Search for the exact title format we write: "Trade WIN: TICKER" or "Trade LOSS: TICKER"
+    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent('Trade ' + ticker)}&limit=30`);
     if (!results || !Array.isArray(results) || results.length === 0) {
       return { wins: 0, losses: 0, avgReturn: 0, shouldAvoid: false };
     }
 
     let wins = 0, losses = 0, totalReturn = 0, count = 0;
     for (const m of results) {
-      // Only match trade outcomes for this specific ticker
-      if (!m.tags?.includes(ticker.toLowerCase()) || !m.tags?.includes('outcome')) continue;
+      // Parse from TITLE (authoritative — always present in the response).
+      // Title format: "Trade WIN: NVDA long $105.20" or "Trade LOSS: AFJKU long $-6411.87"
+      // Trident search does NOT return tags reliably — so we match on the title string.
+      const title = m.title || '';
+      if (!title.includes('Trade ') || !title.toUpperCase().includes(ticker.toUpperCase())) continue;
 
-      if (m.tags.includes('win')) wins++;
-      else if (m.tags.includes('loss')) losses++;
+      // Skip regret signals — those are post-exit tracking memories, not real trades.
+      // They use "Reason: regret:..." in content and pnl=0.
+      if (m.content?.includes('regret:')) continue;
+
+      const isWin = title.includes('WIN');
+      const isLoss = title.includes('LOSS');
+      if (!isWin && !isLoss) continue;
+
+      if (isWin) wins++;
+      else losses++;
       count++;
 
       // Parse P&L percentage from content: "P&L: $X.XX (Y.Y%)"
@@ -138,19 +150,25 @@ export class BrainClient {
 
     const outcomes: Array<{ ticker: string; success: boolean; returnPct: number; reason: string }> = [];
     for (const m of results) {
-      if (!m.tags?.includes('outcome')) continue;
+      // Parse from TITLE — Trident's search doesn't reliably return tags.
+      // Title format: "Trade WIN: NVDA long $105.20" or "Trade LOSS: AFJKU long $-6411.87"
+      const title = m.title || '';
+      const titleMatch = title.match(/^Trade (WIN|LOSS): (\S+)\s+(long|short)/);
+      if (!titleMatch) continue;
+      // Skip regret signals — post-exit tracking memories, not real trades
+      if (m.content?.includes('regret:')) continue;
 
-      // Parse ticker from tags (lowercase ticker tag that isn't a known keyword)
-      const knownTags = new Set(['trade', 'outcome', 'win', 'loss', 'stop_loss', 'take_profit', 'eod_close', 'trailing_stop', 'circuit_breaker', 'rotation', 'long', 'short', 'momentum', 'entry', 'buy']);
-      const ticker = m.tags.find((t: string) => !knownTags.has(t) && t.length >= 1 && t.length <= 10)?.toUpperCase();
-      if (!ticker) continue;
+      const success = titleMatch[1] === 'WIN';
+      const ticker = titleMatch[2].toUpperCase();
+      if (!ticker || ticker.length < 1 || ticker.length > 10) continue;
 
-      const success = m.tags.includes('win');
       let returnPct = 0;
       const pctMatch = m.content?.match(/\((-?[\d.]+)%\)/);
       if (pctMatch) returnPct = parseFloat(pctMatch[1]) / 100;
 
-      const reason = m.tags.find((t: string) => ['stop_loss', 'take_profit', 'eod_close', 'trailing_stop', 'circuit_breaker', 'rotation'].includes(t)) || 'unknown';
+      // Parse reason from content: "Reason: stop_loss"
+      const reasonMatch = m.content?.match(/Reason:\s*(\S+)/);
+      const reason = reasonMatch ? reasonMatch[1] : 'unknown';
 
       outcomes.push({ ticker, success, returnPct, reason });
     }

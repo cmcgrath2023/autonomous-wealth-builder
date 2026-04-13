@@ -20,7 +20,7 @@ let quoteTimer: ReturnType<typeof setInterval> | undefined;
 let midstream: MidStream | undefined;
 let store: GatewayStateStore | undefined;
 
-function writeQuotesToStore(quotes: Array<{ ticker: string; [k: string]: unknown }>): void {
+function writeQuotesToStore(quotes: Array<{ ticker: string }>): void {
   if (!store || quotes.length === 0) return;
   for (const q of quotes) {
     try {

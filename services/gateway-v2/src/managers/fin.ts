@@ -9,6 +9,7 @@
 import { GatewayStateStore } from '../../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from '../config-bus.js';
 import { brain } from '../brain-client.js';
+import { recordClosedTrade } from '../trade-recorder.js';
 
 async function postToDiscord(text: string): Promise<void> {
   const webhook = process.env.DISCORD_WEBHOOK_URL;
@@ -208,7 +209,12 @@ export class Fin {
         // Bank outsized winners (> $500 unrealized)
         if (unrealized > OUTSIZED_WINNER_THRESHOLD && qty > 0) {
           actions.push(`BANKING ${symbol}: $${unrealized.toFixed(2)} unrealized`);
-          await this.sellPosition(baseUrl, headers, symbol, qty, actions);
+          await this.sellPosition(baseUrl, headers, symbol, qty, actions, {
+            reason: 'fin_bank_winner',
+            entryPrice: parseFloat(pos.avg_entry_price || '0') || null,
+            exitPrice: parseFloat(pos.current_price || '0') || 0,
+            pnl: unrealized,
+          });
           continue;
         }
 
@@ -250,7 +256,12 @@ export class Fin {
         if (pnl < -30) {
           console.log(`[Fin] EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
           await postToDiscord(`🚨 EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
-          await this.sellPosition(baseUrl, headers, symbol, qty, actions);
+          await this.sellPosition(baseUrl, headers, symbol, qty, actions, {
+            reason: 'fin_emergency_cut',
+            entryPrice: parseFloat(pos.avg_entry_price || '0') || null,
+            exitPrice: parseFloat(pos.current_price || '0') || 0,
+            pnl,
+          });
           actions.push(`EMERGENCY CUT ${symbol} ($${pnl.toFixed(2)})`);
         }
       }
@@ -356,6 +367,7 @@ Analyze: What's working? What's not? Should we cut any losers? Are we positioned
   private async sellPosition(
     baseUrl: string, headers: Record<string, string>,
     symbol: string, qty: number, actions: string[],
+    context?: { reason: string; entryPrice: number | null; exitPrice: number; pnl: number },
   ): Promise<void> {
     try {
       // Crypto symbols: position API returns "AVAXUSD" but orders need "AVAX/USD"
@@ -372,6 +384,28 @@ Analyze: What's working? What's not? Should we cut any losers? Are we positioned
       if (res.ok) {
         actions.push(`SOLD ${symbol} x${qty}`);
         await postToDiscord(`SOLD ${orderSymbol} x${qty} (${tif})`);
+        // Record the close so the circuit breaker + dashboards aren't blind.
+        // PnL here is based on unrealized at decision time — the Alpaca
+        // reconciler running in trade-engine will upsert the authoritative
+        // fill price on its next pass.
+        if (context) {
+          let orderId: string | null = null;
+          try {
+            const body = await res.clone().json() as any;
+            orderId = body?.id ?? null;
+          } catch {}
+          recordClosedTrade(this.store, {
+            ticker: symbol,
+            direction: 'long',
+            reason: context.reason,
+            qty,
+            entryPrice: context.entryPrice,
+            exitPrice: context.exitPrice,
+            pnl: context.pnl,
+            orderId,
+            source: 'fin',
+          });
+        }
       } else {
         const body = await res.text();
         actions.push(`SELL FAILED ${symbol}: ${res.status} ${body}`);

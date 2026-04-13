@@ -354,7 +354,11 @@ export class Warren {
   private getRecentLearnings(limit: number): string[] {
     try {
       const reports = this.store.getReports('warren', limit);
-      return reports.map(r => `${r.summary} → ${r.strategy?.action || 'no action'} (${r.meta?.outcome || '?'})`);
+      return reports.map(r => {
+        const strategy = r.strategy as { action?: string } | null;
+        const meta = r.meta as { outcome?: string } | null;
+        return `${r.summary} → ${strategy?.action || 'no action'} (${meta?.outcome || '?'})`;
+      });
     } catch { return []; }
   }
 
@@ -362,8 +366,6 @@ export class Warren {
 
   private async runTeamReview(dailyPnl: number, positions: number, deployed: number, managers: ManagerHealth[], urgency: Urgency): Promise<void> {
     const finStatus = this.store.get('manager_fin_status');
-    const lizaStatus = this.store.get('manager_liza_status');
-    const ferdStatus = this.store.get('manager_ferd_status');
     const forexRaw = this.store.get('forex_positions');
     const tradeStatus = this.store.get('trade_engine_status');
 
@@ -372,8 +374,6 @@ export class Warren {
       `Positions: ${positions}, Deployed: $${deployed.toFixed(0)}, Urgency: ${urgency}`,
       `Managers: ${managers.map(m => `${m.name}=${m.healthy?'UP':'DOWN'}`).join(', ')}`,
       finStatus ? `Fin: ${JSON.parse(finStatus).actions?.slice(0,3).join('; ') || 'idle'}` : 'Fin: no report',
-      lizaStatus ? `Liza: ${JSON.parse(lizaStatus).lastAction || 'idle'}` : 'Liza: no report',
-      ferdStatus ? `Ferd: ${JSON.parse(ferdStatus).lastAction || 'idle'}` : 'Ferd: no report',
       tradeStatus ? `TradeEngine: heartbeat ${JSON.parse(tradeStatus).heartbeatNumber || 0}` : 'TradeEngine: no status',
     ].join('\n');
 
@@ -467,12 +467,16 @@ export class Warren {
   getLearnings(): Array<{ observation: string; action: string; outcome: string; score: number }> {
     try {
       const reports = this.store.getReports('warren', 50);
-      return reports.map(r => ({
-        observation: r.summary,
-        action: r.strategy?.action || '',
-        outcome: String(r.meta?.outcome || ''),
-        score: Number(r.meta?.score || 0),
-      }));
+      return reports.map(r => {
+        const strategy = r.strategy as { action?: string } | null;
+        const meta = r.meta as { outcome?: string; score?: number } | null;
+        return {
+          observation: r.summary,
+          action: strategy?.action || '',
+          outcome: String(meta?.outcome || ''),
+          score: Number(meta?.score || 0),
+        };
+      });
     } catch { return []; }
   }
 

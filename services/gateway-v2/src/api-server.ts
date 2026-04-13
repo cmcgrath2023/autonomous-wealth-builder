@@ -1,4 +1,7 @@
 import express, { Request, Response } from 'express';
+// Alias the global fetch Response for HTTP client typing — the `Response`
+// imported from express shadows it inside this module.
+type FetchResponse = globalThis.Response;
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
 
@@ -291,45 +294,88 @@ app.get('/api/intelligence/metrics', (_req: Request, res: Response) => {
   } catch { res.json({}); }
 });
 
-// Trident / Brain intelligence endpoint — proxies credentials from gateway env
-app.get('/api/intelligence/trident', async (_req: Request, res: Response) => {
+// Trident intelligence — cached with background refresh to avoid timeout on every request
+let _tridentCache: { data: any; fetchedAt: number; refreshing: boolean } = { data: null, fetchedAt: 0, refreshing: false };
+
+async function fetchTridentData(): Promise<any> {
   const brainUrl = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
   const brainKey = process.env.BRAIN_API_KEY || '';
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (brainKey) headers['Authorization'] = `Bearer ${brainKey}`;
+  const hdrs: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (brainKey) hdrs['Authorization'] = `Bearer ${brainKey}`;
 
+  const search = (q: string, limit = 100) =>
+    fetch(`${brainUrl}/v1/memories/search?q=${encodeURIComponent(q)}&limit=${limit}`, { headers: hdrs, signal: AbortSignal.timeout(12_000) })
+      .then(r => r.ok ? r.json() : []).catch(() => []);
+
+  // Stage 1: Health + SONA (lightweight) — sequential to avoid overloading Trident
+  let hRes: PromiseSettledResult<FetchResponse>, sRes: PromiseSettledResult<FetchResponse>;
   try {
-    const [healthRes, memRes] = await Promise.allSettled([
-      fetch(`${brainUrl}/v1/health`, { headers, signal: AbortSignal.timeout(5000) }),
-      fetch(`${brainUrl}/v1/memories/search?q=trade+outcome+buy+research&limit=50`, { headers, signal: AbortSignal.timeout(8000) }),
-    ]);
+    const h = await fetch(`${brainUrl}/v1/health`, { headers: hdrs, signal: AbortSignal.timeout(8000) });
+    hRes = { status: 'fulfilled', value: h };
+  } catch (e) { hRes = { status: 'rejected', reason: e }; }
+  try {
+    const s = await fetch(`${brainUrl}/v1/train`, { method: 'POST', headers: hdrs, body: JSON.stringify({ input: '__ping__', output: 'status' }), signal: AbortSignal.timeout(15000) });
+    sRes = { status: 'fulfilled', value: s };
+  } catch (e) { sRes = { status: 'rejected', reason: e }; }
 
-    const health = healthRes.status === 'fulfilled' && healthRes.value.ok ? await healthRes.value.json() : null;
-    const memories = memRes.status === 'fulfilled' && memRes.value.ok ? await memRes.value.json() : [];
+  const health = hRes.status === 'fulfilled' && hRes.value.ok ? await hRes.value.json() : null;
+  const connected = !!(health?.status && (health.service === 'trident' || health.database === 'connected'));
 
-    const connected = !!(health?.status && (health.service === 'trident' || health.database === 'connected'));
+  let sona: any = { patterns: 0, pareto: 0, memories: 0 };
+  let cognitive: any = null;
+  if (sRes.status === 'fulfilled' && sRes.value.ok) {
+    const d = await sRes.value.json() as any;
+    sona = { patterns: d.sona_patterns || 0, pareto: d.pareto_after || 0, memories: d.memory_count || 0 };
+    cognitive = {
+      sonaPatterns: d.sona_patterns || 0, paretoFront: d.pareto_after || 0,
+      memoryCount: d.memory_count || 0, graphNodes: d.memory_count || 0,
+      driftStatus: d.status || 'unknown', sonaMessage: d.sona_message || '',
+      // These require MCP cognitive_status — unavailable via REST
+      graphEdges: 0, clusters: 0, avgQuality: 0, loraEpoch: 0,
+      sonaTrajectories: 0, metaPlateau: 'unknown', knowledgeVelocity: 0, gwtAvgSalience: 0,
+    };
+  }
 
-    // SONA ping for pattern count
-    let sona = { patterns: 0, pareto: 0, memories: 0 };
-    try {
-      const trainRes = await fetch(`${brainUrl}/v1/train`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ input: '__ping__', output: 'status' }),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (trainRes.ok) {
-        const d = await trainRes.json() as any;
-        sona = { patterns: d.sona_patterns || 0, pareto: d.pareto_after || 0, memories: d.memory_count || 0 };
-      }
-    } catch {}
+  // Stage 2: Memory searches — 2 at a time to not overwhelm Trident
+  const [outcomes, entries] = await Promise.allSettled([search('TRADE CLOSED outcome', 150), search('BOUGHT entry buy', 80)]);
+  const [research, rules, dailies] = await Promise.allSettled([search('research cycle stars', 50), search('trading rule', 50), search('daily summary', 50)]);
 
-    res.json({
-      memories: (Array.isArray(memories) ? memories : []).map((m: any) => ({
-        id: m.id, title: m.title, category: m.category, tags: m.tags || [],
-      })),
-      sona: { connected, tier: health?.tier || (connected ? 'builder' : 'unknown'), ...sona },
-    });
+  const arr = (r: PromiseSettledResult<any>) => (r.status === 'fulfilled' && Array.isArray(r.value)) ? r.value : [];
+  const seen = new Set<string>();
+  const allMemories: any[] = [];
+  for (const mem of [...arr(outcomes), ...arr(entries), ...arr(research), ...arr(rules), ...arr(dailies)]) {
+    if (mem?.id && !seen.has(mem.id)) {
+      seen.add(mem.id);
+      allMemories.push({ id: mem.id, title: mem.title, category: mem.category, tags: mem.tags || [], content: mem.content });
+    }
+  }
+
+  return {
+    memories: allMemories,
+    sona: { connected, tier: health?.tier || (connected ? 'builder' : 'unknown'), ...sona },
+    cognitive,
+    counts: { outcomes: arr(outcomes).length, entries: arr(entries).length, research: arr(research).length, rules: arr(rules).length, dailies: arr(dailies).length, total: allMemories.length },
+  };
+}
+
+app.get('/api/intelligence/trident', async (_req: Request, res: Response) => {
+  try {
+    // Return cache if fresh (60s TTL)
+    if (_tridentCache.data && Date.now() - _tridentCache.fetchedAt < 60_000) {
+      return res.json(_tridentCache.data);
+    }
+    // If stale cache exists and a refresh is in progress, return stale
+    if (_tridentCache.data && _tridentCache.refreshing) {
+      return res.json({ ..._tridentCache.data, stale: true });
+    }
+    // Fetch fresh
+    _tridentCache.refreshing = true;
+    const data = await fetchTridentData();
+    _tridentCache = { data, fetchedAt: Date.now(), refreshing: false };
+    res.json(data);
   } catch (e: any) {
+    _tridentCache.refreshing = false;
+    if (_tridentCache.data) return res.json({ ..._tridentCache.data, stale: true });
     res.status(500).json({ error: e.message, memories: [], sona: null });
   }
 });

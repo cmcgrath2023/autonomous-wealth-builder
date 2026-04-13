@@ -20,7 +20,7 @@ export interface ForexQuote {
 
 export interface ForexSignal {
   symbol: string;
-  strategy: 'session_momentum' | 'carry_trade' | 'news_play';
+  strategy: 'session_momentum' | 'carry_trade' | 'news_play' | 'neural_momentum';
   direction: 'long' | 'short';
   confidence: number;
   entry: number;

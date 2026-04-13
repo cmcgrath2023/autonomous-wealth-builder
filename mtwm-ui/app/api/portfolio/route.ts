@@ -168,6 +168,20 @@ export async function GET() {
     const wins = closedTrades.filter((t: any) => (t.pnl || 0) > 0);
     const losses = closedTrades.filter((t: any) => (t.pnl || 0) < 0);
 
+    // TODAY'S REALIZED TRADES — the ones Alpaca's position view hides.
+    // These are the trades opened AND closed today. This is what explains
+    // the gap between "all positions green" and "daily P&L deeply red".
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayClosedTrades = closedTrades
+      .filter((t: any) => {
+        const closedAt = t.closedAt || t.closed_at || '';
+        return closedAt.startsWith(todayStr);
+      })
+      .sort((a: any, b: any) => (a.pnl || 0) - (b.pnl || 0));  // worst first
+    const todayRealizedPnl = todayClosedTrades.reduce((sum: number, t: any) => sum + (t.pnl || 0), 0);
+    const todayWins = todayClosedTrades.filter((t: any) => (t.pnl || 0) > 0).length;
+    const todayLosses = todayClosedTrades.filter((t: any) => (t.pnl || 0) < 0).length;
+
     return NextResponse.json({
       totalValue: Math.round(totalValue),
       initialBalance: INITIAL_BALANCE,
@@ -180,11 +194,27 @@ export async function GET() {
       // Today's P&L (from Alpaca: equity - last_equity)
       dayPnl: Math.round(dayPnl * 100) / 100,
       dayPnlPercent: Math.round(dayPnlPercent * 100) / 100,
+      // TODAY'S REALIZED — the trades Alpaca's position view hides (closed today).
+      // These are the round-trip trades that explain the gap between
+      // "all held positions green" and "daily P&L red".
+      todayRealizedPnl: Math.round(todayRealizedPnl * 100) / 100,
+      todayClosedTrades: todayClosedTrades.map((t: any) => ({
+        ticker: t.ticker,
+        pnl: Math.round((t.pnl || 0) * 100) / 100,
+        entryPrice: t.entry_price ?? t.entryPrice ?? null,
+        exitPrice: t.exit_price ?? t.exitPrice ?? null,
+        qty: t.qty ?? null,
+        reason: t.reason || '',
+        closedAt: t.closedAt || t.closed_at || '',
+      })),
+      todayTradeCount: todayClosedTrades.length,
+      todayWins,
+      todayLosses,
       // Legacy fields (keep backward compat)
       dayChange: Math.round(dayPnl),
       dayChangePercent: Math.round(dayPnlPercent * 100) / 100,
       // Broker status
-      brokerConnected: account.connected ?? (account.status === 'ACTIVE') ?? false,
+      brokerConnected: account.connected ?? (account.status === 'ACTIVE' || false),
       buyingPower: account.buyingPower ?? parseFloat(account.buying_power || '0'),
       cash: account.cash ?? parseFloat(account.cash || '0'),
       // Trade stats

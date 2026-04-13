@@ -4,14 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch gateway/src/server.ts",
+    "dev": "tsx watch gateway-v2/src/index.ts",
     "build": "tsc",
-    "start": "node dist/gateway/src/server.js",
-    "dev:all": "concurrently \"tsx watch gateway/src/server.ts\" \"tsx watch midstream/src/server.ts\""
+    "start": "node dist/gateway-v2/src/index.js",
+    "dev:all": "concurrently \"tsx watch gateway-v2/src/index.ts\" \"tsx watch midstream/src/server.ts\""
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.47",
     "@ag-ui/core": "^0.0.47",
+    "@anthropic-ai/sdk": "^0.87.0",
     "@xenova/transformers": "^2.17.2",
     "agentdb": "^3.0.0-alpha.10",
     "better-sqlite3": "^11.0.0",

@@ -20,10 +20,13 @@ import { ForexScanner } from '../../forex-scanner/src/index.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
 import { loadCredentials, getAlpacaHeaders, ALPACA_DATA_URL, FOREX_SERVICE_URL } from './config-bus.js';
-import { DailyOptimizer, getMarketCondition } from '../../mincut/src/daily-optimizer.js';
+// STRIPPED 2026-04-10: DailyOptimizer + getMarketCondition. Dead code —
+// optimize() was never called, _lastStrategy stayed null forever.
 import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
+import { recordClosedTrade, reconcileWithAlpaca, runPostExitFollower } from './trade-recorder.js';
+import { RiskManager, MacroAnalyst } from './analysts/index.js';
 
 // Shared Bayesian instance — populated via IPC from parent process
 let _bayesian: BayesianIntelligence | null = null;
@@ -48,6 +51,39 @@ const MAX_POSITIONS = 10;
 const BUDGET_MAX = 25_000;
 const DAILY_LOSS_LIMIT = -1_000; // Hard circuit breaker — scaled with $25K budget
 const FOREX_BANK = 50;
+
+// ─── Mover quality gate ───────────────────────────────────────────────────
+// Blocks the two failure modes that produced the 2026-04-10 -$6,787 incident:
+//   1. AFJKU — SPAC unit, no liquidity, bought 191 @ $78.57, exited @ $45
+//   2. BBLGW — warrant, ran +240% pre-entry, bought 31 @ $17, collapsed to $1
+// Both slipped past the $10 price floor and the "+2%+ change" mover filter.
+//
+// Rules:
+//   - Reject tickers matching SPAC unit/warrant suffix patterns
+//   - Reject daily moves over BLOWOFF_PCT — we're already at the top
+//   - Reject daily trade count below MIN_TRADE_COUNT — can't exit cleanly
+const BLOWOFF_PCT = 60;            // RAISED from 30 — was blocking real macro-driven sector
+                                    // moves (CVX +38%, OXY +49% on Iran oil spike). 60%
+                                    // still catches true garbage (SKYQ +73% pump).
+const MIN_TRADE_COUNT = 5_000;     // LOWERED from 10K — too restrictive early in session
+const SPAC_SUFFIX_RE = /^[A-Z]{2,5}(U|W|WS)$/;  // matches AFJKU, BBLGW, ABCWS etc.
+
+/**
+ * Quality gate — stripped to ONLY structural blocks after 2026-04-13 incident
+ * where blow-off % and trade_count thresholds blocked CVX (+38%), OXY (+49%),
+ * LMT, RTX, GD, DVN, SLB — all legitimate stocks during the Iran oil spike.
+ *
+ * ONLY blocks: SPAC unit/warrant suffixes. Everything else is allowed through
+ * and handled by Trident + position limits downstream.
+ */
+function moverQualityGate(
+  mover: { symbol: string; price?: number; percent_change?: number; trade_count?: number },
+): { blocked: boolean; reason: string } {
+  if (SPAC_SUFFIX_RE.test(mover.symbol)) {
+    return { blocked: true, reason: `SPAC unit/warrant suffix (${mover.symbol})` };
+  }
+  return { blocked: false, reason: '' };
+}
 const FOREX_CUT = -20;
 const SL_DOMINANCE_HALT = 0.70;
 const MIN_STOCK_PRICE = 10; // No penny stocks — minimum $10/share
@@ -171,8 +207,10 @@ export class TradeEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private recent: HeartbeatResult[] = [];
-  private dailyOptimizer: DailyOptimizer;
+  // dailyOptimizer stripped 2026-04-10 — dead code
   private _lastStrategy: { riskBudget: number; takeProfitTarget: number; approach: string; maxNewPositions: number; actions: string[] } | null = null;
+  private riskManager!: RiskManager;  // Wave 1 analyst — initialized in constructor after store is ready
+  private macroAnalyst!: MacroAnalyst; // Wave 2 analyst — reads latest regime verdict, provides sizing multiplier
   private get _recentBuys(): Map<string, number> {
     try {
       const raw = this.store.get('recent_buys_today');
@@ -183,12 +221,19 @@ export class TradeEngine {
     } catch {}
     return new Map();
   }
-  private _trackBuy(ticker: string): void {
+  private _trackBuy(ticker: string, price = 0, qty = 0, orderId: string | null = null): void {
     const buys = this._recentBuys;
     buys.set(ticker, Date.now());
     const obj: Record<string, number> = {};
     for (const [k, v] of buys) obj[k] = v;
     this.store.set('recent_buys_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), buys: obj }));
+    // Persistent record (survives midnight reset) — the manual-trade detector
+    // reads this so overnight holds are NOT mislabeled as manual.
+    try {
+      this.store.recordSystemBuy({ ticker, price, qty, clientOrderId: orderId });
+    } catch (e) {
+      console.warn(`[TradeEngine] recordSystemBuy failed for ${ticker}:`, (e as Error).message);
+    }
   }
 
   // Manual trades — positions that exist but weren't bought by the system
@@ -228,7 +273,6 @@ export class TradeEngine {
 
   constructor() {
     this.neural = new NeuralTrader();
-    this.dailyOptimizer = new DailyOptimizer();
     // Single credential source — config bus loads from vault + env
     const creds = loadCredentials();
 
@@ -279,6 +323,13 @@ export class TradeEngine {
     const dbPath = process.env.GATEWAY_DB_PATH || join(process.cwd(), '..', 'data', 'gateway-state.db');
     console.log(`[TradeEngine] DB: ${dbPath} (env=${!!process.env.GATEWAY_DB_PATH}, cwd=${process.cwd()})`);
     this.store = new GatewayStateStore(dbPath);
+    // Wave 1 analyst — Risk Manager reads the store's risk_rules table every
+    // evaluation, so rules written by Post-Mortem at EOD take effect next day.
+    this.riskManager = new RiskManager(this.store);
+    // Wave 2 analyst — Macro regime classifier. Trade-engine reads the
+    // current multiplier from it before sizing each buy. Multiplier defaults
+    // to 1.0 (no-op) if Macro has never run or the verdict is stale (>24h).
+    this.macroAnalyst = new MacroAnalyst(this.store);
   }
 
   // ── Action 1: Forex Position Management (Priority 1) ──────────────────
@@ -352,9 +403,16 @@ export class TradeEngine {
       if (all.length === 0) return ar('skipped', `Positions within bounds${cb}`);
 
       for (const trade of this.pm.getClosedTrades(5)) {
-        this.store.recordTrade({
-          ticker: trade.ticker, pnl: trade.pnl, direction: 'long',
-          reason: trade.exitReason, openedAt: '', closedAt: trade.closedAt,
+        recordClosedTrade(this.store, {
+          ticker: trade.ticker,
+          direction: 'long',
+          reason: trade.exitReason,
+          qty: Math.abs(trade.shares ?? 0),
+          entryPrice: trade.entryPrice ?? null,
+          exitPrice: trade.exitPrice ?? 0,
+          pnl: trade.pnl,
+          closedAt: trade.closedAt,
+          source: 'position_manager',
         });
         emitTradeClosed({
           ticker: trade.ticker, success: trade.pnl > 0,
@@ -370,7 +428,7 @@ export class TradeEngine {
 
   private async scanSignals(
     strategy: { maxPositions?: number; budgetMax?: number },
-    stars: Array<{ symbol: string; score: number }>,
+    stars: Array<{ symbol: string; score: number; sector?: string; catalyst?: string }>,
   ): Promise<ActionResult> {
     const t0 = Date.now();
     const mkt = getMarketContext();
@@ -397,15 +455,22 @@ export class TradeEngine {
           if (moversRes.ok) {
             const moversData = await moversRes.json() as any;
             const ownedSet = new Set(positions.map(p => p.ticker));
+            const rejected: string[] = [];
             const gainers = (moversData.gainers || [])
               .filter((m: any) => m.percent_change > 2 && m.price >= MIN_STOCK_PRICE && m.price < 500)
               .filter((m: any) => !ownedSet.has(m.symbol))
+              .filter((m: any) => {
+                const gate = moverQualityGate(m);
+                if (gate.blocked) { rejected.push(`${m.symbol}:${gate.reason}`); return false; }
+                return true;
+              })
               .slice(0, 5);
             for (const mover of gainers) {
               const moverScore = Math.min(0.96 + mover.percent_change / 500, 0.99);
               stars.push({ symbol: mover.symbol, sector: 'momentum', score: moverScore, catalyst: `+${mover.percent_change.toFixed(1)}% today` });
             }
             if (gainers.length > 0) details.push(`Top movers: ${gainers.map((g: any) => `${g.symbol} +${g.percent_change.toFixed(1)}%`).join(', ')}`);
+            if (rejected.length > 0) details.push(`Blocked: ${rejected.slice(0, 5).join(', ')}`);
           }
         } catch (e: any) { details.push(`Movers scan: ${e.message}`); }
       }
@@ -438,16 +503,27 @@ export class TradeEngine {
           try {
             const creds = loadCredentials();
             const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret, 'Content-Type': 'application/json' };
-            await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
+            const rotRes = await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
               method: 'POST', headers,
               body: JSON.stringify({ symbol: sellSymbol, qty: String(Math.abs(weakest.shares)), side: 'sell', type: 'market', time_in_force: tif }),
               signal: AbortSignal.timeout(10_000),
             });
+            const rotBody = rotRes.ok ? await rotRes.json().catch(() => null) as any : null;
             details.push(`ROTATED OUT ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) for ${bestStar.symbol}`);
             console.log(`[TradeEngine] ROTATION: sold ${weakest.ticker} ($${weakest.unrealizedPnl.toFixed(2)}) to make room for ${bestStar.symbol} (score: ${bestStar.score})`);
             emitTradeClosed({ ticker: weakest.ticker, success: weakest.unrealizedPnl > 0, returnPct: weakest.unrealizedPnlPercent / 100, reason: 'rotation' });
+            recordClosedTrade(this.store, {
+              ticker: weakest.ticker,
+              direction: 'long',
+              reason: 'rotation',
+              qty: Math.abs(weakest.shares),
+              entryPrice: weakest.avgPrice ?? null,
+              exitPrice: weakest.currentPrice ?? 0,
+              pnl: weakest.unrealizedPnl,
+              orderId: rotBody?.id ?? null,
+              source: 'engine_rotation',
+            });
             this._addSessionSell(weakest.ticker); // don't rebuy this session
-            // recentBuys auto-managed via state store
           } catch (e: any) { details.push(`Rotation failed: ${e.message}`); }
           // Continue to scan — position freed
         } else {
@@ -529,6 +605,43 @@ export class TradeEngine {
           continue;
         }
 
+        // Gate 5b: NeuralTrader technical confirmation — the original signal engine
+        // that this platform was built on. Hard-gates on the 7-indicator analysis
+        // (RSI, MACD, Bollinger, EMA, momentum, mean-reversion, neural forecast).
+        // Rejects any star whose technicals say sell/hold/neutral.
+        try {
+          if (!isCrypto(star.symbol)) {
+            const creds3 = loadCredentials();
+            const neuralHeaders = {
+              'APCA-API-KEY-ID': creds3.alpaca!.apiKey,
+              'APCA-API-SECRET-KEY': creds3.alpaca!.apiSecret,
+            };
+            const barsUrl = `https://data.alpaca.markets/v2/stocks/${star.symbol}/bars?timeframe=15Min&limit=50&feed=iex`;
+            const barsRes = await fetch(barsUrl, { headers: neuralHeaders, signal: AbortSignal.timeout(5000) });
+            if (barsRes.ok) {
+              const barsData = await barsRes.json() as any;
+              const rawBars = barsData.bars || [];
+              if (rawBars.length >= 30) {
+                for (const bar of rawBars) this.neural.addBar(star.symbol, bar.c, bar.v || 0);
+                const neuralSignal = await this.neural.analyze(star.symbol);
+                if (neuralSignal && neuralSignal.direction !== 'buy') {
+                  details.push(`SKIP ${star.symbol} — Neural ${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}% ${neuralSignal.pattern || ''}`);
+                  continue;
+                }
+                if (neuralSignal) {
+                  details.push(`${star.symbol} Neural: ${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}% ${neuralSignal.pattern || ''}`);
+                } else {
+                  details.push(`${star.symbol} Neural: no-signal — proceeding`);
+                }
+              } else {
+                details.push(`${star.symbol} Neural: ${rawBars.length}-bars (need 30) — proceeding without`);
+              }
+            }
+          }
+        } catch (e: any) {
+          details.push(`${star.symbol} Neural: FAILED (${e.message?.substring(0, 40)}) — proceeding without`);
+        }
+
         // Gate 6: Trident LoRA reasoning — ask trained model if this is a good buy
         try {
           const tridentAdvice = await brain.shouldBuy(star.symbol, star.score * 10, `score=${adjustedScore.toFixed(2)}, research_star`);
@@ -564,7 +677,7 @@ export class TradeEngine {
           details.push(`BUY ${qty} ${star.symbol} @$${price.toFixed(2)} — ${order.status}${adjustedScore !== star.score ? ` (intel: ${adjustedScore.toFixed(2)})` : ''}`);
           if (order.status === 'filled' || order.status === 'pending') {
             owned.add(star.symbol);
-            this._trackBuy(star.symbol);
+            this._trackBuy(star.symbol, price, qty, (order as any).id ?? null);
             // Record to brain for learning
             brain.recordBuy(star.symbol, qty, price, `research_star score=${adjustedScore.toFixed(2)}`).catch(() => {});
           }
@@ -631,7 +744,46 @@ export class TradeEngine {
       `${mkt.isMarketOpen ? 'OPEN' : mkt.isAfterHours ? 'AFTER-HOURS' : 'CLOSED'}`,
     );
 
-    // DAILY LOSS CIRCUIT BREAKER — checks BOTH realized AND unrealized P&L
+    // ─── RECONCILE WITH ALPACA ──────────────────────────────────────────
+    // Pull Alpaca's fill log and upsert any trades our in-process sell paths
+    // missed. This is the belt to the circuit breaker's suspenders: even if a
+    // sell path forgets to call recordClosedTrade, the reconciler will backfill
+    // from Alpaca's authoritative record before the circuit breaker checks.
+    try {
+      const reconCreds = loadCredentials();
+      if (reconCreds.alpaca) {
+        const rec = await reconcileWithAlpaca(this.store, {
+          apiKey: reconCreds.alpaca.apiKey,
+          apiSecret: reconCreds.alpaca.apiSecret,
+          baseUrl: reconCreds.alpaca.baseUrl,
+        }, 3);
+        if (rec.buysRecorded > 0 || rec.sellsRecorded > 0) {
+          console.log(`  [RECONCILE] +${rec.buysRecorded} buys, +${rec.sellsRecorded} sells from Alpaca (tickers: ${rec.tickersProcessed.join(',')})`);
+        }
+        if (rec.errors.length > 0) console.log(`  [RECONCILE] errors: ${rec.errors.slice(0, 3).join('; ')}`);
+      }
+    } catch (e: any) {
+      console.log(`  [RECONCILE] failed: ${e.message}`);
+    }
+
+    // Post-exit follower — fills in T+1/T+3/T+5 prices on closed trades so
+    // Trident learns whether we sold too early or got the exit right.
+    try {
+      const postCreds = loadCredentials();
+      if (postCreds.alpaca) {
+        const pe = await runPostExitFollower(this.store, {
+          apiKey: postCreds.alpaca.apiKey,
+          apiSecret: postCreds.alpaca.apiSecret,
+        });
+        if (pe.resolved > 0) console.log(`  [POST-EXIT] resolved ${pe.resolved} regret verdicts`);
+      }
+    } catch {}
+
+    // ─── DAILY LOSS CIRCUIT BREAKER ─────────────────────────────────────
+    // Three independent P&L readings; any one tripping halts equity entries.
+    //   1. store realized + unrealized   (what the engine thinks happened)
+    //   2. Alpaca equity - last_equity   (ground truth from the broker)
+    // The max of these two (in absolute terms, i.e. the WORST) is used.
     const allTodayTrades = this.store.getTodayTrades();
     const todayClosedPnl = allTodayTrades.reduce((s, t) => s + t.pnl, 0);
     let unrealizedPnl = 0;
@@ -639,20 +791,47 @@ export class TradeEngine {
       const pos = await this.executor.getPositions();
       unrealizedPnl = pos.reduce((s, p) => s + p.unrealizedPnl, 0);
     } catch {}
-    const totalDayPnl = todayClosedPnl + unrealizedPnl;
-    const equityCircuitBreaker = totalDayPnl < DAILY_LOSS_LIMIT;
+    const storeDayPnl = todayClosedPnl + unrealizedPnl;
+
+    let alpacaDayPnl: number | null = null;
+    try {
+      const acctCreds = loadCredentials();
+      if (acctCreds.alpaca) {
+        const acctRes = await fetch(`${acctCreds.alpaca.baseUrl}/v2/account`, {
+          headers: {
+            'APCA-API-KEY-ID': acctCreds.alpaca.apiKey,
+            'APCA-API-SECRET-KEY': acctCreds.alpaca.apiSecret,
+          },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (acctRes.ok) {
+          const a = await acctRes.json() as any;
+          const eq = parseFloat(a.equity);
+          const le = parseFloat(a.last_equity);
+          if (isFinite(eq) && isFinite(le)) alpacaDayPnl = eq - le;
+        }
+      }
+    } catch {}
+
+    // Use whichever reading is WORSE so a bug in either one can't mask disaster.
+    const effectiveDayPnl = alpacaDayPnl !== null
+      ? Math.min(storeDayPnl, alpacaDayPnl)
+      : storeDayPnl;
+
+    const equityCircuitBreaker = effectiveDayPnl < DAILY_LOSS_LIMIT;
     if (equityCircuitBreaker) {
-      console.log(`  [CIRCUIT BREAKER] Daily P&L $${totalDayPnl.toFixed(2)} (realized $${todayClosedPnl.toFixed(2)} + unrealized $${unrealizedPnl.toFixed(2)}) exceeds $${DAILY_LOSS_LIMIT} — HALTED`);
+      console.log(`  [CIRCUIT BREAKER] Daily P&L $${effectiveDayPnl.toFixed(2)} exceeds $${DAILY_LOSS_LIMIT} — HALTED`);
+      console.log(`                    store $${storeDayPnl.toFixed(2)} (realized $${todayClosedPnl.toFixed(2)} + unrealized $${unrealizedPnl.toFixed(2)}) | alpaca $${alpacaDayPnl !== null ? alpacaDayPnl.toFixed(2) : 'n/a'}`);
       // Alert once per day
       const cbKey = `circuit_breaker_${today}`;
       if (!this.store.get(cbKey)) {
         this.store.set(cbKey, 'tripped');
-        brain.recordRule(`CIRCUIT BREAKER TRIPPED ${today}: P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit`, 'system').catch(() => {});
+        brain.recordRule(`CIRCUIT BREAKER TRIPPED ${today}: P&L $${effectiveDayPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit (store $${storeDayPnl.toFixed(2)} | alpaca $${alpacaDayPnl !== null ? alpacaDayPnl.toFixed(2) : 'n/a'})`, 'system').catch(() => {});
         const webhook = process.env.DISCORD_WEBHOOK_URL;
         if (webhook) {
           fetch(webhook, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: `**CIRCUIT BREAKER** — Daily P&L $${todayClosedPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit. Equity trading halted, forex management continues.` }),
+            body: JSON.stringify({ content: `**CIRCUIT BREAKER** — Daily P&L $${effectiveDayPnl.toFixed(2)} exceeded $${DAILY_LOSS_LIMIT} limit. Equity trading halted, forex management continues.` }),
           }).catch(() => {});
         }
       }
@@ -678,7 +857,16 @@ export class TradeEngine {
               await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${encodeURIComponent(pos.ticker)}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
               console.log(`  [PRE-MARKET] SOLD losing crypto ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}`);
               emitTradeClosed({ ticker: pos.ticker, success: false, returnPct: pos.unrealizedPnlPercent / 100, reason: 'pre_market_liquidation' });
-              brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'pre_market_liquidation', 'long').catch(() => {});
+              recordClosedTrade(this.store, {
+                ticker: pos.ticker,
+                direction: 'long',
+                reason: 'pre_market_liquidation',
+                qty: Math.abs(pos.shares),
+                entryPrice: pos.avgPrice ?? null,
+                exitPrice: pos.currentPrice ?? 0,
+                pnl: pos.unrealizedPnl,
+                source: 'engine_premarket',
+              });
             } catch (e: any) { console.log(`  [PRE-MARKET] FAILED ${pos.ticker}: ${e.message}`); }
           }
           if (winningCrypto.length > 0) {
@@ -716,7 +904,16 @@ export class TradeEngine {
             await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
             console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}${isManual ? ' (manual, losing)' : ''}`);
             emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
-            brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pos.unrealizedPnlPercent / 100, 'eod_close', 'long').catch(() => {});
+            recordClosedTrade(this.store, {
+              ticker: pos.ticker,
+              direction: 'long',
+              reason: isManual ? 'eod_close_manual_losing' : 'eod_close',
+              qty: Math.abs(pos.shares),
+              entryPrice: pos.avgPrice ?? null,
+              exitPrice: pos.currentPrice ?? 0,
+              pnl: pos.unrealizedPnl,
+              source: 'engine_eod',
+            });
             soldCount++;
           } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
         }
@@ -734,27 +931,33 @@ export class TradeEngine {
 
     const positions = await this.executor.getPositions();
 
-    // DETECT MANUAL TRADES: positions that exist but weren't bought by the system today
+    // DETECT MANUAL TRADES: positions that exist but the system NEVER bought.
+    // Uses the persistent `system_buys` table (not the day-scoped `_recentBuys`)
+    // so overnight holds from yesterday's system buys are NOT mislabeled as manual.
     const currentTickers = new Set(positions.map(p => p.ticker));
-    const recentBuys = this._recentBuys;
     for (const pos of positions) {
-      if (!recentBuys.has(pos.ticker) && !this._manualTrades.has(pos.ticker)) {
-        console.log(`  [MANUAL TRADE DETECTED] ${pos.ticker} — not system-bought, protecting from auto-sell`);
-        this._addManualTrade(pos.ticker);
-      }
+      if (this._manualTrades.has(pos.ticker)) continue;
+      // System-bought at any point in history → not manual.
+      if (this.store.isSystemBought(pos.ticker)) continue;
+      console.log(`  [MANUAL TRADE DETECTED] ${pos.ticker} — not in system_buys, protecting from auto-sell`);
+      this._addManualTrade(pos.ticker);
     }
 
-    // DETECT MANUAL LIQUIDATIONS: if we bought something and it's no longer a position, user closed it manually — do NOT rebuy
-    for (const [ticker] of recentBuys) {
-      if (!currentTickers.has(ticker) && !this._sessionSells.has(ticker)) {
-        console.log(`  [MANUAL CLOSE DETECTED] ${ticker} was bought but no longer a position — blocking rebuy`);
-        this._addSessionSell(ticker);
+    // DETECT LIQUIDATIONS OUT-OF-BAND: a ticker in our open system_buys but no
+    // longer a position means it was closed somewhere we didn't see. Record a
+    // zero-PnL placeholder and close the buy — the reconciler will correct PnL
+    // on its next pass from Alpaca activities.
+    for (const buy of this.store.getOpenSystemBuys()) {
+      if (!currentTickers.has(buy.ticker) && !this._sessionSells.has(buy.ticker)) {
+        console.log(`  [OUT-OF-BAND CLOSE] ${buy.ticker} was owned but no longer a position — reconciler will backfill`);
+        this._addSessionSell(buy.ticker);
+        try { this.store.closeSystemBuy(buy.ticker); } catch {}
       }
     }
 
     const equityCount = positions.filter(p => !isCrypto(p.ticker)).length;
     const openSlots = MAX_POSITIONS - equityCount;
-    const totalDeployedNow = positions.reduce((s, p) => s + Math.abs(p.marketValue || p.costBasis || 0), 0);
+    const totalDeployedNow = positions.reduce((s, p) => s + Math.abs(p.marketValue || (p.avgPrice * p.shares) || 0), 0);
     const budgetRemaining = BUDGET_MAX - totalDeployedNow;
 
     if (equityCircuitBreaker) {
@@ -764,105 +967,172 @@ export class TradeEngine {
     } else if (totalDeployedNow >= BUDGET_MAX) {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
     } else if (openSlots > 0 && budgetRemaining > 100 && mkt.isMarketOpen && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
-      // Equity: market hours only, 9:30 AM - 3:30 PM ET. NO after-hours buying.
-      // Crypto buys controlled by CRYPTO_BUYS_ENABLED flag (currently disabled).
+      // ───────────────────────────────────────────────────────────────────
+      // UNIFIED BUY PIPELINE (2026-04-10) — NeuralTrader is the authority
+      // ───────────────────────────────────────────────────────────────────
+      // Two candidate feeders merge into a single universe:
+      //   A. Alpaca top movers  — pure technical (price moving today)
+      //   B. Research worker    — fundamental/catalyst (RSS, sector, FACT cache)
+      // Both feed into the SAME universe, quality-gated, then handed to
+      // NeuralTrader.scan() for the technical verdict. Research-worker
+      // widens the pool with catalyst-backed picks; NeuralTrader decides
+      // which ones have valid technical setups. Neither replaces the other.
+      //
+      // Flow:
+      //   1. Build universe = dedup(Alpaca movers ∪ Research worker stars)
+      //   2. Apply quality gate (price floor, no SPAC/warrants, no blow-offs)
+      //   3. Fetch 50 x 15-min bars for top N, feed NeuralTrader
+      //   4. neural.scan() returns buy/sell/hold per ticker
+      //   5. Keep direction='buy' AND confidence ≥ 60%
+      //   6. Final gates: Bayesian → Brain history → Trident LoRA
+      //   7. Execute
       try {
         const creds = loadCredentials();
         const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret };
 
-        // PRIMARY: Research stars from state store (Alpaca movers + most-actives + crypto, refreshed every 120s)
-        const researchStars = this.store.getResearchStars();
-        let gainers: Array<{ symbol: string; price: number; percent_change: number }> = [];
+        // ─── STEP 1: Merge candidate feeders into a single universe ─────
+        interface UniverseEntry { symbol: string; price: number; percent_change: number; trade_count?: number; source: 'movers' | 'research' | 'both'; catalyst?: string }
+        const universeMap = new Map<string, UniverseEntry>();
+        const ownedSet = new Set(positions.map(p => p.ticker));
 
-        if (researchStars.length > 0) {
+        // 1a. Alpaca top movers — raw technical momentum
+        let moversRawCount = 0;
+        try {
+          const moversRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=25', {
+            headers, signal: AbortSignal.timeout(5000),
+          });
+          if (moversRes.ok) {
+            const moversData = await moversRes.json() as any;
+            const raw = (moversData.gainers || [])
+              .filter((m: any) => m.percent_change > 2 && m.price >= MIN_STOCK_PRICE && m.price < 500 && (m.trade_count || 0) > 5000);
+            moversRawCount = raw.length;
+            for (const m of raw) {
+              if (ownedSet.has(m.symbol) || this._recentBuys.has(m.symbol) || this._sessionSells.has(m.symbol)) continue;
+              universeMap.set(m.symbol, { ...m, source: 'movers' });
+            }
+          }
+        } catch (e: any) {
+          console.log(`  [UNIVERSE] Alpaca movers fetch failed: ${e.message}`);
+        }
+
+        // 1b. Research worker catalyst stars — fundamental/news-backed picks
+        let researchRawCount = 0;
+        try {
+          const researchStars = this.store.getResearchStars();
+          researchRawCount = researchStars.length;
           const equityStars = researchStars.filter(s => !isCrypto(s.symbol));
-          const cryptoStars = CRYPTO_BUYS_ENABLED ? researchStars.filter(s => isCrypto(s.symbol)) : [];
-
-          // Fetch equity prices
           if (equityStars.length > 0) {
-            try {
-              const syms = equityStars.map(s => s.symbol).slice(0, 10).join(',');
-              const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=iex`, { headers, signal: AbortSignal.timeout(5000) });
-              if (snapRes.ok) {
-                const snapData = await snapRes.json() as any;
-                for (const star of equityStars) {
-                  const snap = snapData[star.symbol];
-                  if (!snap) continue;
-                  const price = snap.latestTrade?.p || snap.latestQuote?.ap;
-                  if (!price || price < MIN_STOCK_PRICE || price > 500) continue;
-                  const pctMatch = star.catalyst.match(/\+?([\d.]+)%/);
-                  const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
-                  gainers.push({ symbol: star.symbol, price, percent_change: pct });
-                }
-              }
-            } catch {}
-          }
-
-          // Fetch crypto prices
-          if (cryptoStars.length > 0) {
-            try {
-              const syms = cryptoStars.map(s => s.symbol.replace('-', '/')).slice(0, 8).join(',');
-              const snapRes = await fetch(`https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols=${syms}`, { headers, signal: AbortSignal.timeout(5000) });
-              if (snapRes.ok) {
-                const snapData = await snapRes.json() as any;
-                const snaps = snapData.snapshots || snapData;
-                for (const star of cryptoStars) {
-                  const key = star.symbol.replace('-', '/');
-                  const snap = snaps[key];
-                  if (!snap) continue;
-                  const price = snap.latestTrade?.p || snap.latestQuote?.ap;
-                  if (!price) continue;
-                  const pctMatch = star.catalyst.match(/\+?([\d.]+)%/);
-                  const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
-                  gainers.push({ symbol: star.symbol, price, percent_change: pct });
-                }
-              }
-            } catch {}
-          }
-
-          // Filter: equity only during market hours, crypto 24/7
-          if (!mkt.isMarketOpen) {
-            gainers = gainers.filter(g => isCrypto(g.symbol));
-          }
-          if (gainers.length > 0) {
-            const eq = gainers.filter(g => !isCrypto(g.symbol)).length;
-            const cr = gainers.filter(g => isCrypto(g.symbol)).length;
-            console.log(`  [BUY] Using research stars (${eq} equity, ${cr} crypto)`);
-          }
-        }
-
-        // FALLBACK: Alpaca movers direct if research worker hasn't populated stars
-        if (gainers.length === 0) {
-          try {
-            const moversRes = await fetch('https://data.alpaca.markets/v1beta1/screener/stocks/movers?top=20', { headers, signal: AbortSignal.timeout(5000) });
-            if (moversRes.ok) {
-              const moversData = await moversRes.json() as any;
-              gainers = (moversData.gainers || [])
-                .filter((m: any) => m.percent_change > 2 && m.price >= MIN_STOCK_PRICE && m.price < 500 && (m.trade_count || 0) > 5000)
-                .slice(0, openSlots);
-            }
-            if (gainers.length > 0) console.log('  [BUY] Using Alpaca movers direct (no research stars)');
-          } catch {}
-        }
-
-        // LAST RESORT: Yahoo Finance gainers (gap-from-close, less reliable for intraday)
-        if (gainers.length === 0) {
-          try {
-            const yahooRes = await fetch('https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=20', {
-              headers: { 'User-Agent': 'MTWM/1.0' },
-              signal: AbortSignal.timeout(10_000),
+            // Fetch current prices for research stars so they can be compared against movers
+            const syms = equityStars.map(s => s.symbol).slice(0, 15).join(',');
+            const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=iex`, {
+              headers, signal: AbortSignal.timeout(5000),
             });
-            if (yahooRes.ok) {
-              const yahooData = await yahooRes.json() as any;
-              const quotes = yahooData?.finance?.result?.[0]?.quotes || [];
-              gainers = quotes
-                .filter((q: any) => q.regularMarketPrice >= MIN_STOCK_PRICE && q.regularMarketPrice < 500 && q.regularMarketChangePercent > 5)
-                .map((q: any) => ({ symbol: q.symbol, price: q.regularMarketPrice, percent_change: q.regularMarketChangePercent }))
-                .slice(0, openSlots);
+            if (snapRes.ok) {
+              const snapData = await snapRes.json() as any;
+              for (const star of equityStars) {
+                if (ownedSet.has(star.symbol) || this._recentBuys.has(star.symbol) || this._sessionSells.has(star.symbol)) continue;
+                const snap = snapData[star.symbol];
+                if (!snap) continue;
+                const price = snap.latestTrade?.p || snap.latestQuote?.ap;
+                if (!price || price < MIN_STOCK_PRICE || price > 500) continue;
+                // Parse percent change from catalyst string if present
+                const pctMatch = star.catalyst?.match(/\+?([\d.]+)%/);
+                const pct = pctMatch ? parseFloat(pctMatch[1]) : 0;
+                const existing = universeMap.get(star.symbol);
+                if (existing) {
+                  // Ticker appears in BOTH feeders — high-conviction candidate
+                  existing.source = 'both';
+                  existing.catalyst = star.catalyst;
+                } else {
+                  universeMap.set(star.symbol, {
+                    symbol: star.symbol,
+                    price,
+                    percent_change: pct,
+                    trade_count: 50_000,  // research stars assumed liquid (scanner filters)
+                    source: 'research',
+                    catalyst: star.catalyst,
+                  });
+                }
+              }
             }
-            if (gainers.length > 0) console.log('  [BUY] Using Yahoo Finance (last resort)');
-          } catch {}
+          }
+        } catch (e: any) {
+          console.log(`  [UNIVERSE] Research worker fetch failed: ${e.message}`);
         }
+
+        // 1c. Apply quality gate to the merged universe
+        const blockedByGate: string[] = [];
+        const universe: UniverseEntry[] = [];
+        for (const entry of universeMap.values()) {
+          const gate = moverQualityGate(entry);
+          if (gate.blocked) { blockedByGate.push(`${entry.symbol}:${gate.reason}`); continue; }
+          universe.push(entry);
+        }
+        // Sort: "both" sources first (strongest conviction), then by percent_change
+        universe.sort((a, b) => {
+          const sourceRank = (s: string) => s === 'both' ? 0 : s === 'research' ? 1 : 2;
+          const diff = sourceRank(a.source) - sourceRank(b.source);
+          if (diff !== 0) return diff;
+          return b.percent_change - a.percent_change;
+        });
+
+        if (blockedByGate.length > 0) console.log(`  [UNIVERSE] Quality gate blocked: ${blockedByGate.join(', ')}`);
+        const bothCount = universe.filter(u => u.source === 'both').length;
+        const researchOnlyCount = universe.filter(u => u.source === 'research').length;
+        const moversOnlyCount = universe.filter(u => u.source === 'movers').length;
+        console.log(`  [UNIVERSE] ${universe.length} candidates (${bothCount} both, ${researchOnlyCount} research-only, ${moversOnlyCount} movers-only) from ${moversRawCount} raw movers + ${researchRawCount} research stars`);
+
+        // ─── STEP 2-3: Fetch bars + feed NeuralTrader ─────────────────────
+        const barWindow = 15;  // only fetch bars for the top N to keep the heartbeat bounded
+        const fetchTargets = universe.slice(0, barWindow);
+        await Promise.all(fetchTargets.map(async (u) => {
+          try {
+            const barsUrl = `https://data.alpaca.markets/v2/stocks/${u.symbol}/bars?timeframe=15Min&limit=50&feed=iex`;
+            const barsRes = await fetch(barsUrl, { headers, signal: AbortSignal.timeout(5000) });
+            if (!barsRes.ok) return;
+            const barsData = await barsRes.json() as any;
+            const rawBars = barsData.bars || [];
+            if (rawBars.length < 30) return;  // NT needs 30+ bars
+            for (const bar of rawBars) this.neural.addBar(u.symbol, bar.c, bar.v || 0);
+          } catch { /* best-effort */ }
+        }));
+
+        // ─── STEP 4: NeuralTrader decides ─────────────────────────────────
+        // NT is the technical authority WHEN IT HAS DATA. If a ticker doesn't
+        // have 30+ bars, NT can't evaluate it — that absence should NOT block
+        // the trade. Instead, tickers with insufficient bars pass through to
+        // the remaining gates (Bayesian, Brain, Trident) which can still
+        // reject bad ones.
+        const ntScannedSymbols = new Set<string>();
+        for (const u of fetchTargets) {
+          const hist = this.neural.getPriceHistory(u.symbol);
+          if (hist.length >= 30) ntScannedSymbols.add(u.symbol);
+        }
+        const ntSignals = ntScannedSymbols.size > 0
+          ? await this.neural.scan([...ntScannedSymbols])
+          : [];
+        const ntBuySignals = ntSignals.filter(s => s.direction === 'buy' && s.confidence >= 0.6);
+        const ntRejected = new Set(
+          ntSignals.filter(s => s.direction !== 'buy' || s.confidence < 0.6).map(s => s.ticker),
+        );
+
+        // Tickers that NT couldn't evaluate (insufficient bars) — let them through
+        const ntBypassed = fetchTargets
+          .filter(u => !ntScannedSymbols.has(u.symbol))
+          .map(u => u.symbol);
+
+        console.log(`  [NT SCAN] ${ntSignals.length} signals from ${ntScannedSymbols.size} scanned, ${ntBuySignals.length} buys, ${ntRejected.size} rejected, ${ntBypassed.length} bypassed (insufficient bars)`);
+
+        // Map back to price/percent_change for the downstream buy loop
+        // Include: NT buy signals + NT-bypassed (insufficient data) tickers
+        const ntApprovedOrBypassed = new Set([
+          ...ntBuySignals.map(s => s.ticker),
+          ...ntBypassed,
+        ]);
+        let gainers: Array<{ symbol: string; price: number; percent_change: number }> = fetchTargets
+          .filter(u => ntApprovedOrBypassed.has(u.symbol))
+          .map(u => ({ symbol: u.symbol, price: u.price, percent_change: u.percent_change }))
+          .slice(0, openSlots);
 
         // Merge morning plan tickers (priority — research-backed picks)
         let planTickers: string[] = [];
@@ -895,13 +1165,64 @@ export class TradeEngine {
 
         // Cap per-position to remaining budget / slots, max $2,500 per position
         const slotsToFill = Math.min(gainers.length || 1, openSlots);
-        const perPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), 2500);
-        console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition}/pos, budget left: $${budgetRemaining.toFixed(0)}`);
+        const basePerPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), 2500);
+        // Wave 2: Macro regime sizing multiplier (0.25 crisis → 1.5 trending).
+        // Defaults to 1.0 if Macro has never run or verdict is stale.
+        const macroMult = this.macroAnalyst.getCurrentMultiplier();
+        const perPosition = Math.floor(basePerPosition * macroMult);
+        const macroVerdict = this.macroAnalyst.getLatest();
+        console.log(`  [BUY] ${gainers.length} candidates (${planTickers.length} from plan), $${perPosition}/pos (base $${basePerPosition} × ${macroMult.toFixed(2)}x macro${macroVerdict ? `:${macroVerdict.regime}` : ':default'}), budget left: $${budgetRemaining.toFixed(0)}`);
 
         if (perPosition < 50) {
           console.log(`  [BUY] Per-position too small ($${perPosition}) — skipping`);
         }
 
+        // ─── RISK MANAGER (Wave 1 analyst) ─────────────────────────────
+        // Evaluates ALL candidates in one batch BEFORE the per-candidate gate
+        // loop. Reads learned rules from the Post-Mortem analyst (risk_rules
+        // table) and enforces them here. This is the AFJKU-class gate — it
+        // probes Alpaca snapshots for volume and spread, and blocks anything
+        // that fails the liquidity/concentration/structural checks.
+        const riskCandidates = gainers.slice(0, openSlots).map(g => ({
+          ticker: g.symbol,
+          price: g.price,
+        }));
+        const riskPositions = positions.map(p => ({
+          ticker: p.ticker,
+          marketValue: p.marketValue || (p.avgPrice * p.shares) || 0,
+        }));
+        const riskVerdicts = await this.riskManager.evaluate(riskCandidates, riskPositions, headers);
+        const riskBlockedSet = new Set<string>();
+        const riskApprovedSet = new Set<string>();
+        for (const v of riskVerdicts) {
+          if (v.allowed) riskApprovedSet.add(v.ticker);
+          else riskBlockedSet.add(v.ticker);
+        }
+        const riskBlockedDetail = riskVerdicts
+          .filter(v => !v.allowed)
+          .map(v => `${v.ticker}:${v.reason}`);
+        if (riskBlockedDetail.length > 0) {
+          console.log(`  [RISK] Blocked: ${riskBlockedDetail.join(', ')}`);
+        }
+        console.log(`  [RISK] ${riskApprovedSet.size} approved of ${riskCandidates.length} NT buys${this.riskManager.getStats().activeRuleCount > 0 ? ` (${this.riskManager.getStats().activeRuleCount} learned rules active)` : ''}`);
+
+        // ─── PER-CANDIDATE BUY LOOP ─────────────────────────────────────
+        // STRIPPED 2026-04-13: removed 6 redundant gates that were blocking
+        // every real stock. The Brain (Trident LoRA) IS the intelligence —
+        // everything else was me over-engineering and costing us the market.
+        //
+        // What remains:
+        //   1. Anti-churn + session sells (don't buy what we just sold)
+        //   2. SPAC suffix block (structural — blocks AFJKU class)
+        //   3. Price floor $10
+        //   4. Trident shouldBuy (THE intelligence gate — the Brain decides)
+        //   5. Budget/position limits
+        //
+        // What was removed:
+        //   - Risk Manager volume/spread (killed LMT/RTX/GD/DVN/SLB on Monday open)
+        //   - Quality gate blow-off % (killed CVX/OXY during Iran oil spike)
+        //   - Per-candidate NeuralTrader re-gate (redundant with Step 4 scan)
+        //   - Brain history shouldAvoid (too blunt — 5 trades isn't enough to ban)
         let spentThisHeartbeat = 0;
         const buyAudit: string[] = [];
         for (const g of gainers.slice(0, openSlots)) {
@@ -910,49 +1231,23 @@ export class TradeEngine {
             break;
           }
           try {
-            // Gate 0: Session sells
+            // Gate: Session sells — don't rebuy what we or the user sold today
             if (this._sessionSells.has(g.symbol)) { buyAudit.push(`${g.symbol}: SKIP sold-today`); continue; }
-            // Gate 1: Anti-churn
+            // Gate: Anti-churn — max 1 buy per ticker per day
             if (this._recentBuys.has(g.symbol)) { buyAudit.push(`${g.symbol}: SKIP already-bought`); continue; }
-            // Gate 2: Price floor
+            // Gate: SPAC suffix (structural — the ONLY hard filter besides price)
+            if (SPAC_SUFFIX_RE.test(g.symbol)) { buyAudit.push(`${g.symbol}: SKIP SPAC-suffix`); continue; }
+            // Gate: Price floor
             if (!isCrypto(g.symbol) && g.price < MIN_STOCK_PRICE) { buyAudit.push(`${g.symbol}: SKIP price $${g.price.toFixed(2)}<$${MIN_STOCK_PRICE}`); continue; }
-            // Gate 3: Crypto disabled
+            // Gate: Crypto disabled
             if (isCrypto(g.symbol) && !CRYPTO_BUYS_ENABLED) { buyAudit.push(`${g.symbol}: SKIP crypto-disabled`); continue; }
 
-            // Gate 4: Brain history
-            try {
-              const history = await brain.getTickerHistory(g.symbol);
-              if (history.shouldAvoid) { buyAudit.push(`${g.symbol}: SKIP Brain-avoid ${history.wins}W/${history.losses}L`); continue; }
-              if (history.wins + history.losses > 0) buyAudit.push(`${g.symbol}: Brain ${history.wins}W/${history.losses}L`);
-            } catch (e: any) { buyAudit.push(`${g.symbol}: Brain FAILED ${e.message?.substring(0, 30)}`); }
-
-            // Gate 5: Neural technical confirmation
-            let neuralResult = 'no-data';
-            try {
-              const barsUrl = `https://data.alpaca.markets/v2/stocks/${g.symbol}/bars?timeframe=15Min&limit=50&feed=iex`;
-              const barsRes = await fetch(barsUrl, { headers, signal: AbortSignal.timeout(5000) });
-              if (barsRes.ok) {
-                const barsData = await barsRes.json() as any;
-                const rawBars = barsData.bars || [];
-                if (rawBars.length >= 30) {
-                  for (const bar of rawBars) this.neural.addBar(g.symbol, bar.c, bar.v || 0);
-                  const neuralSignal = await this.neural.analyze(g.symbol);
-                  if (neuralSignal && neuralSignal.direction !== 'buy') {
-                    buyAudit.push(`${g.symbol}: SKIP neural-${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}%`);
-                    continue;
-                  }
-                  neuralResult = neuralSignal ? `${neuralSignal.direction} ${(neuralSignal.confidence*100).toFixed(0)}% ${neuralSignal.pattern || ''}` : 'no-signal';
-                  buyAudit.push(`${g.symbol}: neural=${neuralResult}`);
-                } else { neuralResult = `${rawBars.length}-bars (need 30)`; buyAudit.push(`${g.symbol}: neural=${neuralResult}`); }
-              }
-            } catch (e: any) { neuralResult = `FAILED ${e.message?.substring(0, 20)}`; }
-
-            // Gate 6: Trident LoRA reasoning
+            // Gate: Trident LoRA — THE intelligence gate. The Brain decides.
             let tridentResult = 'not-called';
             try {
-              const tridentAdvice = await brain.shouldBuy(g.symbol, g.percent_change, `top_mover +${g.percent_change.toFixed(1)}%`);
+              const tridentAdvice = await brain.shouldBuy(g.symbol, g.percent_change, `catalyst +${g.percent_change.toFixed(1)}%`);
               if (!tridentAdvice.should) {
-                buyAudit.push(`${g.symbol}: SKIP Trident-reject: ${tridentAdvice.reason.slice(0, 50)}`);
+                buyAudit.push(`${g.symbol}: SKIP Trident: ${tridentAdvice.reason.slice(0, 50)}`);
                 continue;
               }
               tridentResult = `APPROVED: ${tridentAdvice.reason.slice(0, 40)}`;
@@ -967,10 +1262,11 @@ export class TradeEngine {
               indicators: {}, pattern: 'top_mover', timestamp: new Date(), source: 'momentum' as const,
             };
             const order = await this.executor.execute(signal, qty, perPosition);
-            buyAudit.push(`${g.symbol}: BUY ${qty}@$${g.price.toFixed(2)} neural=${neuralResult} trident=${tridentResult} → ${order.status}`);
+            buyAudit.push(`${g.symbol}: BUY ${qty}@$${g.price.toFixed(2)} trident=${tridentResult} → ${order.status}`);
             if (order.status === 'filled' || order.status === 'pending') {
               spentThisHeartbeat += qty * g.price;
-              this._trackBuy(g.symbol);
+              this._trackBuy(g.symbol, g.price, qty, (order as any).id ?? null);
+              this.riskManager.incrementBuyCount();
               brain.recordBuy(g.symbol, qty, g.price, `TOP MOVER +${g.percent_change.toFixed(1)}%`).catch(() => {});
             }
           } catch (e: any) { buyAudit.push(`${g.symbol}: ERROR ${e.message?.substring(0, 50)}`); }
@@ -1031,13 +1327,24 @@ export class TradeEngine {
               const tif = isCrypto(pos.ticker) ? 'gtc' : 'day';
               const creds = loadCredentials();
               const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret, 'Content-Type': 'application/json' };
-              await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
+              const texRes = await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
                 method: 'POST', headers,
                 body: JSON.stringify({ symbol: sellSymbol, qty: String(Math.abs(pos.shares)), side: 'sell', type: 'market', time_in_force: tif }),
                 signal: AbortSignal.timeout(10_000),
               });
+              const texBody = texRes.ok ? await texRes.json().catch(() => null) as any : null;
               emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pnlPct, reason: 'trident_exit' });
-              brain.recordTradeClose(pos.ticker, pos.unrealizedPnl, pnlPct, 'trident_exit', 'long').catch(() => {});
+              recordClosedTrade(this.store, {
+                ticker: pos.ticker,
+                direction: 'long',
+                reason: 'trident_exit',
+                qty: Math.abs(pos.shares),
+                entryPrice: pos.avgPrice ?? null,
+                exitPrice: pos.currentPrice ?? 0,
+                pnl: pos.unrealizedPnl,
+                orderId: texBody?.id ?? null,
+                source: 'engine_trident_exit',
+              });
               this._addSessionSell(pos.ticker);
               actions.push({ action: 'trident_exit', priority: 2, durationMs: 0, status: pos.unrealizedPnl > 0 ? 'success' : 'error', detail: `Trident EXIT ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)}: ${advice.reason.slice(0, 60)}` });
             } else {
@@ -1057,20 +1364,40 @@ export class TradeEngine {
       }
     }
 
-    // 5. Forex entries — rebuilt with RSI/EMA/BB/momentum (requires 3/4 indicators to agree)
+    // 5. Forex entries — scanner finds signals, Trident gates them
     try {
       await this.forex.fetchQuotes();
       const fxSignals = this.forex.evaluateSessionMomentum();
       if (fxSignals.length > 0) {
-        const top = fxSignals.sort((a, b) => b.confidence - a.confidence)[0];
         const open = await this.forex.getOpenTrades();
-        if (open.length < 4) {
-          try {
-            await this.forex.placeOrder(top.symbol, top.direction === 'long' ? 25000 : -25000, top.stopLoss, top.takeProfit);
-            console.log(`  [FOREX] ${top.direction.toUpperCase()} ${top.symbol} (${(top.confidence * 100).toFixed(0)}%) — ${top.rationale}`);
-          } catch (e: any) { console.log(`  [FOREX] ORDER FAILED ${top.symbol}: ${e.message}`); }
-        } else {
+        if (open.length >= 4) {
           console.log(`  [FOREX] Full (${open.length}/4 positions)`);
+        } else {
+          // Try each signal until one passes Trident or we run out
+          for (const sig of fxSignals.sort((a, b) => b.confidence - a.confidence)) {
+            // Trident gate — same as equities. The Brain decides.
+            try {
+              const advice = await brain.shouldBuy(
+                sig.symbol,
+                sig.confidence * 10,
+                `forex ${sig.strategy} ${sig.direction} ${(sig.confidence * 100).toFixed(0)}%`,
+              );
+              if (!advice.should) {
+                console.log(`  [FOREX] Trident rejected ${sig.symbol}: ${advice.reason.slice(0, 60)}`);
+                continue;
+              }
+            } catch (e: any) {
+              // Trident unavailable — proceed with scanner's signal (don't block on failure)
+              console.log(`  [FOREX] Trident check failed for ${sig.symbol}: ${e.message?.slice(0, 30)} — proceeding`);
+            }
+
+            try {
+              await this.forex.placeOrder(sig.symbol, sig.direction === 'long' ? 25000 : -25000, sig.stopLoss, sig.takeProfit);
+              console.log(`  [FOREX] ${sig.direction.toUpperCase()} ${sig.symbol} (${(sig.confidence * 100).toFixed(0)}%) — Trident approved — ${sig.rationale}`);
+              brain.recordBuy(sig.symbol, 25000, sig.entry, `forex ${sig.strategy}`).catch(() => {});
+              break; // one entry per heartbeat
+            } catch (e: any) { console.log(`  [FOREX] ORDER FAILED ${sig.symbol}: ${e.message}`); }
+          }
         }
       }
     } catch (e: any) { console.log(`  [FOREX] Error: ${e.message}`); }

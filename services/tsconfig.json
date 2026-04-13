@@ -13,5 +13,13 @@
     }
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    // Retired: the old monolithic gateway. gateway-v2 is the active runtime
+    // per feedback_gateway_stability — this file drifted from upstream types
+    // and is not imported or launched anywhere. Kept on disk for git history
+    // only; excluded from typecheck/build.
+    "gateway/src/server.ts"
+  ]
 }

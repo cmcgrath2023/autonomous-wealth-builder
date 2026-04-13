@@ -5,7 +5,8 @@ export type NanobotTaskClass =
   | 'compliance_audit'
   | 'briefing_generator'
   | 'reit_scan'
-  | 'forex_alert';
+  | 'forex_alert'
+  | 'trade_advisor';
 
 export type NanobotAutonomyLevel = 'observe' | 'suggest' | 'act';
 
@@ -63,6 +64,13 @@ export interface NanobotOutput {
   suggestedActions?: SuggestedAction[];
   requiresEscalation: boolean;
   escalationReason?: string;
+  // Structured recommendations emitted by the `trade_advisor` task class.
+  recommendations?: Array<{
+    ticker: string;
+    action: 'buy' | 'sell' | 'hold';
+    reason: string;
+    confidence: number;
+  }>;
 }
 
 export interface SuggestedAction {

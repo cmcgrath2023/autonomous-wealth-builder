@@ -1,7 +1,25 @@
 import { create } from 'zustand';
 import { Asset, PortfolioState, TradeStats, AutonomyStatus } from '@/types/portfolio';
 
+export interface TodayClosedTrade {
+  ticker: string;
+  pnl: number;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  qty: number | null;
+  reason: string;
+  closedAt: string;
+}
+
 interface PortfolioStore extends PortfolioState {
+  // Today's realized breakdown — the trades Alpaca's position view hides.
+  // Added after the 2026-04-10 incident where a -$6,411 AFJKU trade was
+  // invisible to the "all green positions" dashboard view.
+  todayRealizedPnl: number;
+  todayClosedTrades: TodayClosedTrade[];
+  todayTradeCount: number;
+  todayWins: number;
+  todayLosses: number;
   fetchPortfolio: () => Promise<void>;
 }
 
@@ -22,6 +40,11 @@ export const usePortfolioStore = create<PortfolioStore>((set) => ({
   assets: [],
   systemStatus: 'healthy',
   lastUpdated: null,
+  todayRealizedPnl: 0,
+  todayClosedTrades: [],
+  todayTradeCount: 0,
+  todayWins: 0,
+  todayLosses: 0,
 
   fetchPortfolio: async () => {
     try {
@@ -44,6 +67,11 @@ export const usePortfolioStore = create<PortfolioStore>((set) => ({
         assets: data.assets,
         systemStatus: data.systemStatus,
         lastUpdated: data.lastUpdated,
+        todayRealizedPnl: data.todayRealizedPnl ?? 0,
+        todayClosedTrades: data.todayClosedTrades ?? [],
+        todayTradeCount: data.todayTradeCount ?? 0,
+        todayWins: data.todayWins ?? 0,
+        todayLosses: data.todayLosses ?? 0,
       });
     } catch {
       set({ systemStatus: 'warning' });

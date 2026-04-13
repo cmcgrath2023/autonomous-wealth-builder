@@ -413,11 +413,46 @@ scanner.on('signal', (sig) => console.log(`[Forex] Signal: ${sig.direction.toUpp
 process.on('uncaughtException', (err) => console.error('[Forex] Uncaught:', err.message));
 process.on('unhandledRejection', (err: any) => console.error('[Forex] Unhandled rejection:', err?.message || err));
 
+// ── Bootstrap historical candles so indicators work immediately ──
+// Without this, the scanner starts with 0 price history and produces
+// 0 signals until ~50 quote fetches accumulate (50 × heartbeat interval
+// = hours of dead time). This was why forex was dead since 2026-03-31.
+async function bootstrapHistory(): Promise<void> {
+  if (!oandaAcct || !process.env.OANDA_API_KEY) {
+    console.log('[Forex Service] No OANDA creds — skipping bootstrap');
+    return;
+  }
+  const pairs = ['EUR_USD', 'GBP_USD', 'USD_JPY', 'AUD_JPY', 'NZD_JPY', 'EUR_GBP', 'AUD_NZD'];
+  console.log(`[Forex Service] Bootstrapping ${pairs.length} pairs with 100 x 15-min candles...`);
+  for (const inst of pairs) {
+    try {
+      const url = `${oandaBase}/v3/instruments/${inst}/candles?granularity=M15&count=100&price=M`;
+      const res = await fetch(url, { headers: oandaHeaders, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) { console.log(`  [bootstrap] ${inst}: ${res.status}`); continue; }
+      const data = await res.json() as any;
+      const candles = data.candles || [];
+      const symbol = inst.replace('_', '/');
+      let loaded = 0;
+      for (const c of candles) {
+        if (c.complete === false) continue; // skip in-progress candle
+        const mid = parseFloat(c.mid?.c || '0');
+        if (mid > 0) { scanner.addPricePoint(symbol, mid); loaded++; }
+      }
+      console.log(`  [bootstrap] ${symbol}: ${loaded} candles loaded`);
+    } catch (e: any) {
+      console.log(`  [bootstrap] ${inst}: FAILED ${e.message}`);
+    }
+  }
+  console.log('[Forex Service] Bootstrap complete — indicators ready');
+}
+
 // Store server ref to anchor event loop
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`\n[Forex Service] Listening on http://localhost:${PORT}`);
   console.log(`[Forex Service] OANDA: ${process.env.OANDA_ACCOUNT_ID ? 'configured' : 'NOT configured'}`);
   console.log(`[Forex Service] Session: ${scanner.getActiveSession()}`);
+  // Bootstrap BEFORE declaring ready so first signal scan has data
+  await bootstrapHistory();
   console.log('[Forex Service] Ready.');
 });
 

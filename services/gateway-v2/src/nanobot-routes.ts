@@ -29,14 +29,16 @@ export function nanobotRoutes(bridge: NanobotBridge): Router {
 
   // Get task result
   router.get('/nanobot/task/:taskId', (req: Request, res: Response) => {
-    const result = bridge.results.get(req.params.taskId);
+    const taskId = String(req.params.taskId);
+    const result = bridge.results.get(taskId);
     if (!result) return res.status(404).json({ error: 'Task not found' });
     res.json(result);
   });
 
   // Cancel a running task
   router.delete('/nanobot/task/:taskId', (req: Request, res: Response) => {
-    bridge.cancelTask(req.params.taskId);
+    const taskId = String(req.params.taskId);
+    bridge.cancelTask(taskId);
     res.json({ cancelled: true });
   });
 

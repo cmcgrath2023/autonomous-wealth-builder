@@ -179,7 +179,14 @@ export class TradeExecutor {
     }
   }
 
-  async getAccount(): Promise<{ cash: number; portfolioValue: number; buyingPower: number } | null> {
+  async getAccount(): Promise<{
+    cash: number;
+    portfolioValue: number;
+    buyingPower: number;
+    equity: number;
+    lastEquity: number;
+    dayPnl: number;
+  } | null> {
     if (!this.config.apiKey || !this.config.apiSecret) return null;
 
     try {
@@ -193,12 +200,16 @@ export class TradeExecutor {
       if (!response.ok) return null;
       const account = await response.json() as any;
 
+      const equity = parseFloat(account.equity);
+      const lastEquity = parseFloat(account.last_equity);
+
       return {
         cash: parseFloat(account.cash),
         portfolioValue: parseFloat(account.portfolio_value),
         buyingPower: parseFloat(account.buying_power),
-        lastEquity: parseFloat(account.last_equity),
-        equity: parseFloat(account.equity),
+        equity,
+        lastEquity,
+        dayPnl: equity - lastEquity,
       };
     } catch {
       return null;

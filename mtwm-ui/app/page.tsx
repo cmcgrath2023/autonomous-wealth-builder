@@ -14,6 +14,7 @@ import { PortfolioTable } from '@/components/dashboard/PortfolioTable';
 import { DailyTargetTracker } from '@/components/dashboard/DailyTargetTracker';
 import { IntelligenceGrowth } from '@/components/dashboard/IntelligenceGrowth';
 import { ResearchDigest } from '@/components/dashboard/ResearchDigest';
+import { TodayClosedTrades } from '@/components/dashboard/TodayClosedTrades';
 import { formatCurrency, formatPercent, formatRelativeTime } from '@/lib/utils/formatters';
 import { REFRESH_INTERVALS } from '@/lib/utils/constants';
 
@@ -152,6 +153,10 @@ export default function Dashboard() {
         realizedPnl={realizedPnl}
         unrealizedPnl={unrealizedPnl}
       />
+
+      {/* Today's Closed Trades — the trades Alpaca's position view hides.
+          Critical for understanding "all green positions" vs "red daily P&L". */}
+      <TodayClosedTrades />
 
       {/* Research Digest + Decisions + Portfolio Table */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

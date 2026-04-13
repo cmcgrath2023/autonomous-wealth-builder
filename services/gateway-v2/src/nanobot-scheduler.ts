@@ -1,4 +1,4 @@
-import cron from 'node-cron';
+import cron, { ScheduledTask } from 'node-cron';
 import { v4 as uuid } from 'uuid';
 import { NanobotBridge } from './nanobot-bridge.js';
 import type { NanobotTaskConfig } from '../../shared/nanobot.types.js';
@@ -99,7 +99,7 @@ const SCHEDULED_TASKS: PartialConfig[] = [
 ];
 
 export class NanobotScheduler {
-  private jobs: cron.ScheduledTask[] = [];
+  private jobs: ScheduledTask[] = [];
   private bridge: NanobotBridge;
 
   constructor(bridge: NanobotBridge) {
