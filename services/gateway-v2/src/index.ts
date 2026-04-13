@@ -273,11 +273,31 @@ async function main(): Promise<void> {
   // here and never referenced again anywhere in the codebase. Per Trident →
   // this functionality is covered by the Brain memory + SONA training loop.
 
-  // 2d. Initialize Research Database (PostgreSQL + pgvector)
+  // 2d. Initialize Research Database (PostgreSQL + pgvector) + Research Crons
+  let pgAvailable = false;
   try {
-    const { initResearchDb } = await import('../../research-db/src/index.js');
+    const { initResearchDb, query: pgQuery } = await import('../../research-db/src/index.js');
     await initResearchDb();
+    pgAvailable = true;
     log('Research database connected (PostgreSQL + pgvector)');
+
+    // Start research crons (Nanobot reintro — clean scheduled tasks)
+    try {
+      const { loadCredentials } = await import('./config-bus.js');
+      const creds = loadCredentials();
+      if (creds.alpaca) {
+        const { startResearchCrons } = await import('./research-crons.js');
+        startResearchCrons(
+          pgQuery,
+          stateStore,
+          { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret },
+          log,
+        );
+        log('Research crons started (knowledge_graph 2AM, signal_scan 15min, thesis_resolution 4:30PM, mv_refresh 30min)');
+      }
+    } catch (e: any) {
+      log(`Research crons failed to start: ${e.message}`);
+    }
   } catch (e: any) {
     log(`Research database not available: ${e.message} — running without PG (SQLite fallback)`);
   }
