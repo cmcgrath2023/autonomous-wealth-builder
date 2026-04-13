@@ -31,3 +31,9 @@ export type { CatalystCandidate, CatalystResult } from './catalyst-hunter.js';
 
 export { scanMomentum, persistMomentumStars, persistMomentumData } from './momentum-scanner.js';
 export type { MomentumResult, MomentumScanResult } from './momentum-scanner.js';
+
+export { ExitAnalyst } from './exit-analyst.js';
+export type { ExitPlan } from './exit-analyst.js';
+
+export { SectorRotator } from './sector-rotator.js';
+export type { SectorBias, SectorRotationResult } from './sector-rotator.js';

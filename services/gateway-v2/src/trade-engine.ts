@@ -26,7 +26,8 @@ import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { recordClosedTrade, reconcileWithAlpaca, runPostExitFollower } from './trade-recorder.js';
-import { RiskManager, MacroAnalyst } from './analysts/index.js';
+import { RiskManager, MacroAnalyst, ExitAnalyst, SectorRotator } from './analysts/index.js';
+import type { ExitPlan, SectorBias } from './analysts/index.js';
 
 // Shared Bayesian instance — populated via IPC from parent process
 let _bayesian: BayesianIntelligence | null = null;
