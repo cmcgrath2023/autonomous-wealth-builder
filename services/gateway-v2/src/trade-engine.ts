@@ -881,8 +881,17 @@ export class TradeEngine {
       } catch (e: any) { errors.push(`pre_market_crypto: ${e.message}`); }
     }
 
-    // 2b. EOD SELL — liquidate SYSTEM-BOUGHT equity positions at 3:50 PM ET
-    // MANUAL TRADES: winning manual positions are KEPT overnight. Owner must approve sale.
+    // 2b. CONDITIONAL EOD — replaces blanket 3:50 PM sell-all.
+    // The Exit Analyst with trailing stops makes the blanket liquidation
+    // redundant for positions that are working. RVMD at +$212 with a
+    // trailing stop at breakeven should NOT be sold just because it's 3:50.
+    //
+    // Rules:
+    //   - Exit Analyst has active trailing stop → HOLD overnight (stop protects)
+    //   - Active thesis (conviction ≥ 50) → HOLD overnight (thesis has invalidation)
+    //   - Losing AND no thesis → SELL at 3:50 (no reason to take overnight risk)
+    //   - Manual winning trades → HOLD (owner must approve, per CLAUDE.md)
+    //   - Fallback (no stop, no thesis, flat/losing) → SELL at 3:50
     if (mkt.isMarketOpen && mkt.etHour === 15 && mkt.etMin >= 50 && !this._soldEod) {
       this._soldEod = true;
       try {
@@ -892,36 +901,91 @@ export class TradeEngine {
         const equityPos = positions.filter(p => !isCrypto(p.ticker));
         const manualTrades = this._manualTrades;
         let soldCount = 0;
-        const keptManual: string[] = [];
+        const kept: string[] = [];
+
+        // Run Exit Analyst to get current stop status for each position
+        const exitAnalyst = new (await import('./analysts/exit-analyst.js')).ExitAnalyst();
+        const exitPlans = exitAnalyst.evaluate(equityPos.map(p => ({
+          ticker: p.ticker, entryPrice: p.avgPrice, currentPrice: p.currentPrice,
+          qty: Math.abs(p.shares), marketValue: p.marketValue,
+          unrealizedPnl: p.unrealizedPnl, unrealizedPnlPct: p.unrealizedPnlPercent / 100,
+          holdDurationMinutes: 360, isResilient: isResilient(p.ticker),
+        })));
+        const hasTrailingStop = new Set(
+          exitPlans.filter(p => p.trailingStopPct !== null || p.action === 'tighten_stop').map(p => p.ticker),
+        );
+
+        // Check thesis support from PG
+        const hasThesis = new Set<string>();
+        try {
+          const { query: pgQ } = await import('../../research-db/src/index.js');
+          const tickers = equityPos.map(p => p.ticker);
+          if (tickers.length > 0) {
+            const { rows } = await pgQ(
+              `SELECT DISTINCT primary_ticker FROM research_theses
+               WHERE primary_ticker = ANY($1) AND status IN ('active','promoted')
+               AND conviction_score >= 50`,
+              [tickers],
+            );
+            for (const r of rows) hasThesis.add((r as any).primary_ticker);
+          }
+        } catch {} // PG unavailable — all positions default to no-thesis
+
         for (const pos of equityPos) {
           const isManual = manualTrades.has(pos.ticker);
-          const isManualAndWinning = isManual && pos.unrealizedPnl >= 0;
 
-          // Protect winning manual trades — owner must approve
-          if (isManualAndWinning) {
-            console.log(`  [EOD] KEPT ${pos.ticker} +$${pos.unrealizedPnl.toFixed(2)} — manual trade, owner must approve sale`);
-            keptManual.push(pos.ticker);
+          // Manual winning trades — NEVER auto-sold
+          if (isManual && pos.unrealizedPnl >= 0) {
+            console.log(`  [EOD] HOLD ${pos.ticker} +$${pos.unrealizedPnl.toFixed(2)} — manual trade`);
+            kept.push(pos.ticker);
             continue;
           }
 
+          // Has trailing stop from Exit Analyst → HOLD overnight
+          if (hasTrailingStop.has(pos.ticker)) {
+            console.log(`  [EOD] HOLD ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)} — trailing stop active, holds overnight`);
+            kept.push(pos.ticker);
+            continue;
+          }
+
+          // Has active thesis with conviction ≥ 50 → HOLD overnight
+          if (hasThesis.has(pos.ticker)) {
+            console.log(`  [EOD] HOLD ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)} — active thesis supports overnight hold`);
+            kept.push(pos.ticker);
+            continue;
+          }
+
+          // Losing with no thesis and no trailing stop → SELL
+          if (pos.unrealizedPnl < 0) {
+            try {
+              await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
+              console.log(`  [EOD] SOLD ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)} — losing, no thesis, no stop`);
+              emitTradeClosed({ ticker: pos.ticker, success: false, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
+              recordClosedTrade(this.store, {
+                ticker: pos.ticker, direction: 'long', reason: 'eod_close_no_thesis',
+                qty: Math.abs(pos.shares), entryPrice: pos.avgPrice ?? null,
+                exitPrice: pos.currentPrice ?? 0, pnl: pos.unrealizedPnl, source: 'engine_eod',
+              });
+              soldCount++;
+            } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
+            continue;
+          }
+
+          // Fallback: flat/slightly positive but no stop and no thesis → SELL
           try {
             await fetch(`${creds.alpaca!.baseUrl}/v2/positions/${pos.ticker}`, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
-            console.log(`  [EOD] SOLD ${pos.ticker} P&L: $${pos.unrealizedPnl.toFixed(2)}${isManual ? ' (manual, losing)' : ''}`);
+            console.log(`  [EOD] SOLD ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)} — no thesis, no trailing stop`);
             emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pos.unrealizedPnlPercent / 100, reason: 'eod_close' });
             recordClosedTrade(this.store, {
-              ticker: pos.ticker,
-              direction: 'long',
-              reason: isManual ? 'eod_close_manual_losing' : 'eod_close',
-              qty: Math.abs(pos.shares),
-              entryPrice: pos.avgPrice ?? null,
-              exitPrice: pos.currentPrice ?? 0,
-              pnl: pos.unrealizedPnl,
-              source: 'engine_eod',
+              ticker: pos.ticker, direction: 'long', reason: 'eod_close_fallback',
+              qty: Math.abs(pos.shares), entryPrice: pos.avgPrice ?? null,
+              exitPrice: pos.currentPrice ?? 0, pnl: pos.unrealizedPnl, source: 'engine_eod',
             });
             soldCount++;
           } catch (e: any) { console.log(`  [EOD] FAILED ${pos.ticker}: ${e.message}`); }
         }
-        const detail = `EOD: sold ${soldCount}${keptManual.length > 0 ? `, kept ${keptManual.join(',')} (manual winners)` : ''}`;
+        const detail = `EOD: sold ${soldCount}, held ${kept.length} (${kept.join(',')})`;
+        console.log(`  [EOD] ${detail}`);
         actions.push({ action: 'eod_sell', priority: 0, durationMs: Date.now() - t0, status: 'success', detail });
       } catch (e: any) { errors.push(`eod_sell: ${e.message}`); }
     }
