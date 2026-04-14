@@ -17,8 +17,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${googleSans.variable} ${geistMono.variable} font-sans antialiased bg-[#0a0a1a] text-white min-h-screen`}>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${googleSans.variable} ${geistMono.variable} font-sans antialiased bg-background text-foreground min-h-screen`}>
         <Providers>
           <AppShell>{children}</AppShell>
         </Providers>

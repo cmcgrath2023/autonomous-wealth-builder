@@ -1,6 +1,7 @@
 'use client';
 
 import { Chip } from '@heroui/react';
+import { useTheme } from 'next-themes';
 import { usePortfolioStore } from '@/stores/portfolio';
 import { useSystemStore } from '@/stores/system';
 import { formatCurrency, formatPercent } from '@/lib/utils/formatters';
@@ -8,6 +9,7 @@ import { formatCurrency, formatPercent } from '@/lib/utils/formatters';
 export function Header() {
   const { totalValue, dayChange, dayChangePercent, systemStatus } = usePortfolioStore();
   const { connected } = useSystemStore();
+  const { theme, setTheme } = useTheme();
 
   const statusColor = systemStatus === 'healthy' ? 'success' : systemStatus === 'warning' ? 'warning' : 'danger';
 
@@ -27,6 +29,13 @@ export function Header() {
           </div>
         </div>
         <div className="flex items-center gap-2 lg:gap-3">
+          <button
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            className="w-8 h-8 rounded-lg bg-default-100 hover:bg-default-200 flex items-center justify-center text-sm transition-colors"
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
           <Chip size="sm" variant="flat" color={statusColor}>
             {systemStatus.toUpperCase()}
           </Chip>
