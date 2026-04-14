@@ -478,7 +478,8 @@ async function runOvernightCatalystScan(
   // 1. Run the catalyst hunter
   try {
     const { CatalystHunter } = await import('./analysts/index.js');
-    const hunter = new CatalystHunter(sqliteStore);
+    // Pass pgQuery so Catalyst Hunter dual-writes to PG catalyst_history + research_signals
+    const hunter = new CatalystHunter(sqliteStore, pgQuery as any);
     const result = await hunter.scan(alpacaHeaders);
     console.log(`[overnight-catalyst] ${session}: ${result.candidates.length} catalysts found`);
 

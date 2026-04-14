@@ -69,9 +69,11 @@ export interface CatalystResult {
 export class CatalystHunter {
   private client: Anthropic | null;
   private store: GatewayStateStore;
+  private pgQuery: ((text: string, params?: unknown[]) => Promise<{ rows: any[] }>) | null;
 
-  constructor(store: GatewayStateStore) {
+  constructor(store: GatewayStateStore, pgQuery?: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>) {
     this.store = store;
+    this.pgQuery = pgQuery ?? null;
     if (process.env.ANTHROPIC_API_KEY) {
       try { this.client = new Anthropic(); } catch { this.client = null; }
     } else {
@@ -303,8 +305,7 @@ Return ONLY the JSON array. No commentary.`;
   private persistCandidates(candidates: CatalystCandidate[]): void {
     for (const c of candidates) {
       try {
-        // Score = confidence mapped to the 0.85-0.99 research-star range so
-        // catalyst-tagged picks rank alongside the best research-worker stars.
+        // SQLite: research_stars (for trade-engine buy pipeline)
         const score = Math.min(0.99, 0.85 + c.confidence * 0.14);
         this.store.saveResearchStar(
           c.symbol,
@@ -313,13 +314,46 @@ Return ONLY the JSON array. No commentary.`;
           score,
         );
       } catch (e: any) {
-        console.warn(`[CATALYST] persist failed for ${c.symbol}: ${e.message}`);
+        console.warn(`[CATALYST] SQLite persist failed for ${c.symbol}: ${e.message}`);
       }
+
+      // PG: catalyst_history + research_signals (for thesis pipeline)
+      // This is the dual-write that bridges SQLite analysts → PG research system
+      try {
+        if (this.pgQuery) {
+          // catalyst_history
+          this.pgQuery(`
+            INSERT INTO catalyst_history (symbol, catalyst_type, headline, detected_at, price_at_detection, outcome, source)
+            VALUES ($1, $2, $3, NOW(), NULL, 'pending', 'catalyst_hunter')
+          `, [c.symbol, c.catalystType, c.catalyst.slice(0, 300)]).catch(() => {});
+
+          // research_signals (for cluster detection)
+          const signalType = this.mapSignalType(c.catalystType);
+          this.pgQuery(`
+            INSERT INTO research_signals (symbol, sector, signal_type, headline, confidence, decay_hours, metadata, created_by, detected_at)
+            VALUES ($1, 'catalyst', $2, $3, $4, 24, $5, 'catalyst_hunter', NOW())
+          `, [c.symbol, signalType, c.catalyst.slice(0, 200), c.confidence,
+              JSON.stringify({ catalystType: c.catalystType, source: c.source })]).catch(() => {});
+        }
+      } catch {}
     }
     if (candidates.length > 0) {
-      console.log(`[CATALYST] Wrote ${candidates.length} candidates to research_stars: ${candidates.map(c => `${c.symbol}(${c.catalystType})`).join(', ')}`);
+      console.log(`[CATALYST] Wrote ${candidates.length} candidates to research_stars + PG: ${candidates.map(c => `${c.symbol}(${c.catalystType})`).join(', ')}`);
     } else {
       console.log('[CATALYST] No candidates found this scan.');
     }
+  }
+
+  private mapSignalType(catalystType: string): string {
+    const map: Record<string, string> = {
+      'earnings_beat': 'earnings_beat', 'fda_approval': 'fda_approval',
+      'upgrade': 'upgrade', 'downgrade': 'downgrade',
+      'guidance_raise': 'guidance_raise', 'contract_win': 'contract_win',
+      'insider_buying': 'insider_buy', 'short_squeeze': 'short_squeeze',
+      'partnership': 'partnership', 'ma_rumor': 'acquisition',
+      'geopolitical': 'geopolitical', 'supply_shock': 'macro_shift',
+      'fed_action': 'macro_shift',
+    };
+    return map[catalystType] || 'technical_breakout';
   }
 }
