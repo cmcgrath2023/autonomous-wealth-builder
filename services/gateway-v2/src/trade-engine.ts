@@ -1297,17 +1297,74 @@ export class TradeEngine {
         if (r.status !== 'skipped') console.log(`  [EXITS] ${r.detail} (${r.durationMs}ms)`);
       } catch (e: any) { errors.push(`check_exits: ${e.message}`); }
 
-      // 4b. Trident LoRA exit consultation — ask trained model about remaining positions
-      // RULE: Manual trades (not tracked in _recentBuys) are ONLY auto-sold if losing.
-      // If a manual trade is winning, do NOT sell — owner must be consulted.
+      // 4b. Exit Analyst + Trident LoRA exit consultation
+      // Exit Analyst provides tiered stops (trailing, time-based, profit-locking).
+      // Trident provides the intelligence gate (should I sell at all?).
+      // Exit Analyst's sell_now overrides Trident hold.
       try {
         const currentPos = await this.executor.getPositions();
+
+        // Run Exit Analyst on all positions
+        const exitAnalyst = new (await import('./analysts/exit-analyst.js')).ExitAnalyst();
+        const exitPlans = exitAnalyst.evaluate(currentPos.map(p => ({
+          ticker: p.ticker,
+          entryPrice: p.avgPrice,
+          currentPrice: p.currentPrice,
+          qty: Math.abs(p.shares),
+          marketValue: p.marketValue,
+          unrealizedPnl: p.unrealizedPnl,
+          unrealizedPnlPct: p.unrealizedPnlPercent / 100,
+          holdDurationMinutes: this._recentBuys.has(p.ticker)
+            ? (Date.now() - (this._recentBuys.get(p.ticker) || Date.now())) / 60_000
+            : 120,
+          isResilient: isResilient(p.ticker),
+        })));
+
+        // Log exit plans
+        for (const plan of exitPlans) {
+          if (plan.action === 'sell_now') {
+            console.log(`  [EXIT] ${plan.ticker} → SELL NOW: ${plan.reasoning}`);
+          } else if (plan.action === 'tighten_stop') {
+            console.log(`  [EXIT] ${plan.ticker} → tighten stop $${plan.stopLoss.toFixed(2)}${plan.trailingStopPct ? ` trail ${plan.trailingStopPct}%` : ''}: ${plan.reasoning}`);
+          }
+        }
+
+        // Execute immediate sells from Exit Analyst
+        const sellNowTickers = new Set(exitPlans.filter(p => p.action === 'sell_now').map(p => p.ticker));
+
         for (const pos of currentPos) {
           const pnlPct = pos.unrealizedPnlPercent / 100;
-          // Resilient stocks get a wider hold zone — don't even consult Trident unless deep in trouble
+          const exitPlan = exitPlans.find(p => p.ticker === pos.ticker);
+
+          // Exit Analyst says sell_now → execute immediately, skip Trident
+          if (sellNowTickers.has(pos.ticker)) {
+            const creds = loadCredentials();
+            const headers = { 'APCA-API-KEY-ID': creds.alpaca!.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca!.apiSecret, 'Content-Type': 'application/json' };
+            try {
+              const sellSymbol = isCrypto(pos.ticker) ? pos.ticker.replace(/USD$/, '/USD') : pos.ticker;
+              const tif = isCrypto(pos.ticker) ? 'gtc' : 'day';
+              const res = await fetch(`${creds.alpaca!.baseUrl}/v2/orders`, {
+                method: 'POST', headers,
+                body: JSON.stringify({ symbol: sellSymbol, qty: String(Math.abs(pos.shares)), side: 'sell', type: 'market', time_in_force: tif }),
+                signal: AbortSignal.timeout(10_000),
+              });
+              const body = res.ok ? await res.json().catch(() => null) as any : null;
+              emitTradeClosed({ ticker: pos.ticker, success: pos.unrealizedPnl > 0, returnPct: pnlPct, reason: 'exit_analyst' });
+              recordClosedTrade(this.store, {
+                ticker: pos.ticker, direction: 'long', reason: exitPlan?.reasoning.slice(0, 60) || 'exit_analyst_sell_now',
+                qty: Math.abs(pos.shares), entryPrice: pos.avgPrice, exitPrice: pos.currentPrice,
+                pnl: pos.unrealizedPnl, orderId: body?.id ?? null, source: 'engine_exit_analyst',
+              });
+              this._addSessionSell(pos.ticker);
+              console.log(`  [EXIT SELL] ${pos.ticker} $${pos.unrealizedPnl.toFixed(2)} — ${exitPlan?.reasoning}`);
+              continue; // skip Trident consultation for this ticker
+            } catch (e: any) { console.log(`  [EXIT SELL FAILED] ${pos.ticker}: ${e.message}`); }
+          }
+
+          // For non-sell_now positions: standard Trident consultation
           const resilientStock = isResilient(pos.ticker);
-          const dangerFloor = resilientStock ? -0.05 : -0.02; // Resilient: only consult at -5%+
-          const gainCeiling = resilientStock ? 0.10 : 0.05;   // Resilient: hold gains longer
+          const dangerFloor = resilientStock ? -0.05 : -0.02;
+          const gainCeiling = resilientStock ? 0.10 : 0.05;
           if (pnlPct > dangerFloor && pnlPct < gainCeiling) continue;
 
           const entryTime = this._recentBuys.get(pos.ticker);
