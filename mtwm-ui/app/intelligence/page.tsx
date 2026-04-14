@@ -252,6 +252,8 @@ export default function IntelligencePage() {
   const [counts, setCounts] = useState<TridentCounts | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
+  const [graphMode, setGraphMode] = useState<'knowledge' | 'memory'>('knowledge');
+  const [pgGraphData, setPgGraphData] = useState<{ nodes: GraphNode[]; links: GraphLink[] }>({ nodes: [], links: [] });
   const graphRef = useRef<HTMLDivElement>(null);
   const [graphDimensions, setGraphDimensions] = useState({ width: 800, height: 600 });
 
@@ -319,7 +321,23 @@ export default function IntelligencePage() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const graphData = useMemo(() => buildDenseGraph(tridentMemories, beliefs), [tridentMemories, beliefs]);
+  // Fetch PG knowledge graph (real company relationships)
+  useEffect(() => {
+    fetch('/api/intelligence/graph')
+      .then(r => r.json())
+      .then(d => {
+        if (d.nodes?.length > 0) {
+          setPgGraphData({
+            nodes: d.nodes.map((n: any) => ({ ...n, memory: undefined })),
+            links: d.links.map((l: any) => ({ source: l.source, target: l.target, color: l.color || '#6b7280' })),
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const memoryGraphData = useMemo(() => buildDenseGraph(tridentMemories, beliefs), [tridentMemories, beliefs]);
+  const graphData = graphMode === 'knowledge' && pgGraphData.nodes.length > 0 ? pgGraphData : memoryGraphData;
 
   if (loading) return <div className="flex justify-center items-center h-64"><Spinner size="lg" /></div>;
 
@@ -361,16 +379,44 @@ export default function IntelligencePage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="bg-white/5 border border-white/10 lg:col-span-2">
           <CardHeader className="px-4 pt-4 pb-2 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-white/80">Knowledge Graph</h3>
+            <div className="flex items-center gap-3">
+              <h3 className="text-sm font-semibold text-white/80">
+                {graphMode === 'knowledge' ? 'Company Knowledge Graph' : 'Brain Memory Graph'}
+              </h3>
+              <div className="flex bg-white/10 rounded-lg p-0.5">
+                <button
+                  className={`px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors ${graphMode === 'knowledge' ? 'bg-white/20 text-white' : 'text-white/40 hover:text-white/60'}`}
+                  onClick={() => setGraphMode('knowledge')}
+                >
+                  Knowledge ({pgGraphData.nodes.length} cos, {pgGraphData.links.length} edges)
+                </button>
+                <button
+                  className={`px-2.5 py-1 text-[10px] font-medium rounded-md transition-colors ${graphMode === 'memory' ? 'bg-white/20 text-white' : 'text-white/40 hover:text-white/60'}`}
+                  onClick={() => setGraphMode('memory')}
+                >
+                  Memory ({memoryGraphData.nodes.length} nodes)
+                </button>
+              </div>
+            </div>
             <div className="flex gap-3 ml-auto text-[10px] flex-wrap">
-              <Legend color="#3b82f6" label="Trading" />
-              <Legend color="#8b5cf6" label="Research" />
-              <Legend color="#f59e0b" label="Rules" />
-              <Legend color="#06b6d4" label="SONA" />
-              <Legend color="#10b981" label="Daily" />
-              <Legend color="#f97316" label="Entries" />
-              <Legend color="#22c55e" label="Win" />
-              <Legend color="#ef4444" label="Loss" />
+              {graphMode === 'knowledge' ? (
+                <>
+                  <Legend color="#3b82f6" label="Supplier" />
+                  <Legend color="#ef4444" label="Competitor" />
+                  <Legend color="#22c55e" label="Customer" />
+                  <Legend color="#fbbf24" label="Partner" />
+                  <Legend color="#6b7280" label="Peer" />
+                </>
+              ) : (
+                <>
+                  <Legend color="#3b82f6" label="Trading" />
+                  <Legend color="#8b5cf6" label="Research" />
+                  <Legend color="#f59e0b" label="Rules" />
+                  <Legend color="#06b6d4" label="SONA" />
+                  <Legend color="#22c55e" label="Win" />
+                  <Legend color="#ef4444" label="Loss" />
+                </>
+              )}
             </div>
           </CardHeader>
           <CardBody className="p-0 overflow-hidden" style={{ height: graphDimensions.height }}>
