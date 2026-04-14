@@ -358,26 +358,11 @@ export default function IntelligencePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Intelligence</h1>
-        <p className="text-white/50 text-sm mt-1">What the system has learned, what it&apos;s watching, and what it would do right now</p>
-      </div>
-
-      {/* Trident Coherence Engine — the hero feature */}
+      {/* Trident Coherence Engine — hero feature, top of fold */}
       <CoherenceEngine />
 
-      {/* Brain Summary — plain English learnings + research status */}
+      {/* Brain Summary — what the system has learned + research status */}
       <BrainSummary />
-
-      {/* Detailed metrics (collapsed below summary) */}
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-        <MetricCard label="Beliefs" value={bayesian?.totalBeliefs ?? 0} />
-        <MetricCard label="Observations" value={bayesian?.totalObservations ?? 0} />
-        <MetricCard label="Accuracy" value={metrics ? `${(metrics.currentAccuracy * 100).toFixed(0)}%` : '--'} />
-        <MetricCard label="SONA Patterns" value={(cognitive?.sonaPatterns || sonaStatus?.patterns || 0).toLocaleString()} sub={cognitive ? `${cognitive.sonaTrajectories} trajectories` : undefined} />
-        <MetricCard label="Trident Memories" value={counts?.total || tridentMemories.length || '--'} sub={cognitive ? `Quality: ${(cognitive.avgQuality * 100).toFixed(0)}%` : undefined} />
-        <MetricCard label="Knowledge Graph" value={cognitive?.graphNodes ?? graphData.nodes.length} sub={`${(cognitive?.graphEdges ?? graphData.links.length).toLocaleString()} edges`} />
-      </div>
 
       {/* Knowledge Graph + Detail Flyout */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
