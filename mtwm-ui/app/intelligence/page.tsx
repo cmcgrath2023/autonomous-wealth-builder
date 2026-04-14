@@ -358,7 +358,17 @@ export default function IntelligencePage() {
 
   return (
     <div className="space-y-6">
-      {/* Trident Coherence Engine — hero feature, top of fold */}
+      {/* Top metric cards — relevant counts at a glance */}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+        <MetricCard label="SONA Patterns" value={(cognitive?.sonaPatterns || sonaStatus?.patterns || 0).toLocaleString()} sub="learned from trading" />
+        <MetricCard label="Pareto Optimal" value={(cognitive?.paretoFront || sonaStatus?.pareto || 0).toLocaleString()} sub="coherence verified" />
+        <MetricCard label="Memories" value={counts?.total || tridentMemories.length || '--'} sub="in Trident brain" />
+        <MetricCard label="Beliefs" value={bayesian?.totalBeliefs ?? 0} sub={`${bayesian?.totalObservations ?? 0} observations`} />
+        <MetricCard label="Companies" value={pgGraphData.nodes.length || '--'} sub={`${pgGraphData.links.length} relationships`} />
+        <MetricCard label="MCP Tools" value="40" sub="REST + MCP access" />
+      </div>
+
+      {/* Trident Coherence Engine — three prong display */}
       <CoherenceEngine />
 
       {/* Brain Summary — what the system has learned + research status */}
