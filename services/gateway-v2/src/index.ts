@@ -64,6 +64,10 @@ const WORKER_CONFIGS: WorkerConfig[] = [
   { name: 'trade-engine',    script: resolve(SRC_DIR, 'trade-engine.ts'),    restartDelay: 5000,  maxRestarts: 10, optional: false },
   { name: 'data-feed',       script: resolve(SRC_DIR, 'data-feed.ts'),       restartDelay: 3000,  maxRestarts: 20, optional: true },
   { name: 'research-worker', script: resolve(SRC_DIR, 'research-worker.ts'), restartDelay: 5000,  maxRestarts: 10, optional: true },
+  // Forex scanner was previously started separately and never restarted
+  // with code changes. Now managed by the orchestrator so bootstrap + Trident
+  // integration deploy with every restart.
+  { name: 'forex-scanner',   script: resolve(SRC_DIR, '../../forex-scanner/src/server.ts'), restartDelay: 5000, maxRestarts: 10, optional: true },
 ];
 
 // ---------------------------------------------------------------------------
