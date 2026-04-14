@@ -170,27 +170,34 @@ async function signalScan(
       if (!star.symbol || !star.catalyst) continue;
       // Determine signal type from catalyst string
       const catalystLower = (star.catalyst || '').toLowerCase();
+      // Must match research_signals_signal_type_check constraint
       const signalType = catalystLower.includes('earnings') ? 'earnings_beat' :
         catalystLower.includes('fda') ? 'fda_approval' :
         catalystLower.includes('upgrade') ? 'upgrade' :
         catalystLower.includes('downgrade') ? 'downgrade' :
         catalystLower.includes('guidance') ? 'guidance_raise' :
         catalystLower.includes('partnership') || catalystLower.includes('deal') ? 'partnership' :
-        catalystLower.includes('momentum') || catalystLower.includes('mover') ? 'momentum_breakout' :
-        catalystLower.includes('geopolitical') || catalystLower.includes('iran') ? 'macro' :
-        'catalyst';
+        catalystLower.includes('momentum') || catalystLower.includes('mover') || catalystLower.includes('top mover') ? 'momentum_breakout' :
+        catalystLower.includes('geopolitical') || catalystLower.includes('iran') || catalystLower.includes('blockade') ? 'geopolitical' :
+        catalystLower.includes('macro') || catalystLower.includes('oil') ? 'macro_shift' :
+        catalystLower.includes('short') ? 'short_squeeze' :
+        catalystLower.includes('contract') ? 'contract_win' :
+        catalystLower.includes('insider') ? 'insider_buy' :
+        catalystLower.includes('sector') ? 'sector_rotation' :
+        catalystLower.includes('volume') ? 'volume_surge' :
+        'technical_breakout'; // default fallback — must be a valid CHECK value
       try {
         await pgQuery(`
-          INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+          INSERT INTO research_signals (symbol, sector, signal_type, headline, confidence, decay_hours,
             metadata, created_by, detected_at)
-          VALUES ($1, $2, $3, $4, 24, $5, 'bridge_from_sqlite', NOW())
-          ON CONFLICT DO NOTHING
+          VALUES ($1, $2, $3, $4, $5, 24, $6, 'bridge_from_sqlite', NOW())
         `, [
           star.symbol,
           star.sector || '',
           signalType,
+          (star.catalyst || '').slice(0, 200),
           Math.min(0.9, star.score),
-          JSON.stringify({ catalyst: star.catalyst, source: 'research_stars_bridge' }),
+          JSON.stringify({ source: 'research_stars_bridge' }),
         ]);
         bridged++;
       } catch {}
@@ -392,7 +399,7 @@ async function scanCryptoSignals(
       if (relVolume > 3) {
         try {
           await pgQuery(`
-            INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+            INSERT INTO research_signals (symbol, sector, signal_type, headline, confidence, decay_hours,
               metadata, created_by, detected_at)
             VALUES ($1, 'crypto', 'volume_surge', $2, 12, $3, 'crypto_scan', NOW())
           `, [
@@ -411,7 +418,7 @@ async function scanCryptoSignals(
       if (Math.abs(dailyChange) > 5) {
         try {
           await pgQuery(`
-            INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+            INSERT INTO research_signals (symbol, sector, signal_type, headline, confidence, decay_hours,
               metadata, created_by, detected_at)
             VALUES ($1, 'crypto', 'momentum_breakout', $2, 24, $3, 'crypto_scan', NOW())
           `, [
@@ -445,7 +452,7 @@ async function scanCryptoSignals(
         // Decoupling: BTC and SPY moving in opposite directions by >2% each
         if (Math.sign(btcPct) !== Math.sign(spyPct) && Math.abs(btcPct) > 2 && Math.abs(spyPct) > 1) {
           await pgQuery(`
-            INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+            INSERT INTO research_signals (symbol, sector, signal_type, headline, confidence, decay_hours,
               metadata, created_by, detected_at)
             VALUES ('BTC/USD', 'crypto', 'correlation_break', 0.7, 48, $1, 'crypto_scan', NOW())
           `, [JSON.stringify({ btc_pct: btcPct, spy_pct: spyPct, decoupled: true })]);
