@@ -161,15 +161,52 @@ async function signalScan(
 ): Promise<void> {
   console.log('[signal-scan] Starting 15-min scan...');
 
-  // 1. Read latest catalyst_history entries (from Catalyst Hunter)
-  const catalysts = sqliteStore.getClosedTrades?.(0) || []; // placeholder
-  // Actually read from PG catalyst_history for recent entries
+  // BRIDGE: Write Catalyst Hunter + Research Worker stars FROM SQLite TO PG research_signals.
+  // This connects the Wave 1-2 analysts to the Wave 4 research pipeline.
+  try {
+    const stars = sqliteStore.getResearchStars();
+    let bridged = 0;
+    for (const star of stars) {
+      if (!star.symbol || !star.catalyst) continue;
+      // Determine signal type from catalyst string
+      const catalystLower = (star.catalyst || '').toLowerCase();
+      const signalType = catalystLower.includes('earnings') ? 'earnings_beat' :
+        catalystLower.includes('fda') ? 'fda_approval' :
+        catalystLower.includes('upgrade') ? 'upgrade' :
+        catalystLower.includes('downgrade') ? 'downgrade' :
+        catalystLower.includes('guidance') ? 'guidance_raise' :
+        catalystLower.includes('partnership') || catalystLower.includes('deal') ? 'partnership' :
+        catalystLower.includes('momentum') || catalystLower.includes('mover') ? 'momentum_breakout' :
+        catalystLower.includes('geopolitical') || catalystLower.includes('iran') ? 'macro' :
+        'catalyst';
+      try {
+        await pgQuery(`
+          INSERT INTO research_signals (ticker, sector, signal_type, confidence, decay_hours,
+            metadata, created_by, detected_at)
+          VALUES ($1, $2, $3, $4, 24, $5, 'bridge_from_sqlite', NOW())
+          ON CONFLICT DO NOTHING
+        `, [
+          star.symbol,
+          star.sector || '',
+          signalType,
+          Math.min(0.9, star.score),
+          JSON.stringify({ catalyst: star.catalyst, source: 'research_stars_bridge' }),
+        ]);
+        bridged++;
+      } catch {}
+    }
+    if (bridged > 0) console.log(`[signal-scan] Bridged ${bridged} research stars → PG research_signals`);
+  } catch (e: any) {
+    console.log(`[signal-scan] Bridge failed: ${e.message}`);
+  }
+
+  // 1. Read latest catalyst entries (now populated by the bridge above + catalyst_history)
   try {
     const { rows: recentCatalysts } = await pgQuery(`
-      SELECT symbol, catalyst_type, headline, detected_at, price_at_detection
-      FROM catalyst_history
+      SELECT ticker AS symbol, signal_type AS catalyst_type,
+             metadata->>'catalyst' AS headline, detected_at, confidence AS price_at_detection
+      FROM research_signals
       WHERE detected_at > NOW() - INTERVAL '4 hours'
-        AND outcome = 'pending'
       ORDER BY detected_at DESC
       LIMIT 20
     `);
