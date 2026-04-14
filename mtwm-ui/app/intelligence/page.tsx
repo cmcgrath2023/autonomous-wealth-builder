@@ -5,6 +5,7 @@ import { Card, CardBody, CardHeader, Chip, Spinner, Progress } from '@heroui/rea
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import dynamic from 'next/dynamic';
 import { BrainSummary } from '@/components/intelligence/BrainSummary';
+import { CoherenceEngine } from '@/components/intelligence/CoherenceEngine';
 
 const ForceGraph3D = dynamic(() => import('react-force-graph-3d'), { ssr: false });
 
@@ -362,7 +363,10 @@ export default function IntelligencePage() {
         <p className="text-white/50 text-sm mt-1">What the system has learned, what it&apos;s watching, and what it would do right now</p>
       </div>
 
-      {/* Brain Summary — plain English, "for dummies" view */}
+      {/* Trident Coherence Engine — the hero feature */}
+      <CoherenceEngine />
+
+      {/* Brain Summary — plain English learnings + research status */}
       <BrainSummary />
 
       {/* Detailed metrics (collapsed below summary) */}
