@@ -65,7 +65,7 @@ function NavLink({ item, pathname }: { item: NavItem; pathname: string }) {
           : 'text-white/80 hover:bg-white/5 hover:text-white'
       }`}
     >
-      {item.icon === 'home' ? <Home size={16} /> : <span className="text-base">{item.icon}</span>}
+      {item.icon === 'home' ? <Home size={18} /> : <span className="text-base">{item.icon}</span>}
       {item.label}
     </Link>
   );
@@ -83,7 +83,7 @@ function NavSection({ group, pathname, expanded, onToggle }: { group: NavGroup; 
       >
         <span className="text-base">{group.icon}</span>
         <span className="flex-1 text-left font-medium">{group.label}</span>
-        {expanded ? <ChevronDown size={16} className="text-white/50" /> : <ChevronRight size={16} className="text-white/50" />}
+        {expanded ? <ChevronDown size={18} className="text-white/50" /> : <ChevronRight size={18} className="text-white/50" />}
       </button>
       {expanded && (
         <div className="ml-4 mt-0.5 space-y-0.5 border-l border-white/5 pl-2">

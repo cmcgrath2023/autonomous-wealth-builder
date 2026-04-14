@@ -430,9 +430,9 @@ export default function IntelligencePage() {
                   nodeColor={(node: any) => node.color}
                   nodeVal={(node: any) => node.val}
                   nodeOpacity={0.9}
-                  linkColor={(link: any) => link.color}
-                  linkOpacity={0.3}
-                  linkWidth={0.5}
+                  linkColor={(link: any) => link.color || '#6b7280'}
+                  linkOpacity={graphMode === 'knowledge' ? 0.6 : 0.3}
+                  linkWidth={graphMode === 'knowledge' ? 1.5 : 0.5}
                   backgroundColor="rgba(0,0,0,0)"
                   showNavInfo={false}
                   enableNodeDrag={true}
@@ -506,6 +506,92 @@ export default function IntelligencePage() {
                     <button className="text-xs text-white/30 hover:text-white/60" onClick={() => setSelectedNode(null)}>close</button>
                   </div>
                 </div>
+
+                {/* Knowledge Graph node detail — show company relationships */}
+                {graphMode === 'knowledge' && (() => {
+                  const nodeId = selectedNode.node.id;
+                  const connections = graphData.links
+                    .filter(l => {
+                      const src = typeof l.source === 'string' ? l.source : (l.source as any).id;
+                      const tgt = typeof l.target === 'string' ? l.target : (l.target as any).id;
+                      return src === nodeId || tgt === nodeId;
+                    })
+                    .map(l => {
+                      const src = typeof l.source === 'string' ? l.source : (l.source as any).id;
+                      const tgt = typeof l.target === 'string' ? l.target : (l.target as any).id;
+                      const neighbor = src === nodeId ? tgt : src;
+                      const neighborNode = graphData.nodes.find(n => n.id === neighbor);
+                      return { neighbor, name: neighborNode?.name || neighbor, color: l.color, group: neighborNode?.group || '' };
+                    });
+
+                  const suppliers = connections.filter(c => c.color === '#3b82f6');
+                  const competitors = connections.filter(c => c.color === '#ef4444');
+                  const customers = connections.filter(c => c.color === '#22c55e');
+                  const partners = connections.filter(c => c.color === '#fbbf24');
+                  const peers = connections.filter(c => c.color === '#6b7280' || !['#3b82f6','#ef4444','#22c55e','#fbbf24'].includes(c.color));
+
+                  // Check if Bayesian has data on this ticker
+                  const belief = beliefs.find(b => b.subject === nodeId);
+
+                  return (
+                    <div className="space-y-3">
+                      <div className="text-xs text-white/50">
+                        {connections.length} connections in knowledge graph
+                      </div>
+
+                      {belief && (
+                        <div className="bg-white/5 rounded-lg p-2.5 space-y-1">
+                          <div className="text-[10px] text-white/40 uppercase">Bayesian Belief</div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-white/50">Win probability</span>
+                            <span className={belief.posterior > 0.6 ? 'text-emerald-400' : belief.posterior < 0.4 ? 'text-red-400' : 'text-amber-400'}>{(belief.posterior * 100).toFixed(0)}%</span>
+                          </div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-white/50">Observations</span>
+                            <span className="text-white/80">{belief.observations}</span>
+                          </div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-white/50">Avg return</span>
+                            <span className={belief.avgReturn >= 0 ? 'text-emerald-400' : 'text-red-400'}>{(belief.avgReturn * 100).toFixed(2)}%</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {suppliers.length > 0 && (
+                        <div>
+                          <div className="text-[10px] text-blue-400 uppercase mb-1">Suppliers ({suppliers.length})</div>
+                          {suppliers.map((c, i) => <RelChip key={i} name={c.neighbor} color="#3b82f6" />)}
+                        </div>
+                      )}
+                      {customers.length > 0 && (
+                        <div>
+                          <div className="text-[10px] text-green-400 uppercase mb-1">Customers ({customers.length})</div>
+                          {customers.map((c, i) => <RelChip key={i} name={c.neighbor} color="#22c55e" />)}
+                        </div>
+                      )}
+                      {competitors.length > 0 && (
+                        <div>
+                          <div className="text-[10px] text-red-400 uppercase mb-1">Competitors ({competitors.length})</div>
+                          {competitors.map((c, i) => <RelChip key={i} name={c.neighbor} color="#ef4444" />)}
+                        </div>
+                      )}
+                      {partners.length > 0 && (
+                        <div>
+                          <div className="text-[10px] text-yellow-400 uppercase mb-1">Partners ({partners.length})</div>
+                          {partners.map((c, i) => <RelChip key={i} name={c.neighbor} color="#fbbf24" />)}
+                        </div>
+                      )}
+                      {peers.length > 0 && (
+                        <div>
+                          <div className="text-[10px] text-white/40 uppercase mb-1">Sector Peers ({peers.length})</div>
+                          {peers.slice(0, 10).map((c, i) => <RelChip key={i} name={c.neighbor} color="#6b7280" />)}
+                          {peers.length > 10 && <span className="text-[10px] text-white/30">+{peers.length - 10} more</span>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {selectedNode.memory && (
                   <>
                     <div>
@@ -806,6 +892,14 @@ function MetricCard({ label, value, sub }: { label: string; value: string | numb
         {sub && <div className="text-xs text-white/30 mt-0.5">{sub}</div>}
       </CardBody>
     </Card>
+  );
+}
+
+function RelChip({ name, color }: { name: string; color: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-xs bg-white/5 rounded px-2 py-1 mr-1 mb-1" style={{ borderLeft: `2px solid ${color}` }}>
+      <span className="font-mono font-semibold text-white/80">{name}</span>
+    </span>
   );
 }
 
