@@ -48,10 +48,13 @@ function emitTradeClosed(payload: { ticker: string; success: boolean; returnPct:
 }
 
 const HEARTBEAT_MS = 120_000;
-const MAX_POSITIONS = 10;
+const MAX_POSITIONS = 5;           // REDUCED from 10 — fewer, higher-conviction bets
 const BUDGET_MAX = 25_000;
-const DAILY_LOSS_LIMIT = -1_000; // Hard circuit breaker — scaled with $25K budget
+const PER_POSITION_MAX = 6_000;    // RAISED from $2,500 — concentrate capital
+const DAILY_LOSS_LIMIT = -1_000;
 const FOREX_BANK = 50;
+const BUY_DELAY_HOUR = 10;         // No equity buys before 10:15 AM ET
+const BUY_DELAY_MIN = 15;          // Opening chaos settles by 10:15
 
 // ─── Mover quality gate ───────────────────────────────────────────────────
 // Blocks the two failure modes that produced the 2026-04-10 -$6,787 incident:
@@ -967,7 +970,11 @@ export class TradeEngine {
       console.log(`  [BUY] EQUITY SL DOMINANCE ${(eqSlDominance * 100).toFixed(0)}% (${eqSlCount}/${equityTrades.length}) > 70% — HALTING equity entries`);
     } else if (totalDeployedNow >= BUDGET_MAX) {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
-    } else if (openSlots > 0 && budgetRemaining > 100 && mkt.isMarketOpen && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+    } else if (openSlots > 0 && budgetRemaining > 100 && mkt.isMarketOpen && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))
+      && (mkt.etHour > BUY_DELAY_HOUR || (mkt.etHour === BUY_DELAY_HOUR && mkt.etMin >= BUY_DELAY_MIN))) {
+      // NO BUYS BEFORE 10:15 AM ET — opening 45 min is highest volatility,
+      // widest spreads, most noise. BTFL and TVTX were both bought at 9:58 AM
+      // and lost $161 combined. Wait for direction to emerge.
       // ───────────────────────────────────────────────────────────────────
       // UNIFIED BUY PIPELINE (2026-04-10) — NeuralTrader is the authority
       // ───────────────────────────────────────────────────────────────────
@@ -1166,7 +1173,7 @@ export class TradeEngine {
 
         // Cap per-position to remaining budget / slots, max $2,500 per position
         const slotsToFill = Math.min(gainers.length || 1, openSlots);
-        const basePerPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), 2500);
+        const basePerPosition = Math.min(Math.floor(budgetRemaining / slotsToFill), PER_POSITION_MAX);
         // Wave 2: Macro regime sizing multiplier (0.25 crisis → 1.5 trending).
         // Defaults to 1.0 if Macro has never run or verdict is stale.
         const macroMult = this.macroAnalyst.getCurrentMultiplier();
@@ -1253,6 +1260,32 @@ export class TradeEngine {
               }
               tridentResult = `APPROVED: ${tridentAdvice.reason.slice(0, 40)}`;
             } catch (e: any) { tridentResult = `FAILED ${e.message?.substring(0, 30)}`; }
+
+            // Gate: Thesis required — no thesis in PG = no buy.
+            // The Research System must have produced a conviction-scored thesis
+            // for this ticker before capital is deployed. This prevents random
+            // micro-caps like BTFL from getting through with zero thesis support.
+            // Thesis pipeline: signals → clusters → conviction scorer → thesis.
+            // If PG is unavailable, this gate is skipped (graceful degradation).
+            try {
+              const { query: pgQ } = await import('../../research-db/src/index.js');
+              const { rows: theses } = await pgQ(
+                `SELECT conviction_score, title FROM research_theses
+                 WHERE primary_ticker = $1 AND status IN ('active','promoted')
+                 AND conviction_score >= 50
+                 ORDER BY conviction_score DESC LIMIT 1`,
+                [g.symbol],
+              );
+              if (theses.length === 0) {
+                buyAudit.push(`${g.symbol}: SKIP no-thesis (need conviction ≥ 50 in PG)`);
+                continue;
+              }
+              const thesis = theses[0] as any;
+              buyAudit.push(`${g.symbol}: thesis=${thesis.conviction_score} "${(thesis.title || '').slice(0, 40)}"`);
+            } catch {
+              // PG unavailable — skip thesis gate (don't block all trading if DB is down)
+              buyAudit.push(`${g.symbol}: thesis-gate-skipped (PG unavailable)`);
+            }
 
             // ALL GATES PASSED — execute buy
             const qty = Math.floor(perPosition / g.price);
