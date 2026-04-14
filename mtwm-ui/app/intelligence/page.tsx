@@ -361,7 +361,7 @@ export default function IntelligencePage() {
       {/* Top metric cards — relevant counts at a glance */}
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
         <MetricCard label="SONA Patterns" value={(cognitive?.sonaPatterns || sonaStatus?.patterns || 0).toLocaleString()} sub="learned from trading" />
-        <MetricCard label="Pareto Optimal" value={(cognitive?.paretoFront || sonaStatus?.pareto || 0).toLocaleString()} sub="coherence verified" />
+        <MetricCard label="Pareto Optimal" value={(sonaStatus?.pareto || 0).toLocaleString()} sub="coherence verified" />
         <MetricCard label="Memories" value={counts?.total || tridentMemories.length || '--'} sub="in Trident brain" />
         <MetricCard label="Beliefs" value={bayesian?.totalBeliefs ?? 0} sub={`${bayesian?.totalObservations ?? 0} observations`} />
         <MetricCard label="Companies" value={pgGraphData.nodes.length || '--'} sub={`${pgGraphData.links.length} relationships`} />
@@ -489,20 +489,20 @@ export default function IntelligencePage() {
         </Card>
 
         {/* Detail Flyout Panel */}
-        <Card className="bg-white/5 border border-white/10">
-          <CardHeader className="px-4 pt-4 pb-2">
-            <h3 className="text-sm font-semibold text-white/80">
-              {selectedNode ? 'Node Detail' : 'Click a node'}
+        <Card className="bg-gradient-to-b from-slate-900/90 to-slate-950/90 border border-white/10">
+          <CardHeader className="px-5 pt-5 pb-2">
+            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
+              {selectedNode ? 'Entity Detail' : 'Select an Entity'}
             </h3>
           </CardHeader>
-          <CardBody className="px-4 pb-4 overflow-y-auto" style={{ maxHeight: graphDimensions.height - 60 }}>
+          <CardBody className="px-5 pb-5 overflow-y-auto" style={{ maxHeight: graphDimensions.height - 60 }}>
             {selectedNode ? (
-              <div className="space-y-3">
-                <div>
-                  <div className="text-lg font-bold" style={{ color: selectedNode.node.color }}>{selectedNode.node.name}</div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <Chip size="sm" variant="flat">{selectedNode.node.group}</Chip>
-                    <button className="text-xs text-white/30 hover:text-white/60" onClick={() => setSelectedNode(null)}>close</button>
+              <div className="space-y-4">
+                <div className="pb-3 border-b border-white/10">
+                  <div className="text-xl font-bold tracking-tight" style={{ color: selectedNode.node.color }}>{selectedNode.node.name}</div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <Chip size="sm" variant="flat" className="bg-white/10">{selectedNode.node.group}</Chip>
+                    <button className="text-xs text-white/30 hover:text-white/60 ml-auto" onClick={() => setSelectedNode(null)}>dismiss</button>
                   </div>
                 </div>
 
