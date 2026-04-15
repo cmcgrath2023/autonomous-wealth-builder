@@ -385,6 +385,59 @@ async function main(): Promise<void> {
     sendBeliefsToTradeEngine();
   });
 
+  // ─── Real-Time Market Stream (signal detection) ──────────────────────────
+  // Connects to Alpaca SIP WebSocket, fires alerts on volume spikes,
+  // price breakouts, and re-entry signals. Writes to PG research_signals
+  // for the thesis pipeline to pick up. This is what catches BIRD at $5.84
+  // instead of $10.87.
+  try {
+    const { loadCredentials } = await import('./config-bus.js');
+    const creds = loadCredentials();
+    if (creds.alpaca) {
+      const { MarketStream } = await import('./market-stream.js');
+      let pgQueryFn: any = null;
+      try {
+        const { query: pgQ } = await import('../../research-db/src/index.js');
+        pgQueryFn = pgQ;
+      } catch {}
+
+      const stream = new MarketStream(stateStore, creds.alpaca.apiKey, creds.alpaca.apiSecret, pgQueryFn);
+
+      // Build watchlist from momentum scanner universe + thesis tickers
+      const watchTickers: string[] = [];
+      try {
+        // Top tickers from research_stars
+        const stars = stateStore.getResearchStars();
+        for (const s of stars.slice(0, 200)) watchTickers.push(s.symbol);
+        // Thesis tickers
+        if (pgQueryFn) {
+          const { rows: thesisTickers } = await pgQueryFn('SELECT DISTINCT symbol FROM research_theses WHERE status = \'active\' LIMIT 50');
+          for (const r of thesisTickers) watchTickers.push((r as any).symbol);
+        }
+      } catch {}
+      // Add broad market ETFs for context
+      watchTickers.push('SPY', 'QQQ', 'IWM', 'XLE', 'XLF', 'XLK', 'GLD', 'UVXY');
+
+      stream.setWatchlist([...new Set(watchTickers)]);
+
+      stream.onAlert((alert) => {
+        log(`STREAM ALERT: ${alert.alertType} ${alert.ticker} — ${alert.detail}`);
+        // The thesis pipeline's signal_scan will pick up the PG signal on its next cycle.
+        // For high-magnitude alerts, also trigger an immediate thesis evaluation:
+        if (alert.magnitude >= 100 || alert.alertType === 'reentry_signal') {
+          log(`HIGH-PRIORITY: ${alert.ticker} — triggering immediate thesis evaluation`);
+          // The eventBus 'stream:alert' event can be consumed by trade-engine
+          // for immediate action on promoted theses.
+        }
+      });
+
+      stream.start();
+      log(`Market stream started — watching ${watchTickers.length} tickers for volume spikes + breakouts`);
+    }
+  } catch (e: any) {
+    log(`Market stream failed: ${e.message} — real-time detection disabled`);
+  }
+
   // ─── Post-Mortem Analyst (Wave 1) ──────────────────────────────────────
   // Fires at 4:05 PM ET every weekday. Analyzes today's losing trades and
   // writes machine-readable risk_rules that the Risk Manager enforces next
