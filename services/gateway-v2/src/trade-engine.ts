@@ -1036,9 +1036,13 @@ export class TradeEngine {
       console.log(`  [BUY] BUDGET FULL: $${totalDeployedNow.toFixed(0)} deployed >= $${BUDGET_MAX} max — skipping buys`);
     } else if (openSlots > 0 && budgetRemaining > 100 && mkt.isMarketOpen && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))
       && (mkt.etHour > BUY_DELAY_HOUR || (mkt.etHour === BUY_DELAY_HOUR && mkt.etMin >= BUY_DELAY_MIN))) {
-      // NO BUYS BEFORE 10:15 AM ET — opening 45 min is highest volatility,
-      // widest spreads, most noise. BTFL and TVTX were both bought at 9:58 AM
-      // and lost $161 combined. Wait for direction to emerge.
+      // NO BUYS BEFORE 10:15 AM ET — opening 45 min is highest volatility.
+      // MOMENTUM CHASING DISABLED — the movers feed and research-worker "TOP MOVER"
+      // picks are a losing strategy. BIRD (-$199), BTFL (-$108), MGRT (-$287),
+      // AFJKU (-$6,411) were ALL momentum-chased penny stocks.
+      // THESIS-ONLY ENTRIES: a research_theses row with conviction ≥ 50 is now
+      // MANDATORY for every buy. The thesis pipeline (signals → clusters → conviction
+      // scorer) is the ONLY entry path. No thesis = no trade.
       // ───────────────────────────────────────────────────────────────────
       // UNIFIED BUY PIPELINE (2026-04-10) — NeuralTrader is the authority
       // ───────────────────────────────────────────────────────────────────
@@ -1325,38 +1329,29 @@ export class TradeEngine {
               tridentResult = `APPROVED: ${tridentAdvice.reason.slice(0, 40)}`;
             } catch (e: any) { tridentResult = `FAILED ${e.message?.substring(0, 30)}`; }
 
-            // Gate: Thesis check — SOFT GATE until pipeline is producing theses.
-            // Logs thesis status but doesn't block. Once theses are being generated
-            // consistently (50+ in PG), this becomes a hard gate.
-            // Cold-start problem: the thesis generator needs signals → clusters → theses
-            // but if we block all buys waiting for theses, no trades happen and no
-            // outcomes feed back into the learning loop.
+            // Gate: THESIS REQUIRED — HARD GATE. No thesis = no trade. Period.
+            // Momentum chasing is disabled. The thesis pipeline (signals → clusters →
+            // conviction scorer) is the ONLY entry path. This prevents BIRD, BTFL,
+            // MGRT-class losses from ever happening again.
             try {
               const { query: pgQ } = await import('../../research-db/src/index.js');
-              const { rows: thesisCount } = await pgQ('SELECT COUNT(*) AS n FROM research_theses');
-              const totalTheses = parseInt((thesisCount[0] as any)?.n || '0');
-
-              if (totalTheses >= 50) {
-                // Pipeline is mature — enforce thesis requirement
-                const { rows: theses } = await pgQ(
-                  `SELECT conviction_score, title FROM research_theses
-                   WHERE primary_ticker = $1 AND status IN ('active','promoted')
-                   AND conviction_score >= 50
-                   ORDER BY conviction_score DESC LIMIT 1`,
-                  [g.symbol],
-                );
-                if (theses.length === 0) {
-                  buyAudit.push(`${g.symbol}: SKIP no-thesis (need conviction ≥ 50, ${totalTheses} theses in pipeline)`);
-                  continue;
-                }
-                const thesis = theses[0] as any;
-                buyAudit.push(`${g.symbol}: thesis=${thesis.conviction_score} "${(thesis.title || '').slice(0, 40)}"`);
-              } else {
-                // Pipeline warming up — log but don't block
-                buyAudit.push(`${g.symbol}: thesis-warmup (${totalTheses} theses, need 50 to enforce gate)`);
+              const { rows: theses } = await pgQ(
+                `SELECT conviction_score, title FROM research_theses
+                 WHERE primary_ticker = $1 AND status IN ('active','promoted')
+                 AND conviction_score >= 50
+                 ORDER BY conviction_score DESC LIMIT 1`,
+                [g.symbol],
+              );
+              if (theses.length === 0) {
+                buyAudit.push(`${g.symbol}: SKIP no-thesis (HARD GATE — need conviction ≥ 50 in PG)`);
+                continue;
               }
+              const thesis = theses[0] as any;
+              buyAudit.push(`${g.symbol}: thesis=${thesis.conviction_score} "${(thesis.title || '').slice(0, 40)}"`);
             } catch {
-              buyAudit.push(`${g.symbol}: thesis-gate-skipped (PG unavailable)`);
+              // PG unavailable — BLOCK the trade. No thesis verification = no buy.
+              buyAudit.push(`${g.symbol}: SKIP thesis-gate-failed (PG unavailable — cannot verify)`);
+              continue;
             }
 
             // ALL GATES PASSED — execute buy
