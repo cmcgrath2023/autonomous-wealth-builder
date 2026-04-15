@@ -29,7 +29,10 @@ import { eventBus } from '../../shared/utils/event-bus.js';
 
 // ── Configuration ──────────────────────────────────────────────────
 
-const ALPACA_STREAM_URL = 'wss://stream.data.alpaca.markets/v2/sip';
+// SIP requires paid data subscription. IEX is free for paper trading.
+const ALPACA_STREAM_URL = process.env.ALPACA_MODE === 'live'
+  ? 'wss://stream.data.alpaca.markets/v2/sip'
+  : 'wss://stream.data.alpaca.markets/v2/iex';
 
 // Alert thresholds
 const VOLUME_SPIKE_MULTIPLIER = 50;    // 50x normal 5-min volume
