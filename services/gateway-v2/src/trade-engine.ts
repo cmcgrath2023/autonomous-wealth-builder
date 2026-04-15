@@ -1336,20 +1336,19 @@ export class TradeEngine {
             try {
               const { query: pgQ } = await import('../../research-db/src/index.js');
               const { rows: theses } = await pgQ(
-                `SELECT conviction_score, title FROM research_theses
-                 WHERE primary_ticker = $1 AND status IN ('active','promoted')
-                 AND conviction_score >= 50
-                 ORDER BY conviction_score DESC LIMIT 1`,
+                `SELECT conviction, thesis FROM research_theses
+                 WHERE symbol = $1 AND status IN ('active','triggered')
+                 AND conviction >= 0.50
+                 ORDER BY conviction DESC LIMIT 1`,
                 [g.symbol],
               );
               if (theses.length === 0) {
-                buyAudit.push(`${g.symbol}: SKIP no-thesis (HARD GATE — need conviction ≥ 50 in PG)`);
+                buyAudit.push(`${g.symbol}: SKIP no-thesis (HARD GATE — need conviction ≥ 0.50 in PG)`);
                 continue;
               }
               const thesis = theses[0] as any;
-              buyAudit.push(`${g.symbol}: thesis=${thesis.conviction_score} "${(thesis.title || '').slice(0, 40)}"`);
+              buyAudit.push(`${g.symbol}: thesis=${(thesis.conviction * 100).toFixed(0)}% "${(thesis.thesis || '').slice(0, 40)}"`);
             } catch {
-              // PG unavailable — BLOCK the trade. No thesis verification = no buy.
               buyAudit.push(`${g.symbol}: SKIP thesis-gate-failed (PG unavailable — cannot verify)`);
               continue;
             }
