@@ -1325,29 +1325,37 @@ export class TradeEngine {
               tridentResult = `APPROVED: ${tridentAdvice.reason.slice(0, 40)}`;
             } catch (e: any) { tridentResult = `FAILED ${e.message?.substring(0, 30)}`; }
 
-            // Gate: Thesis required — no thesis in PG = no buy.
-            // The Research System must have produced a conviction-scored thesis
-            // for this ticker before capital is deployed. This prevents random
-            // micro-caps like BTFL from getting through with zero thesis support.
-            // Thesis pipeline: signals → clusters → conviction scorer → thesis.
-            // If PG is unavailable, this gate is skipped (graceful degradation).
+            // Gate: Thesis check — SOFT GATE until pipeline is producing theses.
+            // Logs thesis status but doesn't block. Once theses are being generated
+            // consistently (50+ in PG), this becomes a hard gate.
+            // Cold-start problem: the thesis generator needs signals → clusters → theses
+            // but if we block all buys waiting for theses, no trades happen and no
+            // outcomes feed back into the learning loop.
             try {
               const { query: pgQ } = await import('../../research-db/src/index.js');
-              const { rows: theses } = await pgQ(
-                `SELECT conviction_score, title FROM research_theses
-                 WHERE primary_ticker = $1 AND status IN ('active','promoted')
-                 AND conviction_score >= 50
-                 ORDER BY conviction_score DESC LIMIT 1`,
-                [g.symbol],
-              );
-              if (theses.length === 0) {
-                buyAudit.push(`${g.symbol}: SKIP no-thesis (need conviction ≥ 50 in PG)`);
-                continue;
+              const { rows: thesisCount } = await pgQ('SELECT COUNT(*) AS n FROM research_theses');
+              const totalTheses = parseInt((thesisCount[0] as any)?.n || '0');
+
+              if (totalTheses >= 50) {
+                // Pipeline is mature — enforce thesis requirement
+                const { rows: theses } = await pgQ(
+                  `SELECT conviction_score, title FROM research_theses
+                   WHERE primary_ticker = $1 AND status IN ('active','promoted')
+                   AND conviction_score >= 50
+                   ORDER BY conviction_score DESC LIMIT 1`,
+                  [g.symbol],
+                );
+                if (theses.length === 0) {
+                  buyAudit.push(`${g.symbol}: SKIP no-thesis (need conviction ≥ 50, ${totalTheses} theses in pipeline)`);
+                  continue;
+                }
+                const thesis = theses[0] as any;
+                buyAudit.push(`${g.symbol}: thesis=${thesis.conviction_score} "${(thesis.title || '').slice(0, 40)}"`);
+              } else {
+                // Pipeline warming up — log but don't block
+                buyAudit.push(`${g.symbol}: thesis-warmup (${totalTheses} theses, need 50 to enforce gate)`);
               }
-              const thesis = theses[0] as any;
-              buyAudit.push(`${g.symbol}: thesis=${thesis.conviction_score} "${(thesis.title || '').slice(0, 40)}"`);
             } catch {
-              // PG unavailable — skip thesis gate (don't block all trading if DB is down)
               buyAudit.push(`${g.symbol}: thesis-gate-skipped (PG unavailable)`);
             }
 
