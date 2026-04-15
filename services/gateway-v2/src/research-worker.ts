@@ -255,15 +255,28 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         fetch('https://data.alpaca.markets/v1beta1/screener/stocks/most-actives?top=20&by=volume', { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT) }),
       ]);
 
-      // Top gainers — these are TODAY's actual movers
+      // Top gainers — FILTERED for real stocks only.
+      // Alpaca's movers API returns zero-volume penny stocks/warrants that have
+      // caused BIRD (-$199), BTFL (-$108), MGRT (-$287) losses. Filter hard:
+      //   - Price >= $10 (matches CLAUDE.md min)
+      //   - trade_count > 0 (must have ACTUAL volume, not phantom prints)
+      //   - No SPAC suffixes
+      //   - percent_change < 60% (blow-off tops are traps, not opportunities)
       if (moversRes.status === 'fulfilled' && moversRes.value.ok) {
         const data = await moversRes.value.json() as any;
-        const gainers = (data.gainers || []).filter((m: any) => m.percent_change > 2 && m.price > 5 && m.price < 500);
+        const SPAC_RE = /^[A-Z]{2,5}(U|W|WS)$/;
+        const gainers = (data.gainers || []).filter((m: any) =>
+          m.percent_change > 2 &&
+          m.percent_change < 60 &&          // blow-off cap
+          m.price >= 10 &&                   // price floor (CLAUDE.md)
+          m.price < 500 &&
+          (m.trade_count || 0) > 0 &&        // MUST have actual volume
+          !SPAC_RE.test(m.symbol)            // no SPAC warrants/units
+        );
         for (const g of gainers.slice(0, 10)) {
           const score = Math.min(0.90 + g.percent_change / 100, 0.99);
           store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, bayesianAdjustScore(g.symbol, score));
           starsWritten++;
-          // Also fetch the price so it's in our snapshot map
           if (!prices.has(g.symbol)) prices.set(g.symbol, { price: g.price, changePercent: g.percent_change });
         }
         console.log(`[Research] Movers: ${gainers.length} gainers (top: ${gainers.slice(0, 3).map((g: any) => `${g.symbol} +${g.percent_change.toFixed(0)}%`).join(', ')})`);
