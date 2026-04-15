@@ -422,12 +422,20 @@ async function main(): Promise<void> {
 
       stream.onAlert((alert) => {
         log(`STREAM ALERT: ${alert.alertType} ${alert.ticker} — ${alert.detail}`);
-        // The thesis pipeline's signal_scan will pick up the PG signal on its next cycle.
-        // For high-magnitude alerts, also trigger an immediate thesis evaluation:
-        if (alert.magnitude >= 100 || alert.alertType === 'reentry_signal') {
-          log(`HIGH-PRIORITY: ${alert.ticker} — triggering immediate thesis evaluation`);
-          // The eventBus 'stream:alert' event can be consumed by trade-engine
-          // for immediate action on promoted theses.
+
+        // Forward to trade-engine via IPC so it can act on the next heartbeat
+        const tradeEngineWorker = workers.find(w => w.config.name === 'trade-engine');
+        if (tradeEngineWorker?.process?.connected) {
+          tradeEngineWorker.process.send({
+            type: 'stream:alert',
+            alert: {
+              ticker: alert.ticker,
+              alertType: alert.alertType,
+              magnitude: alert.magnitude,
+              currentPrice: alert.currentPrice,
+              detail: alert.detail,
+            },
+          });
         }
       });
 

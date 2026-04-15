@@ -33,11 +33,30 @@ import type { ExitPlan, SectorBias } from './analysts/index.js';
 let _bayesian: BayesianIntelligence | null = null;
 eventBus.on('intelligence:ready' as any, (bi: BayesianIntelligence) => { _bayesian = bi; });
 
-// IPC handler: receive belief updates from orchestrator (index.ts)
+// Stream alert queue — high-priority signals from the real-time market stream.
+// These are thesis-backed opportunities detected LIVE (volume spikes, breakouts,
+// re-entry signals). The heartbeat processes them on the next cycle.
+const _streamAlertQueue: Array<{
+  ticker: string;
+  alertType: string;
+  magnitude: number;
+  currentPrice: number;
+  detail: string;
+  timestamp: number;
+}> = [];
+
+// IPC handler: receive belief updates + stream alerts from orchestrator
 process.on('message', (msg: any) => {
   if (msg?.type === 'intelligence:beliefs' && msg.beliefs) {
     _bayesian = BayesianIntelligence.fromSerialized(msg.beliefs);
     console.log(`[TradeEngine] Intelligence updated via IPC: ${msg.beliefs.beliefs?.length || 0} beliefs`);
+  }
+  // Real-time stream alerts — high priority signals for immediate evaluation
+  if (msg?.type === 'stream:alert' && msg.alert) {
+    _streamAlertQueue.push({ ...msg.alert, timestamp: Date.now() });
+    console.log(`[TradeEngine] STREAM ALERT queued: ${msg.alert.alertType} ${msg.alert.ticker} — ${msg.alert.detail?.slice(0, 60)}`);
+    // Keep queue bounded
+    while (_streamAlertQueue.length > 20) _streamAlertQueue.shift();
   }
 });
 
@@ -1136,7 +1155,31 @@ export class TradeEngine {
           console.log(`  [UNIVERSE] Research worker fetch failed: ${e.message}`);
         }
 
-        // 1c. Apply quality gate to the merged universe
+        // 1c. Stream alerts — real-time signals from the WebSocket stream
+        // These are thesis-backed opportunities detected LIVE (volume spikes,
+        // breakouts, re-entry signals). They get priority in the universe.
+        const processedAlerts: string[] = [];
+        while (_streamAlertQueue.length > 0) {
+          const alert = _streamAlertQueue.shift()!;
+          // Only process alerts < 10 min old
+          if (Date.now() - alert.timestamp > 10 * 60 * 1000) continue;
+          if (ownedSet.has(alert.ticker) || this._recentBuys.has(alert.ticker) || this._sessionSells.has(alert.ticker)) continue;
+          if (!universeMap.has(alert.ticker)) {
+            universeMap.set(alert.ticker, {
+              symbol: alert.ticker,
+              price: alert.currentPrice,
+              percent_change: 0,
+              source: 'research' as const,
+              catalyst: `[STREAM ${alert.alertType}] ${alert.detail}`,
+            });
+          }
+          processedAlerts.push(`${alert.ticker}:${alert.alertType}`);
+        }
+        if (processedAlerts.length > 0) {
+          console.log(`  [STREAM] Injected ${processedAlerts.length} alert tickers: ${processedAlerts.join(', ')}`);
+        }
+
+        // 1d. Apply quality gate to the merged universe
         const blockedByGate: string[] = [];
         const universe: UniverseEntry[] = [];
         for (const entry of universeMap.values()) {
