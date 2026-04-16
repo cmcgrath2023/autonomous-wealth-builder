@@ -395,14 +395,36 @@ export async function runPostExitFollower(
       store.finalizePostExit(row.id, regretPct, verdict);
       out.resolved++;
 
-      // Push a regret signal to Trident so the LoRA can learn from it.
-      brain.recordTradeClose(
-        row.ticker,
-        0,
-        regretPct,
-        `regret:${verdict}`,
-        'long',
-      ).catch(() => {});
+      // Push regret signal to Trident — but ALSO amend the original trade memory
+      // so shouldBuy doesn't block a ticker that was a CORRECT PICK with WRONG EXIT.
+      //
+      // A human trader who sold BIRD at $10.51 and watched it hit $19 thinks:
+      // "I was right about the pick. My exit was wrong."
+      // Trident should think the same way.
+      if (verdict === 'sold_early_strong' || verdict === 'sold_early') {
+        // Write an AMENDED memory that tells shouldBuy "this was a correct pick"
+        const regretPctFmt = (regretPct * 100).toFixed(1);
+        await brainFetch('/v1/memories', {
+          method: 'POST',
+          body: JSON.stringify({
+            category: 'finance',
+            title: `Trade WIN: ${row.ticker} long $0.00`,
+            content: `TRADE AMENDED: ${row.ticker} was recorded as a LOSS but the post-exit analysis shows the stock ran +${regretPctFmt}% after we exited. The PICK was correct — the EXIT was wrong (sold too early). Pattern: the entry signal was valid, the exit timing was not. Next time: HOLD through initial volatility on this type of setup. Original exit: $${row.exitPrice.toFixed(2)}. Verdict: ${verdict}. | ${new Date().toISOString()}`,
+            tags: ['trade', 'outcome', 'win', row.ticker.toLowerCase(), 'regret_amended', 'long'],
+            source: 'mtwm-gateway:regret-amendment',
+          }),
+        }).catch(() => {});
+        console.log(`[REGRET AMENDMENT] ${row.ticker}: loss AMENDED to win — stock ran +${regretPctFmt}% after exit (${verdict})`);
+      } else {
+        // sold_right or neutral — the original LOSS memory is correct, reinforce it
+        brain.recordTradeClose(
+          row.ticker,
+          0,
+          regretPct,
+          `regret:${verdict}`,
+          'long',
+        ).catch(() => {});
+      }
     }
   }
   return out;

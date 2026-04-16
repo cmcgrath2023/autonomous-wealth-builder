@@ -118,9 +118,13 @@ export class BrainClient {
       const title = m.title || '';
       if (!title.includes('Trade ') || !title.toUpperCase().includes(ticker.toUpperCase())) continue;
 
-      // Skip regret signals — those are post-exit tracking memories, not real trades.
-      // They use "Reason: regret:..." in content and pnl=0.
-      if (m.content?.includes('regret:')) continue;
+      // Skip raw regret signals (pnl=0, reason like "regret:sold_right")
+      // BUT keep regret AMENDMENTS — those are corrected outcomes where
+      // post-exit analysis showed the pick was RIGHT but exit was WRONG.
+      // Amendments have content "TRADE AMENDED:" and title "Trade WIN:"
+      // This means BIRD goes from 0W/2L to 1W/2L after the 600% regret
+      // amendment lands — shouldBuy sees "mixed history" instead of "pure loser."
+      if (m.content?.includes('regret:') && !m.content?.includes('TRADE AMENDED')) continue;
 
       const isWin = title.includes('WIN');
       const isLoss = title.includes('LOSS');
@@ -155,8 +159,8 @@ export class BrainClient {
       const title = m.title || '';
       const titleMatch = title.match(/^Trade (WIN|LOSS): (\S+)\s+(long|short)/);
       if (!titleMatch) continue;
-      // Skip regret signals — post-exit tracking memories, not real trades
-      if (m.content?.includes('regret:')) continue;
+      // Skip raw regret signals but keep amendments (correct picks, wrong exits)
+      if (m.content?.includes('regret:') && !m.content?.includes('TRADE AMENDED')) continue;
 
       const success = titleMatch[1] === 'WIN';
       const ticker = titleMatch[2].toUpperCase();
