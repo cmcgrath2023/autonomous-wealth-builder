@@ -1199,7 +1199,7 @@ export class TradeEngine {
           const needPrice = [...universeMap.values()].filter(u => u.price === 0).map(u => u.symbol);
           if (needPrice.length > 0) {
             const syms = needPrice.slice(0, 30).join(',');
-            const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=sip`, {
+            const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=iex`, {
               headers, signal: AbortSignal.timeout(5000),
             });
             if (snapRes.ok) {
