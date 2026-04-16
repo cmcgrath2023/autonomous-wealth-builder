@@ -1155,7 +1155,69 @@ export class TradeEngine {
           console.log(`  [UNIVERSE] Research worker fetch failed: ${e.message}`);
         }
 
-        // 1c. Stream alerts — real-time signals from the WebSocket stream
+        // 1c. THESIS WATCHLIST — inject all thesis-backed tickers directly.
+        // The thesis IS the watchlist. If a ticker has conviction ≥ 50 in PG,
+        // it belongs in the universe regardless of whether it's a "mover" today.
+        // This is Buffett mode: buy quality names from research, not daily movers.
+        try {
+          const { query: pgQ } = await import('../../research-db/src/index.js');
+          const { rows: thesisTickers } = await pgQ(
+            `SELECT symbol, conviction FROM research_theses
+             WHERE status = 'active' AND conviction >= 0.50
+             ORDER BY conviction DESC LIMIT 20`,
+          );
+          let thesisInjected = 0;
+          for (const t of thesisTickers) {
+            const sym = (t as any).symbol;
+            if (ownedSet.has(sym) || this._recentBuys.has(sym) || this._sessionSells.has(sym)) continue;
+            if (universeMap.has(sym)) {
+              // Already in universe — boost source to 'both'
+              const existing = universeMap.get(sym)!;
+              existing.source = 'both';
+              existing.catalyst = `[THESIS conv=${((t as any).conviction * 100).toFixed(0)}%] ${existing.catalyst || ''}`;
+            } else {
+              // Not in universe yet — add from thesis watchlist
+              universeMap.set(sym, {
+                symbol: sym,
+                price: 0, // will be fetched via snapshot below
+                percent_change: 0,
+                source: 'research' as const,
+                catalyst: `[THESIS conv=${((t as any).conviction * 100).toFixed(0)}%]`,
+              });
+              thesisInjected++;
+            }
+          }
+          if (thesisInjected > 0) {
+            console.log(`  [THESIS WATCHLIST] Injected ${thesisInjected} thesis-backed tickers into universe`);
+          }
+        } catch (e: any) {
+          console.log(`  [THESIS WATCHLIST] PG query failed: ${e.message?.slice(0, 40)}`);
+        }
+
+        // Fetch prices for thesis tickers that need them
+        try {
+          const needPrice = [...universeMap.values()].filter(u => u.price === 0).map(u => u.symbol);
+          if (needPrice.length > 0) {
+            const syms = needPrice.slice(0, 30).join(',');
+            const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${syms}&feed=sip`, {
+              headers, signal: AbortSignal.timeout(5000),
+            });
+            if (snapRes.ok) {
+              const snapData = await snapRes.json() as any;
+              for (const sym of needPrice) {
+                const snap = snapData[sym];
+                if (!snap) continue;
+                const price = snap.latestTrade?.p || snap.latestQuote?.ap;
+                if (price && price >= MIN_STOCK_PRICE) {
+                  const entry = universeMap.get(sym);
+                  if (entry) entry.price = price;
+                }
+              }
+            }
+          }
+        } catch {}
+
+        // 1d. Stream alerts — real-time signals from the WebSocket stream
         // These are thesis-backed opportunities detected LIVE (volume spikes,
         // breakouts, re-entry signals). They get priority in the universe.
         const processedAlerts: string[] = [];
