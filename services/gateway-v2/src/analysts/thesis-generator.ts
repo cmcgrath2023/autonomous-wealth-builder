@@ -182,41 +182,22 @@ export async function generateThesis(
     );
   } catch { /* best-effort */ }
 
-  // 7. Write to Postgres
+  // 7. Write to Postgres (using actual PG column names)
   try {
+    const convictionNorm = Math.min(0.99, conviction.compositeScore / 100); // normalize 0-100 → 0-1
     const { rows: inserted } = await pgQuery(`
       INSERT INTO research_theses (
-        title, narrative, primary_ticker, related_tickers,
-        catalyst_type, bear_case, invalidation,
-        signal_ids, trident_memory_id, conviction_score,
-        signal_density_score, relationship_leverage_score,
-        temporal_alignment_score, pattern_match_score,
-        bayesian_context_score, sector_momentum_score,
-        status, routed_to, authority_action, sector, created_at
+        symbol, direction, thesis, narrative, conviction,
+        status, timeframe, sector, created_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW()
+        $1, 'long', $2, $3, $4, $5, 'swing', $6, NOW()
       ) RETURNING id
     `, [
+      cluster.ticker,
       title,
       narrative,
-      cluster.ticker,
-      cluster.relatedTickers,
-      cluster.signals[0]?.signal_type || 'unknown',
-      bearCase,
-      '',
-      cluster.signals.map(s => s.id),
-      tridentMemoryId,
-      conviction.compositeScore,
-      conviction.signalDensity,
-      conviction.relationshipLeverage,
-      conviction.temporalAlignment,
-      conviction.patternMatch,
-      conviction.bayesianContext,
-      conviction.sectorMomentum,
-      authorityAction === 'act' ? 'promoted' : 'active',
-      routedTo,
-      authorityAction,
+      convictionNorm,
+      authorityAction === 'act' ? 'triggered' : 'active',
       cluster.sector,
     ]);
 
