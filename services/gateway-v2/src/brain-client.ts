@@ -194,41 +194,42 @@ export class BrainClient {
   // NOT the /v1/transfer endpoint (that does domain transfer, not reasoning).
 
   async shouldBuy(ticker: string, percentChange: number, context: string): Promise<{ should: boolean; reason: string }> {
-    // Query Brain for ALL mentions of this ticker
-    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&limit=20`);
-    if (!results || !Array.isArray(results) || results.length === 0) {
-      return { should: true, reason: `No Brain history for ${ticker} — allowing (new ticker)` };
-    }
-
-    // Count trade outcomes
-    const tickerLower = ticker.toLowerCase();
-    const outcomes = results.filter((m: any) => m.tags?.includes(tickerLower) && m.tags?.includes('outcome'));
-    const wins = outcomes.filter((m: any) => m.tags?.includes('win')).length;
-    const losses = outcomes.filter((m: any) => m.tags?.includes('loss')).length;
-    const total = wins + losses;
+    // Use getTickerHistory which parses WIN/LOSS from TITLES (reliable)
+    // instead of the old tag-based approach (tags are undefined in search results).
+    // The old code was blocking NVDA (2W/0L) because it found "loss" in
+    // research memory content, while approving BTFL (0W/2L) because tags
+    // were undefined so it fell through to "no trade history."
+    const history = await this.getTickerHistory(ticker);
+    const total = history.wins + history.losses;
 
     if (total === 0) {
-      // Check for negative mentions (rules, warnings)
-      const negMentions = results.filter((m: any) =>
-        m.content?.toLowerCase().includes('avoid') || m.content?.toLowerCase().includes('loss') || m.content?.toLowerCase().includes('bad')
-      ).length;
-      if (negMentions >= 2) {
-        return { should: false, reason: `${ticker}: ${negMentions} negative mentions in Brain — avoiding` };
-      }
-      return { should: true, reason: `${ticker}: no trade history, ${results.length} mentions — allowing` };
+      // No trade history at all — allow (new ticker, thesis gate is the real filter)
+      return { should: true, reason: `${ticker}: no trade history — allowing (thesis gate decides)` };
     }
 
-    const winRate = wins / total;
-    // Reject: <35% win rate with 3+ trades (statistically meaningful)
-    if (total >= 3 && winRate < 0.35) {
-      return { should: false, reason: `${ticker}: ${wins}W/${losses}L (${(winRate*100).toFixed(0)}%) — reject (below 35% threshold)` };
-    }
-    // Caution: 35-50% with 5+ trades
-    if (total >= 5 && winRate < 0.50) {
-      return { should: false, reason: `${ticker}: ${wins}W/${losses}L (${(winRate*100).toFixed(0)}%) — reject (below 50% with ${total} trades)` };
+    // Has history — use it
+    if (history.shouldAvoid) {
+      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L avg ${(history.avgReturn*100).toFixed(1)}% — AVOID (bad track record)` };
     }
 
-    return { should: true, reason: `${ticker}: ${wins}W/${losses}L (${(winRate*100).toFixed(0)}%) — approved` };
+    const winRate = total > 0 ? history.wins / total : 0.5;
+
+    // Reject: 0 wins out of 2+ trades — known loser, don't touch
+    if (history.wins === 0 && history.losses >= 2) {
+      return { should: false, reason: `${ticker}: 0W/${history.losses}L — known loser, blocking` };
+    }
+
+    // Reject: <35% win rate with 2+ trades
+    if (total >= 2 && winRate < 0.35) {
+      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) — reject (below 35%)` };
+    }
+
+    // Reject: <50% with 4+ trades
+    if (total >= 4 && winRate < 0.50) {
+      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) — reject (below 50% with ${total} trades)` };
+    }
+
+    return { should: true, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) avg ${(history.avgReturn*100).toFixed(1)}% — approved` };
   }
 
   // ── Reasoning — should we sell this position? ─────────────────
