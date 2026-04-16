@@ -404,16 +404,16 @@ export async function runPostExitFollower(
       if (verdict === 'sold_early_strong' || verdict === 'sold_early') {
         // Write an AMENDED memory that tells shouldBuy "this was a correct pick"
         const regretPctFmt = (regretPct * 100).toFixed(1);
-        await brainFetch('/v1/memories', {
-          method: 'POST',
-          body: JSON.stringify({
-            category: 'finance',
-            title: `Trade WIN: ${row.ticker} long $0.00`,
-            content: `TRADE AMENDED: ${row.ticker} was recorded as a LOSS but the post-exit analysis shows the stock ran +${regretPctFmt}% after we exited. The PICK was correct — the EXIT was wrong (sold too early). Pattern: the entry signal was valid, the exit timing was not. Next time: HOLD through initial volatility on this type of setup. Original exit: $${row.exitPrice.toFixed(2)}. Verdict: ${verdict}. | ${new Date().toISOString()}`,
-            tags: ['trade', 'outcome', 'win', row.ticker.toLowerCase(), 'regret_amended', 'long'],
-            source: 'mtwm-gateway:regret-amendment',
-          }),
-        }).catch(() => {});
+        // Use brain.recordTradeClose with pnl=0 and reason prefix to write
+        // the amended WIN memory. The title parser in getTickerHistory will
+        // see "Trade WIN: BIRD" and count it as a win.
+        brain.recordTradeClose(
+          row.ticker,
+          0.01, // tiny positive so title says "Trade WIN"
+          regretPct,
+          `regret_amended:${verdict}`,
+          'long',
+        ).catch(() => {});
         console.log(`[REGRET AMENDMENT] ${row.ticker}: loss AMENDED to win — stock ran +${regretPctFmt}% after exit (${verdict})`);
       } else {
         // sold_right or neutral — the original LOSS memory is correct, reinforce it
