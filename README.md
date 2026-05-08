@@ -114,42 +114,71 @@ Raw Signal (0.72) → Bayesian Adjustment (ticker prior: 0.85) → Pattern Boost
 (AgentDB: proven pattern found) → Final Confidence (0.76) → Execute if >= 0.60
 ```
 
-### Trident LoRA Integration (AI-Driven Buy/Sell Decisions)
+### Trident Intelligence Platform (SONA + NOVA + FACT)
 
-Every trade decision is gated by [Trident](https://trident.cetaceanlabs.com) — a LoRA-fine-tuned reasoning engine trained on MTWM's actual trade history via SONA (Self-Optimizing Neural Architecture).
+AWB uses [Trident](https://trident.cetaceanlabs.com) as its external intelligence layer — a complete AI reasoning platform with three complementary systems that learn continuously from every trade, research scan, and market observation.
 
-**Training loop (automatic):**
+#### SONA (Self-Optimizing Neural Architecture)
+Per-domain micro-LoRA adapters that improve with every interaction. SONA learns from trade outcomes, owner preferences, and strategy patterns.
+
 ```
-Trade closes → brain.recordTradeClose() → Trident memory
-  → Bayesian beliefs synced to SONA every 5 min
-  → LoRA weights update continuously (currently epoch 123+, 8,000+ patterns)
+Trade closes → recordClosedTrade() → SONA training
+  → "MCHP: RSI-2 pick, held 4 days, +$1,100" → learns "RSI-2 works on semis"
+  → "DIS: slow mover, owner dislikes" → learns "avoid DIS for day trading"
+  → "WOLF: 0W/30L" → learns "block volatile small caps"
 ```
 
-**Buy decision pipeline (6 gates):**
+**What SONA knows:**
+- Buffett quality investment framework (core philosophy)
+- Owner preferences (sectors, risk tolerance, blacklisted tickers)
+- Trade history patterns (which strategies win, which lose)
+- Berkshire Hathaway portfolio as quality benchmark (AAPL, AXP, BAC, KO, CVX, MCO, OXY, COF, GOOGL, KR)
 
-| Gate | System | What It Does |
-|------|--------|-------------|
-| 1 | Research Stars | Score candidates from movers/most-actives/crypto |
-| 2 | Brain History | `getTickerHistory()` — win/loss record per ticker |
-| 3 | Bayesian Prior | Posterior adjustment from cross-agent belief sharing |
-| 4 | **Trident LoRA** | `shouldBuy()` — LoRA-trained reasoning on whether to enter |
-| 5 | Neural Trader | RSI/EMA/BB technical confirmation on 15-min bars |
-| 6 | Panic Protocol | Position count, budget, SL dominance checks |
+#### NOVA (Neural Optimized Value Architecture)
+15-minute autonomous learning cycles that run continuously. NOVA reinforces winning strategies and identifies knowledge gaps while the system is idle.
 
-**Exit decision pipeline (3 layers):**
+```
+Endpoints:
+  GET  /v1/nova/stats  — decision counts, latency, model fallback rates
+  GET  /v1/nova/gaps   — identifies what NOVA needs more training on
+  POST /v1/nova/train  — submit winning/losing patterns for reinforcement
+```
 
-| Layer | System | What It Does |
-|-------|--------|-------------|
-| 1 | Static SL/TP | Safety net — crypto -5%, equity -7% stop loss |
-| 2 | **Trident LoRA** | `shouldSell()` — LoRA-trained reasoning on hold vs cut |
-| 3 | EOD / Pre-market | Equity liquidation at 3:50 PM, losing crypto pre-market |
+**NOVA enhances AWB by:**
+- Getting smarter overnight — trains while we sleep, ready at 8 AM
+- Reinforcing winning patterns from $1K+ days
+- Flagging gaps in knowledge (new sectors, unfamiliar tickers)
 
-**Trident capabilities used:**
-- `POST /v1/transfer` — Cross-domain reasoning with LoRA-trained weights
-- `POST /v1/train` — SONA training from Bayesian belief updates
-- `POST /v1/memories` — Trade outcome storage for pattern learning
-- `GET /v1/memories/search` — Ticker history retrieval
-- LoRA weights: rank-2 adapters, 128 hidden dims, federated sync
+#### FACT Cache (Fast Approximate Context Trie)
+Memory-first query resolution. 90% of "should I buy X?" decisions answered from cached knowledge without hitting a model — sub-millisecond latency.
+
+```
+Engine asks: "Should I buy AAPL?"
+  → FACT cache: "AAPL is Buffett core holding, 4W/4L, owner favors" → ALLOW (0ms)
+Engine asks: "Should I buy WOLF?"
+  → FACT cache: "WOLF 0W/30L, volatile small cap, not S&P 500" → BLOCK (0ms)
+```
+
+#### How AWB Uses Trident
+
+| Integration Point | Trident Feature | What Happens |
+|---|---|---|
+| **Before every buy** | SONA `shouldBuy()` | Checks trade history + owner preferences + Buffett quality filter |
+| **Every trade close** | SONA training | Teaches Trident win/loss outcome for that ticker/strategy |
+| **Daily summary (3:55 PM)** | SONA + NOVA training | Day's P&L, best/worst picks, strategy effectiveness |
+| **Research worker (every 2 min)** | Memory storage | RSS catalysts, sector analysis, geopolitical events |
+| **Owner notes (Discord !note)** | SONA training | Manual context — "DIS is a dog", "bullish on datacenter" |
+| **Morning prep (8 AM)** | FACT + SONA query | Fast decisions on pre-market candidates using cached knowledge |
+| **Position alerts (OpenClaw)** | Memory + search | When a holding drops 2%+, searches Yahoo for why and alerts |
+
+**Trident API endpoints used:**
+- `POST /v1/train` — SONA training (trade outcomes, strategy lessons, owner preferences)
+- `POST /v1/memories` — Trade records, research catalysts, position alerts
+- `GET /v1/memories/search` — Ticker history, pattern lookup
+- `GET /v1/nova/stats` — NOVA learning status and decision metrics
+- `GET /v1/nova/gaps` — Knowledge gaps for targeted training
+- `POST /v1/nova/train` — NOVA pattern reinforcement
+- `GET /v1/health` — System health (44 tools, DB connected)
 
 ### Trait Engine (Per-Ticker Bayesian Modeling)
 
