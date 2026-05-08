@@ -7,8 +7,6 @@ Autonomous wealth generation system combining algorithmic trading, real estate a
 - **Warren Buffett** — Buy quality at a discount, compound winners, cut losers fast, let the star run
 - **Robert Allen** — *Nothing Down* real estate acquisition, *Multiple Streams of Income* cross-pollination between trading profits and real estate capital deployment
 
-**Target:** 25-30% annual returns on $350K capital. Beat 17-18% mutual fund benchmark.
-
 ## System Architecture
 
 ```
