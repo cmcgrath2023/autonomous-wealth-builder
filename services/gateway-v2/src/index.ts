@@ -21,7 +21,7 @@ if (existsSync(envWebhook)) config({ path: envWebhook });
 
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { start as startApiServer } from './api-server.js';
-import { startManagers, stopManagers } from './managers/index.js';
+// Fin + Warren managers removed (Sprint 1). Only Ops kept for SRE monitoring.
 import { CommsWorker } from './comms-worker.js';
 import { OpenClawEngine } from './openclaw.js';
 import { loadCredentials, getAlpacaHeaders } from './config-bus.js';

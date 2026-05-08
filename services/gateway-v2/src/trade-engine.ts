@@ -700,6 +700,17 @@ export class TradeEngine {
     if (!creds.alpaca) return false;
     const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
 
+    // Trident gate — check if SONA says avoid this ticker
+    try {
+      const tridentAdvice = await brain.shouldBuy(symbol, 0, reason);
+      if (!tridentAdvice.should) {
+        console.log(`  [TRIDENT BLOCK] ${symbol}: ${tridentAdvice.reason}`);
+        return false;
+      }
+    } catch {
+      // Trident unavailable — proceed without (don't block on failure)
+    }
+
     // Budget gate — check total deployed before buying
     try {
       const posCheck = await this.executor.getPositions();
