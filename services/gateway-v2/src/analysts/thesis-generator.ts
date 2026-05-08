@@ -43,14 +43,14 @@ export async function detectSignalClusters(
   try {
     const result = await pgQuery(`
       SELECT
-        ticker,
+        symbol AS ticker,
         COUNT(*) AS signal_count,
-        array_agg(DISTINCT source_type) AS sources,
+        array_agg(DISTINCT signal_type) AS sources,
         AVG(decayed_strength) AS avg_strength,
-        (SELECT sector FROM companies WHERE symbol = s.ticker LIMIT 1) AS sector
+        (SELECT sector FROM companies WHERE symbol = s.symbol LIMIT 1) AS sector
       FROM mv_active_signals s
       WHERE detected_at > NOW() - INTERVAL '${CLUSTER_WINDOW_HOURS} hours'
-      GROUP BY ticker
+      GROUP BY symbol
       HAVING COUNT(*) >= ${MIN_CLUSTER_SIZE}
       ORDER BY AVG(decayed_strength) DESC
       LIMIT 10
@@ -67,7 +67,7 @@ export async function detectSignalClusters(
     // Get the actual signals
     const { rows: signals } = await pgQuery(`
       SELECT * FROM mv_active_signals
-      WHERE ticker = $1
+      WHERE symbol = $1
         AND detected_at > NOW() - INTERVAL '${CLUSTER_WINDOW_HOURS} hours'
       ORDER BY decayed_strength DESC
     `, [row.ticker]);
@@ -116,7 +116,7 @@ export async function generateThesis(
 
   // Crypto-specific: require 3+ independent signal sources
   if (assetClass === 'crypto') {
-    const uniqueSources = new Set(cluster.signals.map(s => s.source_type || s.signal_type));
+    const uniqueSources = new Set(cluster.signals.map(s => s.signal_type));
     if (uniqueSources.size < CRYPTO_MIN_SOURCES) {
       console.log(`[thesis] Crypto ${cluster.ticker} rejected: ${uniqueSources.size} sources (need ${CRYPTO_MIN_SOURCES}+)`);
       return null;
@@ -137,12 +137,12 @@ export async function generateThesis(
 
   // 3. Build thesis narrative
   const signalSummary = cluster.signals
-    .map(s => `${s.source_type || s.signal_type}(${(s.decayed_strength * 100).toFixed(0)}%)`)
+    .map(s => `${s.signal_type}(${(s.decayed_strength * 100).toFixed(0)}%)`)
     .join(', ');
 
   const narrative = [
     `Signal cluster on ${cluster.ticker} (${cluster.sector}).`,
-    `${cluster.signals.length} signals from ${new Set(cluster.signals.map(s => s.source_type || s.signal_type)).size} sources: ${signalSummary}.`,
+    `${cluster.signals.length} signals from ${new Set(cluster.signals.map(s => s.signal_type)).size} sources: ${signalSummary}.`,
     cluster.relatedTickers.length > 0 ? `Graph neighbors: ${cluster.relatedTickers.slice(0, 8).join(', ')}.` : '',
     tridentContext || '',
   ].filter(Boolean).join(' ');

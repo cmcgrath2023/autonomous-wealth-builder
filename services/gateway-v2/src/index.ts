@@ -9,7 +9,7 @@
 
 import { fork, ChildProcess } from 'child_process';
 import { resolve, dirname, join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { config } from 'dotenv';
 
 // Load env from gateway/.env.local (same file the old gateway used — has Discord tokens etc.)
@@ -24,6 +24,7 @@ import { start as startApiServer } from './api-server.js';
 import { startManagers, stopManagers } from './managers/index.js';
 import { CommsWorker } from './comms-worker.js';
 import { OpenClawEngine } from './openclaw.js';
+import { loadCredentials, getAlpacaHeaders } from './config-bus.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
@@ -32,6 +33,7 @@ import { brain } from './brain-client.js';
 // to `advisor_star:*` which nothing read. See docs/intelligence-layers-audit.md.
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
+const LOCK_PATH = process.env.AWB_GATEWAY_LOCK_PATH || join(process.cwd(), 'data', 'awb-gateway.lock');
 
 // ---------------------------------------------------------------------------
 // Worker configuration
@@ -85,6 +87,53 @@ function log(msg: string): void {
 const workers: WorkerState[] = [];
 let stateStore: GatewayStateStore;
 let shuttingDown = false;
+let lockAcquired = false;
+
+function pidIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireSingletonLock(): void {
+  const lockDir = dirname(LOCK_PATH);
+  if (!existsSync(lockDir)) mkdirSync(lockDir, { recursive: true });
+
+  if (existsSync(LOCK_PATH)) {
+    try {
+      const existing = JSON.parse(readFileSync(LOCK_PATH, 'utf8')) as { pid?: number; startedAt?: string };
+      if (existing.pid && pidIsAlive(existing.pid)) {
+        console.error(`[orchestrator] Another AWB gateway is already running (pid ${existing.pid}, started ${existing.startedAt || 'unknown'}). Exiting.`);
+        process.exit(2);
+      }
+      console.warn(`[orchestrator] Removing stale AWB gateway lock for pid ${existing.pid ?? 'unknown'}`);
+      unlinkSync(LOCK_PATH);
+    } catch {
+      console.warn('[orchestrator] Removing unreadable AWB gateway lock');
+      try { unlinkSync(LOCK_PATH); } catch {}
+    }
+  }
+
+  writeFileSync(LOCK_PATH, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    cwd: process.cwd(),
+  }, null, 2));
+  lockAcquired = true;
+}
+
+function releaseSingletonLock(): void {
+  if (!lockAcquired) return;
+  try {
+    const existing = JSON.parse(readFileSync(LOCK_PATH, 'utf8')) as { pid?: number };
+    if (existing.pid === process.pid) unlinkSync(LOCK_PATH);
+  } catch {}
+  lockAcquired = false;
+}
 
 function pruneOldRestarts(state: WorkerState): void {
   const oneHourAgo = Date.now() - 3_600_000;
@@ -176,6 +225,80 @@ function spawnWorker(state: WorkerState): void {
   });
 }
 
+function waitForWorkerMessage(
+  worker: WorkerState,
+  predicate: (msg: any) => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = worker.process;
+    if (!child) return resolve(false);
+
+    let finished = false;
+    const timer = setTimeout(() => done(false), timeoutMs);
+
+    const onMessage = (msg: any) => {
+      if (predicate(msg)) done(true);
+    };
+
+    const onExit = () => done(false);
+
+    const done = (value: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.off('message', onMessage);
+      child.off('exit', onExit);
+      resolve(value);
+    };
+
+    child.on('message', onMessage);
+    child.once('exit', onExit);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Watchdog — restart stale workers (checks every 60s)
+// ---------------------------------------------------------------------------
+
+setInterval(() => {
+  if (shuttingDown) return;
+  for (const w of workers) {
+    if (w.stopped || !w.process) continue;
+    try {
+      const raw = stateStore?.get(`worker:${w.config.name}`);
+      if (!raw) continue;
+      const status = JSON.parse(raw);
+      const age = Date.now() - new Date(status.updatedAt || 0).getTime();
+      // If worker hasn't updated status in 5 minutes, kill and respawn
+      if (age > 5 * 60_000) {
+        console.log(`[WATCHDOG] ${w.config.name} stale (${Math.round(age/60_000)}m) — killing and respawning`);
+        try { w.process.kill('SIGKILL'); } catch {}
+        // The exit handler will trigger respawn automatically
+      }
+    } catch {}
+  }
+
+  // Also check Ops restart requests
+  try {
+    for (const name of ['trade_engine', 'research_worker']) {
+      const req = stateStore?.get(`restart_request:${name}`);
+      if (req) {
+        const reqAge = Date.now() - new Date(req).getTime();
+        if (reqAge < 5 * 60_000) { // Request is recent (< 5 min old)
+          const workerName = name.replace('_', '-');
+          const w = workers.find(w => w.config.name === workerName);
+          if (w?.process) {
+            console.log(`[WATCHDOG] Restart requested for ${workerName} by Ops — killing`);
+            try { w.process.kill('SIGKILL'); } catch {}
+          }
+        }
+        stateStore?.set(`restart_request:${name}`, ''); // Clear the request
+      }
+    }
+  } catch {}
+}, 60_000);
+
 // ---------------------------------------------------------------------------
 // Graceful shutdown
 // ---------------------------------------------------------------------------
@@ -207,6 +330,7 @@ async function shutdown(signal: string): Promise<void> {
   await Promise.all(killPromises);
 
   try { stateStore.close(); } catch { /* ignore */ }
+  releaseSingletonLock();
   log('All workers stopped — exiting');
   process.exit(0);
 }
@@ -216,6 +340,7 @@ async function shutdown(signal: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  acquireSingletonLock();
   log('Gateway V2 starting');
 
   // 1. Create shared state store
@@ -228,10 +353,9 @@ async function main(): Promise<void> {
 
   // Seed Brain with trading rules (idempotent — Brain deduplicates)
   if (brainOk) {
-    brain.recordRule('Buy movers at market open (9:35 ET), hold all day, sell before close (3:50 ET)', 'system').catch(() => {});
-    brain.recordRule('Max 6 equity positions, $8K budget, no rotation during day', 'system').catch(() => {});
-    brain.recordRule('Forex: 25K units per trade, max 4 positions, bank at $50, cut at -$20', 'system').catch(() => {});
-    brain.recordRule('Avoid tickers with <35% win rate over 5+ trades', 'system').catch(() => {});
+    brain.recordRule('AWB recovery: paper-only equities trade documented RSI-2, ORB, and inverse-regime paths. Trident records notes and outcomes but does not gate deterministic entries.', 'system').catch(() => {});
+    brain.recordRule('AWB protection stack: $100 heartbeat stop when engine is running, 5% broker-side disaster stop on long equities, 7% broker-side stop on inverse ETF positions, max 5 positions, $50K deployed cap.', 'system').catch(() => {});
+    brain.recordRule('Forex: observe/manage separately; no forex rule should override AWB equity risk controls.', 'system').catch(() => {});
   }
 
   // 2b. Initialize Bayesian Intelligence — reconstructs from Brain, not local SQLite
@@ -309,25 +433,81 @@ async function main(): Promise<void> {
   // 3. Start API server in-process (lightweight, no need for separate process)
   await startApiServer(stateStore);
 
-  // 3. Start OpenClaw Engine + managers (Warren → Fin, Ops only)
-  // STRIPPED 2026-04-10: Liza + Ferd managers removed. Their output was
-  // observational — no code in trade-engine ever consumed their state.
-  const openClaw = new OpenClawEngine(stateStore, 30_000);
-  const managers = startManagers(DB_PATH);
+  // 3. Ops (SRE) + OpenClaw (position intelligence coordinator)
+  const { Ops } = await import('./managers/ops.js');
+  const ops = new Ops(DB_PATH);
+  ops.start();
 
-  // Register manager cycles as OpenClaw actions with autonomy levels
-  openClaw.registerAction('warren', 'briefing', async () => {
-    const briefing = stateStore.get('warren:briefing');
-    return { detail: briefing ? JSON.parse(briefing).narrative : 'No briefing yet', result: briefing ? 'success' : 'skipped' };
+  // OpenClaw: monitors held positions, triggers targeted research when they drop
+  const openClaw = new OpenClawEngine(stateStore, 60_000); // 60-second cycle
+
+  // Position monitor: when any holding drops 2%+, search for why and flag it
+  openClaw.registerAction('position-intel', 'monitor_drops', async () => {
+    try {
+      const headers = getAlpacaHeaders();
+      if (!headers) return { detail: 'No creds', result: 'skipped' as const };
+
+      const creds = loadCredentials();
+      const posRes = await fetch(`${creds.alpaca!.baseUrl}/v2/positions`, {
+        headers, signal: AbortSignal.timeout(5000),
+      });
+      if (!posRes.ok) return { detail: 'Positions fetch failed', result: 'error' as const };
+      const positions = await posRes.json() as any[];
+
+      const alerts: string[] = [];
+      for (const pos of positions) {
+        const pnlPct = parseFloat(pos.unrealized_plpc) * 100;
+        if (pnlPct <= -2) {
+          const ticker = pos.symbol;
+          // Check if we already alerted on this ticker today
+          const alertKey = `position_alert_${ticker}_${new Date().toISOString().slice(0, 10)}`;
+          if (stateStore.get(alertKey)) continue;
+
+          // Search Yahoo RSS for why this stock is down
+          try {
+            const searchRes = await fetch(
+              `https://query1.finance.yahoo.com/v1/finance/search?q=${ticker}&quotesCount=0&newsCount=3`,
+              { headers: { 'User-Agent': 'MTWM/1.0' }, signal: AbortSignal.timeout(5000) },
+            );
+            let newsContext = '';
+            if (searchRes.ok) {
+              const searchData = await searchRes.json() as any;
+              const news = (searchData.news || []).slice(0, 3);
+              newsContext = news.map((n: any) => n.title).join(' | ');
+            }
+
+            const alertMsg = `⚠️ ${ticker} down ${pnlPct.toFixed(1)}% ($${parseFloat(pos.unrealized_pl).toFixed(0)}) | ${newsContext || 'No news found'}`;
+            alerts.push(alertMsg);
+            stateStore.set(alertKey, alertMsg);
+
+            // Post to Discord
+            const webhook = process.env.DISCORD_WEBHOOK_URL;
+            if (webhook) {
+              await fetch(webhook, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: alertMsg }),
+                signal: AbortSignal.timeout(5000),
+              }).catch(() => {});
+            }
+
+            // Record to Trident
+            brain.recordRule(`POSITION ALERT: ${alertMsg}`, 'openclaw:position_intel').catch(() => {});
+          } catch {}
+        }
+      }
+
+      return {
+        detail: alerts.length > 0 ? alerts.join(' | ') : 'All positions OK',
+        result: alerts.length > 0 ? 'success' as const : 'skipped' as const,
+      };
+    } catch (e: any) {
+      return { detail: e.message, result: 'error' as const };
+    }
   }, 'act', 1);
 
-  openClaw.registerAction('fin', 'monitor_positions', async () => {
-    const status = stateStore.get('manager_fin_status');
-    return { detail: status ? JSON.parse(status).actions?.join('; ') || 'monitoring' : 'offline', result: status ? 'success' : 'error' };
-  }, 'act', 2);
-
   openClaw.start();
-  log('OpenClaw Engine started — Warren (urgency) → Fin (execution). Ops monitoring.');
+  log('Ops (SRE) + OpenClaw (position intelligence) active.');
 
   // 4. Start Comms Worker (Discord/Telegram/Slack notifications)
   const comms = new CommsWorker(DB_PATH);
@@ -351,7 +531,30 @@ async function main(): Promise<void> {
   // trade-engine candidate pipeline, not to a parallel store key.
 
   // 7. Spawn worker processes
+  const researchConfig = WORKER_CONFIGS.find((config) => config.name === 'research-worker');
+  const researchState = researchConfig ? {
+    config: researchConfig,
+    process: null,
+    restartTimestamps: [],
+    stopped: false,
+  } as WorkerState : null;
+
+  if (researchConfig && (!researchConfig.optional || existsSync(researchConfig.script)) && researchState) {
+    workers.push(researchState);
+    spawnWorker(researchState);
+    const researchReady = await waitForWorkerMessage(
+      researchState,
+      (msg) => msg?.type === 'research:ready',
+      90_000,
+    );
+    log(`Research worker bootstrap ${researchReady ? 'complete' : 'timed out'} — continuing startup`);
+  } else if (researchConfig) {
+    log(`${researchConfig.name} skipped (${researchConfig.script} not found)`);
+    writeWorkerHealth(researchConfig.name, 'skipped');
+  }
+
   for (const config of WORKER_CONFIGS) {
+    if (config.name === 'research-worker') continue;
     if (config.optional && !existsSync(config.script)) {
       log(`${config.name} skipped (${config.script} not found)`);
       writeWorkerHealth(config.name, 'skipped');
@@ -691,5 +894,6 @@ process.on('unhandledRejection', (reason) => {
 
 main().catch((err) => {
   console.error('[orchestrator] Fatal:', err);
+  releaseSingletonLock();
   process.exit(1);
 });

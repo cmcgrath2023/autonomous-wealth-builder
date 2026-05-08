@@ -206,17 +206,9 @@ export class Fin {
         const symbol = pos.symbol;
         const qty = parseFloat(pos.qty || '0');
 
-        // Bank outsized winners (> $500 unrealized)
-        if (unrealized > OUTSIZED_WINNER_THRESHOLD && qty > 0) {
-          actions.push(`BANKING ${symbol}: $${unrealized.toFixed(2)} unrealized`);
-          await this.sellPosition(baseUrl, headers, symbol, qty, actions, {
-            reason: 'fin_bank_winner',
-            entryPrice: parseFloat(pos.avg_entry_price || '0') || null,
-            exitPrice: parseFloat(pos.current_price || '0') || 0,
-            pnl: unrealized,
-          });
-          continue;
-        }
+        // REMOVED: "Bank outsized winners" — this sold NN (+$831) and IONQ (+$504)
+        // on 2026-04-20. Clipping runners is the #1 growth killer. Winners HOLD.
+        // The exit analyst with trailing stops handles profit protection.
 
         // Tighten trailing stop on positions > $100 unrealized
         if (unrealized > TRAILING_TIGHTEN_THRESHOLD) {
@@ -248,23 +240,10 @@ export class Fin {
       if (!res.ok) return;
       const positions = (await res.json()) as any[];
 
-      for (const pos of positions) {
-        const pnl = parseFloat(pos.unrealized_pl || '0');
-        const symbol = pos.symbol;
-        const qty = Math.abs(parseFloat(pos.qty || '0'));
-
-        if (pnl < -30) {
-          console.log(`[Fin] EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
-          await postToDiscord(`🚨 EMERGENCY CUT: ${symbol} at $${pnl.toFixed(2)}`);
-          await this.sellPosition(baseUrl, headers, symbol, qty, actions, {
-            reason: 'fin_emergency_cut',
-            entryPrice: parseFloat(pos.avg_entry_price || '0') || null,
-            exitPrice: parseFloat(pos.current_price || '0') || 0,
-            pnl,
-          });
-          actions.push(`EMERGENCY CUT ${symbol} ($${pnl.toFixed(2)})`);
-        }
-      }
+      // REMOVED: Emergency cut at -$30 — this is absurdly tight for $10K positions.
+      // A 0.3% dip = -$30 on a $10K position. The exit analyst handles all stop losses
+      // with volume-aware thresholds (-7% to -12%). Fin should NOT sell anything.
+      // Fin's role is monitoring and reporting, NOT executing trades.
     } catch (e: any) {
       actions.push(`Emergency cuts error: ${e.message}`);
     }

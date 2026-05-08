@@ -106,6 +106,21 @@ function checkFile(path: string): Violation[] {
     const line = lines[i];
     for (const p of SELL_PATTERNS) {
       if (!p.regex.test(line)) continue;
+
+      // Opening a short position uses Alpaca side:'sell', but it is not a
+      // closing sell and should not create a closed_trades row at entry.
+      const preceding = lines.slice(Math.max(0, i - 80), i + 1).join('\n');
+      if (p.name === 'orders POST side:sell' && /\bshortPosition\s*\(/.test(preceding)) {
+        continue;
+      }
+
+      // A broker stop order is a protective order placement. The eventual fill
+      // is captured by the Alpaca reconciler from account activities.
+      const orderBody = lines.slice(i, Math.min(lines.length, i + 12)).join('\n');
+      if (p.name === 'orders POST side:sell' && /type:\s*['"`]stop['"`]/.test(orderBody)) {
+        continue;
+      }
+
       // Found a suspicious line — scan the window for a write.
       const start = Math.max(0, i - WINDOW);
       const end = Math.min(lines.length, i + WINDOW + 1);

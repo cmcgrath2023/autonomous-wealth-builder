@@ -290,24 +290,9 @@ export class Warren {
         const pnl = parseFloat(pos.unrealized_pl || '0');
         const ticker = pos.symbol;
 
-        // Bank outsized winners immediately — don't let $500+ slip away
-        if (pnl >= 500) {
-          console.log(`[Warren] BANKING outsized winner: ${ticker} +$${pnl.toFixed(0)}`);
-          await postToDiscord(`👔 **Warren** 💰\nBANKING outsized winner: ${ticker} +$${pnl.toFixed(0)}`);
-          try {
-            const qty = pos.qty;
-            const side = parseFloat(pos.qty) > 0 ? 'sell' : 'buy';
-            await fetch(`${base}/v2/orders`, {
-              method: 'POST',
-              headers: { ...headers, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ symbol: ticker, qty: Math.abs(parseFloat(qty)).toString(), side, type: 'market', time_in_force: ticker.includes('USD') ? 'gtc' : 'day' }),
-              signal: AbortSignal.timeout(5000),
-            });
-            this.recordLearning(`Banked ${ticker} at +$${pnl.toFixed(0)}`, 'outsized_winner_protection', 'banked', pnl / 100);
-          } catch (e: any) {
-            console.error(`[Warren] Failed to bank ${ticker}: ${e.message}`);
-          }
-        }
+        // REMOVED: "Bank outsized winners" — Warren was selling winners like MAAS (+$756)
+        // minutes after purchase. Winners HOLD. Exit Analyst handles profit protection
+        // with trailing stops. No manager should ever place sell orders.
       }
     } catch {}
   }

@@ -42,6 +42,10 @@ const RSS_FEEDS = [
   { name: 'CNBC Market',  url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258' },
   { name: 'SA Currents',  url: 'https://seekingalpha.com/market_currents.xml' },
   { name: 'Bloomberg',   url: 'https://feeds.bloomberg.com/markets/news.rss' },
+  { name: 'CNBC PreMkt',  url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664' },
+  { name: 'CNBC Earnings', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135' },
+  { name: 'Investing.com', url: 'https://www.investing.com/rss/news.rss' },
+  { name: 'MarketWatch',  url: 'https://feeds.marketwatch.com/marketwatch/topstories' },
   { name: 'Barrons',     url: 'https://www.barrons.com/market-data/rss' },
   { name: 'MW TopStories', url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' },
 ];
@@ -322,6 +326,30 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     }
   } catch (e) { errors.push(`Yahoo: ${e}`); }
 
+  // 3b2. Yahoo Finance LOSERS — these are RSI-2 long candidates (oversold dip buys)
+  try {
+    const yahooLosersRes = await fetch('https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_losers&count=20', {
+      headers: { 'User-Agent': 'MTWM/1.0' },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (yahooLosersRes.ok) {
+      const losersData = await yahooLosersRes.json() as any;
+      const loserQuotes = losersData?.finance?.result?.[0]?.quotes || [];
+      const yahooLosers = loserQuotes.filter((q: any) => q.regularMarketPrice > 10 && q.regularMarketPrice < 500 && q.regularMarketChangePercent < -3);
+      let losersAdded = 0;
+      for (const q of yahooLosers.slice(0, 10)) {
+        const existing = store.getResearchStars().find((s: any) => s.symbol === q.symbol);
+        if (!existing) {
+          const score = Math.min(0.80 + Math.abs(q.regularMarketChangePercent) / 100, 0.90);
+          store.saveResearchStar(q.symbol, 'rsi2_candidate', `YAHOO LOSER ${q.regularMarketChangePercent.toFixed(1)}% | RSI-2 dip buy candidate | Vol: ${(q.regularMarketVolume || 0).toLocaleString()}`, bayesianAdjustScore(q.symbol, score));
+          starsWritten++;
+          losersAdded++;
+        }
+      }
+      if (losersAdded > 0) console.log(`[Research] Yahoo LOSERS: ${losersAdded} RSI-2 candidates (${yahooLosers.length} total)`);
+    }
+  } catch (e) { errors.push(`Yahoo losers: ${e}`); }
+
   // 3c. Crypto — scan Alpaca crypto movers (24/7 market, 100% win rate historically)
   if (headers) {
     const CRYPTO_PAIRS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'BCH/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD', 'LTC/USD'];
@@ -507,6 +535,15 @@ export async function start(dbPath?: string): Promise<void> {
   }, 300_000);
 
   await scheduleCycle(factCache);
+
+  if (process.send) {
+    process.send({
+      type: 'research:ready',
+      payload: {
+        startedAt: new Date().toISOString(),
+      },
+    });
+  }
 }
 
 export function stop(): void {

@@ -1,0 +1,28 @@
+services:
+  awb-services:
+    image: registry.digitalocean.com/oceanic/awb-services:${AWB_SERVICES_TAG:-latest}
+    env_file:
+      - /opt/awb/.env.runtime
+    ports:
+      - "3001:3001"
+    volumes:
+      - /opt/awb/data:/app/services/data
+      - /opt/awb/logs:/app/services/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/api/system/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  awb-ui:
+    image: registry.digitalocean.com/oceanic/awb-ui:${AWB_UI_TAG:-latest}
+    env_file:
+      - /opt/awb/.env.runtime
+    ports:
+      - "3000:3000"
+    depends_on:
+      awb-services:
+        condition: service_started
+    restart: unless-stopped

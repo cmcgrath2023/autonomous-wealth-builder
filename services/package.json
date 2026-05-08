@@ -5,9 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch gateway-v2/src/index.ts",
-    "build": "tsc",
+    "build": "tsc && npm run verify:sell-paths",
     "start": "node dist/gateway-v2/src/index.js",
-    "dev:all": "concurrently \"tsx watch gateway-v2/src/index.ts\" \"tsx watch midstream/src/server.ts\""
+    "dev:all": "concurrently \"tsx watch gateway-v2/src/index.ts\" \"tsx watch midstream/src/server.ts\"",
+    "verify:sell-paths": "node --import tsx/esm gateway-v2/tests/verify-sell-paths.ts",
+    "trident:note": "node --import tsx/esm gateway-v2/scripts/record-learning-note.ts",
+    "reconcile:readonly": "node --import tsx/esm gateway-v2/scripts/reconcile-readonly.ts",
+    "sync:open-buys": "node --import tsx/esm gateway-v2/scripts/sync-open-system-buys.ts",
+    "stops:ensure": "node --import tsx/esm gateway-v2/scripts/ensure-protective-stops.ts"
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.47",

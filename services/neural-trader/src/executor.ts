@@ -165,7 +165,7 @@ export class TradeExecutor {
 
       return positions.map((p) => ({
         ticker: p.symbol,
-        shares: parseFloat(p.qty),
+        shares: p.side === 'short' ? -Math.abs(parseFloat(p.qty)) : Math.abs(parseFloat(p.qty)),
         avgPrice: parseFloat(p.avg_entry_price),
         currentPrice: parseFloat(p.current_price),
         marketValue: parseFloat(p.market_value),

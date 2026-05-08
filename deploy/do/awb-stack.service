@@ -1,0 +1,19 @@
+[Unit]
+Description=AWB docker compose stack
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/awb
+Environment=COMPOSE_PROJECT_NAME=awb
+Environment=AWB_COMPOSE_FILE=/opt/awb/deploy/do/docker-compose.build.yml
+ExecStart=/bin/sh -lc 'exec /usr/bin/docker compose -f "$AWB_COMPOSE_FILE" up'
+ExecStop=/bin/sh -lc 'exec /usr/bin/docker compose -f "$AWB_COMPOSE_FILE" down'
+Restart=always
+RestartSec=10
+KillMode=control-group
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,15 +1,11 @@
 import type { Metadata } from 'next';
-import { Google_Sans, Geist_Mono } from 'next/font/google';
 import './globals.css';
 import { Providers } from './providers';
 import { AppShell } from '@/components/layout/AppShell';
 
-const googleSans = Google_Sans({ variable: '--font-google-sans', subsets: ['latin'], weight: ['400', '500', '700'] });
-const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
-
 export const metadata: Metadata = {
-  title: 'MTWM Control',
-  description: 'McGrath Trust World Model — Autonomous Wealth Engine',
+  title: 'AWB Control',
+  description: 'Autonomous Wealth Builder control surface',
   icons: {
     icon: '/mcgrath-crest.svg',
   },
@@ -18,7 +14,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${googleSans.variable} ${geistMono.variable} font-sans antialiased bg-background text-foreground min-h-screen`}>
+      <body className="font-sans antialiased bg-background text-foreground min-h-screen">
         <Providers>
           <AppShell>{children}</AppShell>
         </Providers>

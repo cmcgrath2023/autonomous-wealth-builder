@@ -96,7 +96,33 @@ export function recordClosedTrade(
     returnPct,
     trade.reason,
     trade.direction,
-  ).catch(() => { /* Trident is best-effort from here */ });
+  ).catch(() => {});
+
+  // 5. SONA training — teach Trident from EVERY trade (manual + engine)
+  try {
+    const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
+    const apiKey = process.env.BRAIN_API_KEY || '';
+    if (apiKey) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+      fetch(`${BRAIN_URL}/v1/train`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          input: `Trade: ${trade.ticker} ${trade.direction} entry=$${trade.entryPrice?.toFixed(2) || '?'} exit=$${trade.exitPrice.toFixed(2)} return=${(returnPct * 100).toFixed(1)}% reason=${trade.reason} source=${source}`,
+          output: trade.pnl > 0 ? 'profitable' : 'loss',
+          metadata: {
+            domain: 'trade_outcome',
+            ticker: trade.ticker,
+            pnl: trade.pnl,
+            returnPct,
+            reason: trade.reason,
+            source,
+            direction: trade.direction,
+          },
+        }),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => {});
+    }
+  } catch {}
 }
 
 // ────────────────────────────────────────────────────────────────────────────

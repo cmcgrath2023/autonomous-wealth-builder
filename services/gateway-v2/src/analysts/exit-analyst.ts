@@ -37,9 +37,50 @@ interface PositionInput {
   holdDurationMinutes: number;
   isResilient?: boolean;     // defense, healthcare, utilities, staples, gold
   tridentSignal?: 'hold' | 'sell';
+  volume?: number;           // today's volume — high volume movers get wider stops
+}
+
+export interface ExitConfig {
+  slDefault?: number;           // e.g. -7
+  slHighVolume?: number;        // e.g. -10
+  slVeryHighVolume?: number;    // e.g. -12
+  slResilientBonus?: number;    // e.g. -3 (added to base)
+  highVolumeThreshold?: number; // e.g. 1000000
+  veryHighVolumeThreshold?: number; // e.g. 5000000
+  timeStopHours?: number;       // e.g. 2
+  timeStopHoursHighVol?: number; // e.g. 3
+  timeStopPct?: number;         // e.g. -3
+  timeStopPctHighVol?: number;  // e.g. -5
+  trailingTier1?: number;       // e.g. 5
+  trailingTier2?: number;       // e.g. 4
+  trailingTier3?: number;       // e.g. 3
+  tpDefault?: number;           // e.g. 15
+  tpResilient?: number;         // e.g. 20
 }
 
 export class ExitAnalyst {
+  private cfg: Required<ExitConfig>;
+
+  constructor(config?: ExitConfig) {
+    this.cfg = {
+      slDefault: config?.slDefault ?? -7,
+      slHighVolume: config?.slHighVolume ?? -10,
+      slVeryHighVolume: config?.slVeryHighVolume ?? -12,
+      slResilientBonus: config?.slResilientBonus ?? -3,
+      highVolumeThreshold: config?.highVolumeThreshold ?? 1_000_000,
+      veryHighVolumeThreshold: config?.veryHighVolumeThreshold ?? 5_000_000,
+      timeStopHours: config?.timeStopHours ?? 2,
+      timeStopHoursHighVol: config?.timeStopHoursHighVol ?? 3,
+      timeStopPct: config?.timeStopPct ?? -3,
+      timeStopPctHighVol: config?.timeStopPctHighVol ?? -5,
+      trailingTier1: config?.trailingTier1 ?? 5,
+      trailingTier2: config?.trailingTier2 ?? 4,
+      trailingTier3: config?.trailingTier3 ?? 3,
+      tpDefault: config?.tpDefault ?? 15,
+      tpResilient: config?.tpResilient ?? 20,
+    };
+  }
+
   /**
    * Evaluate every open position and return an exit plan.
    * Called from trade-engine heartbeat alongside Trident shouldSell.
@@ -53,35 +94,44 @@ export class ExitAnalyst {
     const holdMins = pos.holdDurationMinutes;
     const resilient = pos.isResilient ?? false;
 
-    // ── HARD STOP — non-negotiable loss limits ─────────────────
-    // Resilient sectors get wider stops per CLAUDE.md tier system
-    const hardStopPct = resilient ? -10 : -7;
+    // ── VOLUME-AWARE STOPS ─────────────────────────────────────
+    const vol = pos.volume ?? 0;
+    const isHighVolume = vol > this.cfg.highVolumeThreshold;
+    const isVeryHighVolume = vol > this.cfg.veryHighVolumeThreshold;
+
+    // Widen stops for high-volume momentum names
+    let hardStopPct: number;
+    const resilientExtra = resilient ? this.cfg.slResilientBonus : 0;
+    if (isVeryHighVolume) hardStopPct = this.cfg.slVeryHighVolume + resilientExtra;
+    else if (isHighVolume) hardStopPct = this.cfg.slHighVolume + resilientExtra;
+    else hardStopPct = this.cfg.slDefault + resilientExtra;
 
     if (pct <= hardStopPct) {
       return this.plan(pos, pct, 'sell_now', {
         stopLoss: pos.currentPrice,
-        reasoning: `Hard stop: ${pct.toFixed(1)}% ≤ ${hardStopPct}%`,
+        reasoning: `Hard stop: ${pct.toFixed(1)}% ≤ ${hardStopPct}% (vol: ${(vol/1e6).toFixed(1)}M)`,
         urgency: 'immediate',
       });
     }
 
     // ── TIME STOP — losers that aren't recovering ──────────────
-    // Down > 3% for 2+ hours = cut it, it's not coming back today
-    if (pct <= -3 && holdMins > 120) {
+    const timeStopHours = isHighVolume ? this.cfg.timeStopHoursHighVol : this.cfg.timeStopHours;
+    const timeStopPct = isHighVolume ? this.cfg.timeStopPctHighVol : this.cfg.timeStopPct;
+    if (pct <= timeStopPct && holdMins > timeStopHours * 60) {
       return this.plan(pos, pct, 'sell_now', {
         stopLoss: pos.currentPrice,
-        reasoning: `Time stop: ${pct.toFixed(1)}% for ${Math.round(holdMins / 60)}h — not recovering`,
+        reasoning: `Time stop: ${pct.toFixed(1)}% for ${Math.round(holdMins / 60)}h (vol: ${(vol/1e6).toFixed(1)}M)`,
         urgency: 'immediate',
       });
     }
 
     // ── PROFIT TIER 3: +15% or more — lock in hard, trail tight ──
-    const tpFloor = resilient ? 20 : 15;
+    const tpFloor = resilient ? this.cfg.tpResilient : this.cfg.tpDefault;
     if (pct >= tpFloor) {
-      const lockFloor = pos.entryPrice * (1 + (tpFloor - 5) / 100); // lock in TP-5%
+      const lockFloor = pos.entryPrice * (1 + (tpFloor - 5) / 100);
       return this.plan(pos, pct, 'tighten_stop', {
-        stopLoss: Math.max(lockFloor, pos.currentPrice * 0.97), // 3% trailing OR floor
-        trailingStopPct: 3,
+        stopLoss: Math.max(lockFloor, pos.currentPrice * (1 - this.cfg.trailingTier3 / 100)),
+        trailingStopPct: this.cfg.trailingTier3,
         target1: pos.entryPrice * (1 + tpFloor / 100),
         target2: pos.entryPrice * (1 + (tpFloor + 10) / 100),
         reasoning: `Tier 3: +${pct.toFixed(1)}% — trailing 3% from high, floor at +${tpFloor - 5}%`,
@@ -89,11 +139,11 @@ export class ExitAnalyst {
       });
     }
 
-    // ── PROFIT TIER 2: +8% to +15% — tighten, lock breakeven+
+    // ── PROFIT TIER 2: +8% to TP — tighten, lock breakeven+
     if (pct >= 8) {
       return this.plan(pos, pct, 'tighten_stop', {
-        stopLoss: pos.entryPrice * 1.02, // lock in +2% minimum
-        trailingStopPct: 4,
+        stopLoss: pos.entryPrice * 1.02,
+        trailingStopPct: this.cfg.trailingTier2,
         target1: pos.entryPrice * 1.15,
         target2: pos.entryPrice * 1.20,
         reasoning: `Tier 2: +${pct.toFixed(1)}% — trailing 4%, floor at +2%`,
@@ -104,8 +154,8 @@ export class ExitAnalyst {
     // ── PROFIT TIER 1: +3% to +8% — move stop to breakeven ────
     if (pct >= 3) {
       return this.plan(pos, pct, 'tighten_stop', {
-        stopLoss: pos.entryPrice * 1.005, // just above breakeven
-        trailingStopPct: 5,
+        stopLoss: pos.entryPrice * 1.005,
+        trailingStopPct: this.cfg.trailingTier1,
         target1: pos.entryPrice * 1.10,
         reasoning: `Tier 1: +${pct.toFixed(1)}% — stop at breakeven, trailing 5%`,
         urgency: 'let_ride',

@@ -1,0 +1,28 @@
+services:
+  awb-services:
+    build:
+      context: /opt/awb
+      dockerfile: services/Dockerfile
+    image: awb-services:local
+    env_file:
+      - /opt/awb/.env.runtime
+    ports:
+      - "3001:3001"
+    volumes:
+      - /opt/awb/data:/app/services/data
+      - /opt/awb/logs:/app/services/logs
+    restart: unless-stopped
+
+  awb-ui:
+    build:
+      context: /opt/awb
+      dockerfile: mtwm-ui/Dockerfile
+    image: awb-ui:local
+    env_file:
+      - /opt/awb/.env.runtime
+    ports:
+      - "3000:3000"
+    depends_on:
+      awb-services:
+        condition: service_started
+    restart: unless-stopped

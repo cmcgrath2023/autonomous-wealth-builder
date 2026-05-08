@@ -8,6 +8,26 @@ On every new conversation, before doing anything else:
 3. Check memory files in `.claude/projects/-Users-cmcgrath-Documents-mtwm/memory/MEMORY.md` for relevant context
 4. State what you found briefly — don't hide it
 
+## Strategy Documentation (MANDATORY)
+
+**Every strategy or significant code change MUST be documented at implementation time** in `docs/strategy-spec.md`. This includes:
+1. What the strategy does and why (the research/evidence behind it)
+2. Exact entry/exit rules with thresholds
+3. What universe it trades (S&P 500, inverse ETFs, etc.)
+4. Stop loss rules and how they're enforced
+5. What was removed/changed from the prior version and why
+
+**Record to Trident** via `brain.recordRule()` at implementation time so the knowledge persists across sessions. If you can't explain what the system does and why, you haven't finished implementing it.
+
+## QA/QE Checklist (MANDATORY — ADR-027)
+
+**Before ANY trade engine code change**, run the full checklist in `docs/ADR-027-trade-engine-qa-checklist.md`. This is non-negotiable. Key items:
+1. Check circuit breaker state — is it blocking scans/exits? It must ONLY block new buys.
+2. Verify all existing positions have broker stop orders.
+3. Trace every sell path end-to-end.
+4. Compile, restart, wait for heartbeat, verify state store updates.
+5. Never say "it works" without running items 1, 4, 8, 9 of the checklist.
+
 ## Trading Panic Protocol (ALWAYS CHECK BEFORE ANY TRADE)
 
 ### Alpaca (US Equities)

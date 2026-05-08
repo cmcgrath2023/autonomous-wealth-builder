@@ -292,6 +292,26 @@ export class BrainClient {
     });
   }
 
+  async recordLearningNote(note: {
+    title: string;
+    content: string;
+    tags?: string[];
+    category?: 'finance' | 'custom' | 'pattern' | 'solution';
+    source?: string;
+  }): Promise<boolean> {
+    const result = await brainFetch('/v1/memories', {
+      method: 'POST',
+      body: JSON.stringify({
+        category: note.category || 'pattern',
+        title: note.title,
+        content: `LEARNING NOTE: ${note.content}\n\nRecorded: ${new Date().toISOString()}`,
+        tags: sanitizeTags(['learning-note', ...(note.tags || [])]),
+        source: note.source || `${SOURCE}:learning-note`,
+      }),
+    });
+    return !!result;
+  }
+
   // ── Record research cycle to Trident ────────────────────────────
 
   async recordResearchCycle(data: { date: string; starsCount: number; topStars: Array<{ symbol: string; sector: string; score: number }>; summary: string; newsHeadlines: string; errors: string[] }): Promise<void> {
