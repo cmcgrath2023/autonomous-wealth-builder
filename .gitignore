@@ -29,6 +29,16 @@ logs/
 *.log
 /tmp/
 
+# Node compile cache
+.tmp/
+
+# Lock files (runtime-only)
+services/data/awb-gateway.lock
+
+# SQLite WAL/SHM (runtime state)
+*-shm
+*-wal
+
 # OS files
 .DS_Store
 Thumbs.db
