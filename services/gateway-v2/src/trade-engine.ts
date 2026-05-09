@@ -1802,6 +1802,51 @@ export class TradeEngine {
       }
     }
 
+    // ── 6d. DAILY MOVER CAPTURE (3:55 PM) — top S&P 500 winners/losers ──
+    const isMoverCaptureTime = mkt.etHour === 15 && mkt.etMin >= 53 && mkt.etMin <= 58;
+    const moverCaptureKey = `daily_movers_${today}`;
+    if (isMoverCaptureTime && !this.store.get(moverCaptureKey)) {
+      try {
+        const topSyms = SP500_UNIVERSE.slice(0, 150).join(',');
+        const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${topSyms}&feed=iex`, {
+          headers: alpacaHeaders, signal: AbortSignal.timeout(10000),
+        });
+        if (snapRes.ok) {
+          const snapData = await snapRes.json() as any;
+          const dayMovers: Array<{ symbol: string; pct: number; price: number }> = [];
+          for (const [sym, snap] of Object.entries(snapData) as any) {
+            const price = snap?.latestTrade?.p;
+            const prev = snap?.prevDailyBar?.c;
+            if (price && prev) dayMovers.push({ symbol: sym, pct: ((price - prev) / prev) * 100, price });
+          }
+          dayMovers.sort((a, b) => b.pct - a.pct);
+          const winners = dayMovers.slice(0, 14);
+          const losers = dayMovers.slice(-14).reverse();
+
+          this.store.set(moverCaptureKey, JSON.stringify({ date: today, winners, losers }));
+
+          // Record to Trident
+          const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
+          const apiKey = process.env.BRAIN_API_KEY || '';
+          if (apiKey) {
+            fetch(`${BRAIN_URL}/v1/train`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+              body: JSON.stringify({
+                input: `S&P 500 movers ${today}: Winners: ${winners.slice(0, 7).map(w => `${w.symbol}+${w.pct.toFixed(1)}%`).join(', ')}. Losers: ${losers.slice(0, 7).map(l => `${l.symbol}${l.pct.toFixed(1)}%`).join(', ')}`,
+                output: 'daily_movers',
+                metadata: { domain: 'market_data', date: today },
+              }),
+              signal: AbortSignal.timeout(5000),
+            }).catch(() => {});
+          }
+
+          console.log(`  [MOVERS] Top: ${winners.slice(0, 5).map(w => `${w.symbol}+${w.pct.toFixed(1)}%`).join(', ')} | Bottom: ${losers.slice(0, 5).map(l => `${l.symbol}${l.pct.toFixed(1)}%`).join(', ')}`);
+          await postToDiscord(`📊 S&P 500 Movers ${today}:\n🟢 ${winners.slice(0, 7).map(w => `${w.symbol}+${w.pct.toFixed(1)}%`).join(', ')}\n🔴 ${losers.slice(0, 7).map(l => `${l.symbol}${l.pct.toFixed(1)}%`).join(', ')}`);
+        }
+      } catch {}
+    }
+
     // ── 7. STATUS ────────────────────────────────────────────────────
     this.writeStatus(t0);
   }
