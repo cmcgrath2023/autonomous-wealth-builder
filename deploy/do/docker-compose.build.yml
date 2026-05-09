@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: awb_research
+      POSTGRES_USER: awb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U awb -d awb_research"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   awb-services:
     build:
       context: /opt/awb
@@ -6,11 +21,16 @@ services:
     image: awb-services:local
     env_file:
       - /opt/awb/.env.runtime
+    environment:
+      DATABASE_URL: postgresql://awb:${POSTGRES_PASSWORD:-changeme}@postgres:5432/awb_research
     ports:
       - "3001:3001"
     volumes:
       - /opt/awb/data:/app/services/data
       - /opt/awb/logs:/app/services/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   awb-ui:
@@ -26,3 +46,6 @@ services:
       awb-services:
         condition: service_started
     restart: unless-stopped
+
+volumes:
+  pgdata:

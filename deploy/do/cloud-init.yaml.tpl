@@ -15,8 +15,10 @@ write_files:
       BRAIN_API_KEY=__BRAIN_API_KEY__
       BRAIN_SERVER_URL=https://trident.cetaceanlabs.com
       DISCORD_WEBHOOK_URL=__DISCORD_WEBHOOK_URL__
-      AWB_GATEWAY_LOCK_PATH=/opt/awb/data/awb-gateway.lock
-      GATEWAY_DB_PATH=/opt/awb/data/gateway-state.db
+      DISCORD_BOT_TOKEN=__DISCORD_BOT_TOKEN__
+      DATABASE_URL=__DATABASE_URL__
+      AWB_GATEWAY_LOCK_PATH=/app/services/data/awb-gateway.lock
+      GATEWAY_DB_PATH=/app/services/data/gateway-state.db
       AWB_SERVICES_TAG=latest
       AWB_UI_TAG=latest
 
@@ -48,5 +50,10 @@ runcmd:
   - systemctl start docker
   - mkdir -p /opt/awb /opt/awb/data /opt/awb/logs
   - bash -lc 'if [ -d /opt/awb/.git ]; then cd /opt/awb && git pull --ff-only; else git clone --branch main https://github.com/cmcgrath2023/autonomous-wealth-builder.git /opt/awb; fi'
+  - chmod +x /opt/awb/deploy/do/healthcheck.sh /opt/awb/deploy/do/watchdog.sh
   - systemctl daemon-reload
   - systemctl enable --now awb-stack.service
+  # Watchdog: restart if API down (every 5 min)
+  - echo "*/5 * * * * root /opt/awb/deploy/do/watchdog.sh" > /etc/cron.d/awb-watchdog
+  # Pre-open healthcheck: 9:25 AM ET weekdays (13:25 UTC in summer, 14:25 UTC in winter)
+  - echo "25 13 * * 1-5 root /opt/awb/deploy/do/healthcheck.sh >> /opt/awb/logs/healthcheck.log 2>&1" > /etc/cron.d/awb-healthcheck
