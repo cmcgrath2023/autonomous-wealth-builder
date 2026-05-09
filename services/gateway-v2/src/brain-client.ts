@@ -78,7 +78,6 @@ export class BrainClient {
     await brainFetch('/v1/memories', {
       method: 'POST',
       body: JSON.stringify({
-        category: 'finance',
         domain: 'trade_outcome',
         title: `Trade ${result}: ${ticker} ${direction} $${pnl.toFixed(2)}`,
         content: `TRADE CLOSED: ${ticker} ${direction} | P&L: $${pnl.toFixed(2)} (${(returnPct * 100).toFixed(1)}%) | Reason: ${reason} | ${result} | ${new Date().toISOString()}`,
