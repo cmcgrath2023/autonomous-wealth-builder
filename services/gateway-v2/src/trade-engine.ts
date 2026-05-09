@@ -1847,6 +1847,36 @@ export class TradeEngine {
           });
         }
       } catch {}
+
+      // NOVA training — reinforce winning patterns, flag gaps
+      try {
+        const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
+        const apiKey = process.env.BRAIN_API_KEY || '';
+        if (apiKey) {
+          const bh = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+          // Train NOVA with today's outcomes
+          fetch(`${BRAIN_URL}/v1/nova/train`, {
+            method: 'POST', headers: bh,
+            body: JSON.stringify({
+              input: `AWB daily ${today}: $${totalPnl.toFixed(0)} P&L, ${wins}W/${losses}L, ${trades.length} trades`,
+              output: totalPnl > 0 ? 'profitable_day' : 'losing_day',
+              metadata: { domain: 'awb_daily', pnl: totalPnl, wins, losses },
+            }),
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => {});
+
+          // Check NOVA gaps — what does it need more data on?
+          fetch(`${BRAIN_URL}/v1/nova/gaps`, { headers: bh, signal: AbortSignal.timeout(5000) })
+            .then(async (r) => {
+              if (r.ok) {
+                const gaps = await r.json();
+                if (gaps.gaps?.length > 0) {
+                  console.log(`  [NOVA] Knowledge gaps: ${JSON.stringify(gaps.gaps).slice(0, 100)}`);
+                }
+              }
+            }).catch(() => {});
+        }
+      } catch {}
     }
 
     console.log(`[TE] === #${this.hbCount} done === ${dur}ms`);
