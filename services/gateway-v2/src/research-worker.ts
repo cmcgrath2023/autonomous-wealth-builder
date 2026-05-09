@@ -516,12 +516,16 @@ async function scheduleCycle(fc: MarketFACTCache): Promise<void> {
   if (running) cycleTimer = setTimeout(() => scheduleCycle(fc), CYCLE_MS);
 }
 
-export async function start(dbPath?: string): Promise<void> {
+export async function start(dbPathOrStore?: string | GatewayStateStore): Promise<void> {
   if (running) return;
   running = true;
-  const db = dbPath || process.env.GATEWAY_DB_PATH || 'data/gateway-state.db';
-  store = new GatewayStateStore(db);
-  console.log(`[Research] Worker starting (db=${db}, cycle=${CYCLE_MS / 1000}s)`);
+  if (dbPathOrStore instanceof GatewayStateStore) {
+    store = dbPathOrStore;
+  } else {
+    const db = dbPathOrStore || process.env.GATEWAY_DB_PATH || 'data/gateway-state.db';
+    store = new GatewayStateStore(db);
+  }
+  console.log(`[Research] Worker starting (cycle=${CYCLE_MS / 1000}s)`);
   // FIX 5: Persist FACT cache across restarts
   const factCache = new MarketFACTCache();
   try {
@@ -544,20 +548,13 @@ export async function start(dbPath?: string): Promise<void> {
 
   await scheduleCycle(factCache);
 
-  if (process.send) {
-    process.send({
-      type: 'research:ready',
-      payload: {
-        startedAt: new Date().toISOString(),
-      },
-    });
-  }
+  console.log(`[Research] Worker ready (${new Date().toISOString()})`);
 }
 
 export function stop(): void {
   running = false;
   if (cycleTimer) { clearTimeout(cycleTimer); cycleTimer = undefined; }
-  store?.close(); store = undefined;
+  store = undefined;
   console.log('[Research] Worker stopped');
 }
 

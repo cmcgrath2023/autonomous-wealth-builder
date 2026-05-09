@@ -1,13 +1,11 @@
 /**
- * Gateway V2 — Process Orchestrator
+ * Gateway V2 — Single-Process Orchestrator (ADR-028)
  *
- * Main entry point that starts the API server in-process and spawns
- * trade-engine, data-feed, and research-worker as child processes.
- * Monitors workers, auto-restarts on crash with backoff, and handles
- * graceful shutdown on SIGINT/SIGTERM.
+ * Main entry point. Runs trade engine, research worker, API server,
+ * analysts, and monitoring ALL in-process. No child processes, no IPC.
+ * Simpler, Docker-friendly, no fork overhead.
  */
 
-import { fork, ChildProcess } from 'child_process';
 import { resolve, dirname, join } from 'path';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { config } from 'dotenv';
@@ -21,53 +19,15 @@ if (existsSync(envWebhook)) config({ path: envWebhook });
 
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { start as startApiServer } from './api-server.js';
-// Fin + Warren managers removed (Sprint 1). Only Ops kept for SRE monitoring.
 import { CommsWorker } from './comms-worker.js';
 import { OpenClawEngine } from './openclaw.js';
 import { loadCredentials, getAlpacaHeaders } from './config-bus.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
-// STRIPPED 2026-04-10: RVFEngine, LearningEngine (dead code — never called after
-// instantiation). Nanobot scheduler removed too — trade_advisor output was written
-// to `advisor_star:*` which nothing read. See docs/intelligence-layers-audit.md.
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
 const LOCK_PATH = process.env.AWB_GATEWAY_LOCK_PATH || join(process.cwd(), 'data', 'awb-gateway.lock');
-
-// ---------------------------------------------------------------------------
-// Worker configuration
-// ---------------------------------------------------------------------------
-
-interface WorkerConfig {
-  name: string;
-  script: string;
-  restartDelay: number;   // ms between restart attempts
-  maxRestarts: number;     // max restarts per hour
-  optional: boolean;       // skip if script file doesn't exist
-}
-
-interface WorkerState {
-  config: WorkerConfig;
-  process: ChildProcess | null;
-  restartTimestamps: number[];   // timestamps of recent restarts (within 1h)
-  stopped: boolean;              // true when orchestrator is shutting down
-}
-
-const SRC_DIR = dirname(new URL(import.meta.url).pathname);
-
-// research-worker: scans RSS feeds (Yahoo, Bloomberg, CNBC), analyzes sectors,
-// writes catalyst-backed research stars to the store. Trade engine reads these
-// for the morning prep pipeline and catalyst buy path.
-const WORKER_CONFIGS: WorkerConfig[] = [
-  { name: 'trade-engine',    script: resolve(SRC_DIR, 'trade-engine.ts'),    restartDelay: 5000,  maxRestarts: 10, optional: false },
-  { name: 'data-feed',       script: resolve(SRC_DIR, 'data-feed.ts'),       restartDelay: 3000,  maxRestarts: 20, optional: true },
-  { name: 'research-worker', script: resolve(SRC_DIR, 'research-worker.ts'), restartDelay: 5000,  maxRestarts: 10, optional: true },
-  // Forex scanner was previously started separately and never restarted
-  // with code changes. Now managed by the orchestrator so bootstrap + Trident
-  // integration deploy with every restart.
-  { name: 'forex-scanner',   script: resolve(SRC_DIR, '../../forex-scanner/src/server.ts'), restartDelay: 5000, maxRestarts: 10, optional: true },
-];
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -78,13 +38,11 @@ function log(msg: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Worker management
+// Singleton lock (prevents two AWB instances)
 // ---------------------------------------------------------------------------
 
-const workers: WorkerState[] = [];
-let stateStore: GatewayStateStore;
-let shuttingDown = false;
 let lockAcquired = false;
+let shuttingDown = false;
 
 function pidIsAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -132,205 +90,35 @@ function releaseSingletonLock(): void {
   lockAcquired = false;
 }
 
-function pruneOldRestarts(state: WorkerState): void {
-  const oneHourAgo = Date.now() - 3_600_000;
-  state.restartTimestamps = state.restartTimestamps.filter(ts => ts > oneHourAgo);
-}
-
-function writeWorkerHealth(name: string, status: string, pid?: number): void {
-  try {
-    stateStore.set(`worker:${name}`, JSON.stringify({
-      status,
-      pid: pid ?? null,
-      updatedAt: new Date().toISOString(),
-    }));
-  } catch { /* state store write is best-effort */ }
-}
-
-function spawnWorker(state: WorkerState): void {
-  if (state.stopped || shuttingDown) return;
-
-  const { config } = state;
-
-  // tsx is installed at services/node_modules/tsx — set cwd accordingly
-  const child = fork(config.script, [], {
-    execArgv: ['--import', 'tsx/esm'],
-    cwd: resolve(SRC_DIR, '../..'), // services/ dir where node_modules/tsx lives
-    env: {
-      ...process.env,
-      GATEWAY_DB_PATH: DB_PATH,
-    },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-
-  state.process = child;
-  const pid = child.pid ?? 0;
-  log(`${config.name} started (pid ${pid})`);
-  writeWorkerHealth(config.name, 'running', pid);
-
-  // Pipe stdout/stderr with worker name prefix
-  child.stdout?.on('data', (data: Buffer) => {
-    const lines = data.toString().trimEnd().split('\n');
-    for (const line of lines) console.log(`[${config.name}] ${line}`);
-  });
-
-  child.stderr?.on('data', (data: Buffer) => {
-    const lines = data.toString().trimEnd().split('\n');
-    for (const line of lines) console.error(`[${config.name}] ${line}`);
-  });
-
-  // IPC: trade engine forwards trade:closed events to parent for Bayesian learning
-  child.on('message', (msg: any) => {
-    if (msg?.type === 'trade:closed' && msg.payload) {
-      const { ticker, success, returnPct, reason } = msg.payload;
-      eventBus.emit('trade:closed' as any, msg.payload);
-      log(`IPC trade:closed ${ticker} ${success ? 'WIN' : 'LOSS'} (${reason})`);
-    }
-  });
-
-  child.on('exit', (code, signal) => {
-    state.process = null;
-
-    if (state.stopped || shuttingDown) {
-      log(`${config.name} exited (shutdown)`);
-      writeWorkerHealth(config.name, 'stopped');
-      return;
-    }
-
-    log(`${config.name} exited — code=${code} signal=${signal}`);
-    writeWorkerHealth(config.name, 'crashed');
-
-    // Rate-limit restarts
-    pruneOldRestarts(state);
-    if (state.restartTimestamps.length >= config.maxRestarts) {
-      log(`${config.name} exceeded ${config.maxRestarts} restarts/hour — giving up`);
-      writeWorkerHealth(config.name, 'abandoned');
-      return;
-    }
-
-    state.restartTimestamps.push(Date.now());
-    const attempt = state.restartTimestamps.length;
-    const delay = config.restartDelay * Math.min(attempt, 5); // backoff up to 5x
-
-    log(`${config.name} restarting in ${delay}ms (attempt ${attempt}/${config.maxRestarts})`);
-    setTimeout(() => spawnWorker(state), delay);
-  });
-
-  child.on('error', (err) => {
-    log(`${config.name} spawn error: ${err.message}`);
-    writeWorkerHealth(config.name, 'error');
-  });
-}
-
-function waitForWorkerMessage(
-  worker: WorkerState,
-  predicate: (msg: any) => boolean,
-  timeoutMs: number,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const child = worker.process;
-    if (!child) return resolve(false);
-
-    let finished = false;
-    const timer = setTimeout(() => done(false), timeoutMs);
-
-    const onMessage = (msg: any) => {
-      if (predicate(msg)) done(true);
-    };
-
-    const onExit = () => done(false);
-
-    const done = (value: boolean) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      child.off('message', onMessage);
-      child.off('exit', onExit);
-      resolve(value);
-    };
-
-    child.on('message', onMessage);
-    child.once('exit', onExit);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Watchdog — restart stale workers (checks every 60s)
-// ---------------------------------------------------------------------------
-
-setInterval(() => {
-  if (shuttingDown) return;
-  for (const w of workers) {
-    if (w.stopped || !w.process) continue;
-    try {
-      const raw = stateStore?.get(`worker:${w.config.name}`);
-      if (!raw) continue;
-      const status = JSON.parse(raw);
-      const age = Date.now() - new Date(status.updatedAt || 0).getTime();
-      // If worker hasn't updated status in 5 minutes, kill and respawn
-      if (age > 5 * 60_000) {
-        console.log(`[WATCHDOG] ${w.config.name} stale (${Math.round(age/60_000)}m) — killing and respawning`);
-        try { w.process.kill('SIGKILL'); } catch {}
-        // The exit handler will trigger respawn automatically
-      }
-    } catch {}
-  }
-
-  // Also check Ops restart requests
-  try {
-    for (const name of ['trade_engine', 'research_worker']) {
-      const req = stateStore?.get(`restart_request:${name}`);
-      if (req) {
-        const reqAge = Date.now() - new Date(req).getTime();
-        if (reqAge < 5 * 60_000) { // Request is recent (< 5 min old)
-          const workerName = name.replace('_', '-');
-          const w = workers.find(w => w.config.name === workerName);
-          if (w?.process) {
-            console.log(`[WATCHDOG] Restart requested for ${workerName} by Ops — killing`);
-            try { w.process.kill('SIGKILL'); } catch {}
-          }
-        }
-        stateStore?.set(`restart_request:${name}`, ''); // Clear the request
-      }
-    }
-  } catch {}
-}, 60_000);
-
 // ---------------------------------------------------------------------------
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
+let tradeEngine: Awaited<ReturnType<typeof import('./trade-engine.js').start>> | null = null;
+
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  log(`${signal} received — shutting down workers`);
+  log(`${signal} received — shutting down`);
 
-  // Mark all workers as stopped so exit handlers don't restart
-  for (const w of workers) w.stopped = true;
+  // Stop trade engine
+  if (tradeEngine) {
+    try { await tradeEngine.stop(); } catch {}
+  }
 
-  // Send SIGTERM to all live workers
-  const killPromises = workers.map(w => {
-    if (!w.process) return Promise.resolve();
-    return new Promise<void>(resolve => {
-      const child = w.process!;
-      const timeout = setTimeout(() => {
-        log(`${w.config.name} did not exit — sending SIGKILL`);
-        child.kill('SIGKILL');
-        resolve();
-      }, 5000);
-
-      child.on('exit', () => { clearTimeout(timeout); resolve(); });
-      child.kill('SIGTERM');
-    });
-  });
-
-  await Promise.all(killPromises);
+  // Stop research worker
+  try {
+    const { stop: stopResearch } = await import('./research-worker.js');
+    stopResearch();
+  } catch {}
 
   try { stateStore.close(); } catch { /* ignore */ }
   releaseSingletonLock();
-  log('All workers stopped — exiting');
+  log('Shutdown complete');
   process.exit(0);
 }
+
+let stateStore: GatewayStateStore;
 
 // ---------------------------------------------------------------------------
 // Main
@@ -338,7 +126,7 @@ async function shutdown(signal: string): Promise<void> {
 
 async function main(): Promise<void> {
   acquireSingletonLock();
-  log('Gateway V2 starting');
+  log('Gateway V2 starting (single-process mode)');
 
   // 1. Create shared state store
   stateStore = new GatewayStateStore(DB_PATH);
@@ -373,7 +161,7 @@ async function main(): Promise<void> {
     } catch (e: any) { log(`Bayesian seed from Brain failed: ${e.message} — starting fresh`); }
   }
 
-  // Emit intelligence:ready for in-process listeners
+  // Emit intelligence:ready for in-process listeners (research worker picks this up)
   eventBus.emit('intelligence:ready' as any, bayesianIntel);
 
   // Expose Bayesian intel on the status endpoint via config keys
@@ -394,10 +182,6 @@ async function main(): Promise<void> {
     } catch {}
   }, 300_000);
 
-  // STRIPPED 2026-04-10: RVF Engine + Learning Engine. They were instantiated
-  // here and never referenced again anywhere in the codebase. Per Trident →
-  // this functionality is covered by the Brain memory + SONA training loop.
-
   // 2d. Initialize Research Database (PostgreSQL + pgvector) + Research Crons
   let pgAvailable = false;
   try {
@@ -408,7 +192,6 @@ async function main(): Promise<void> {
 
     // Start research crons (Nanobot reintro — clean scheduled tasks)
     try {
-      const { loadCredentials } = await import('./config-bus.js');
       const creds = loadCredentials();
       if (creds.alpaca) {
         const { startResearchCrons } = await import('./research-crons.js');
@@ -427,10 +210,10 @@ async function main(): Promise<void> {
     log(`Research database not available: ${e.message} — running without PG (SQLite fallback)`);
   }
 
-  // 3. Start API server in-process (lightweight, no need for separate process)
+  // 3. Start API server in-process
   await startApiServer(stateStore);
 
-  // 3. Ops (SRE) + OpenClaw (position intelligence coordinator)
+  // 4. Ops (SRE) + OpenClaw (position intelligence coordinator)
   const { Ops } = await import('./managers/ops.js');
   const ops = new Ops(DB_PATH);
   ops.start();
@@ -456,11 +239,9 @@ async function main(): Promise<void> {
         const pnlPct = parseFloat(pos.unrealized_plpc) * 100;
         if (pnlPct <= -2) {
           const ticker = pos.symbol;
-          // Check if we already alerted on this ticker today
           const alertKey = `position_alert_${ticker}_${new Date().toISOString().slice(0, 10)}`;
           if (stateStore.get(alertKey)) continue;
 
-          // Search Yahoo RSS for why this stock is down
           try {
             const searchRes = await fetch(
               `https://query1.finance.yahoo.com/v1/finance/search?q=${ticker}&quotesCount=0&newsCount=3`,
@@ -477,7 +258,6 @@ async function main(): Promise<void> {
             alerts.push(alertMsg);
             stateStore.set(alertKey, alertMsg);
 
-            // Post to Discord
             const webhook = process.env.DISCORD_WEBHOOK_URL;
             if (webhook) {
               await fetch(webhook, {
@@ -488,7 +268,6 @@ async function main(): Promise<void> {
               }).catch(() => {});
             }
 
-            // Record to Trident
             brain.recordRule(`POSITION ALERT: ${alertMsg}`, 'openclaw:position_intel').catch(() => {});
           } catch {}
         }
@@ -506,11 +285,11 @@ async function main(): Promise<void> {
   openClaw.start();
   log('Ops (SRE) + OpenClaw (position intelligence) active.');
 
-  // 4. Start Comms Worker (Discord/Telegram/Slack notifications)
+  // 5. Start Comms Worker (Discord/Telegram/Slack notifications)
   const comms = new CommsWorker(DB_PATH);
   comms.start();
 
-  // 5. Start Discord Bot (two-way conversation)
+  // 6. Discord Bot (two-way conversation)
   if (process.env.DISCORD_BOT_TOKEN) {
     try {
       const { start: startBot } = await import('./discord-bot.js');
@@ -521,77 +300,31 @@ async function main(): Promise<void> {
     }
   }
 
-  // STRIPPED 2026-04-10: Nanobot Bridge + Scheduler removed entirely.
-  // trade_advisor wrote to `advisor_star:*` which trade-engine never read —
-  // it was paying LLM tokens to write into a bucket nothing consumed.
-  // If nanobots are wanted later, they must be wired directly into the
-  // trade-engine candidate pipeline, not to a parallel store key.
-
-  // 7. Spawn worker processes
-  const researchConfig = WORKER_CONFIGS.find((config) => config.name === 'research-worker');
-  const researchState = researchConfig ? {
-    config: researchConfig,
-    process: null,
-    restartTimestamps: [],
-    stopped: false,
-  } as WorkerState : null;
-
-  if (researchConfig && (!researchConfig.optional || existsSync(researchConfig.script)) && researchState) {
-    workers.push(researchState);
-    spawnWorker(researchState);
-    const researchReady = await waitForWorkerMessage(
-      researchState,
-      (msg) => msg?.type === 'research:ready',
-      90_000,
-    );
-    log(`Research worker bootstrap ${researchReady ? 'complete' : 'timed out'} — continuing startup`);
-  } else if (researchConfig) {
-    log(`${researchConfig.name} skipped (${researchConfig.script} not found)`);
-    writeWorkerHealth(researchConfig.name, 'skipped');
+  // ─── 7. Start Research Worker IN-PROCESS ──────────────────────────────────
+  try {
+    const { start: startResearch } = await import('./research-worker.js');
+    await startResearch(stateStore);
+    log('Research worker started (in-process)');
+  } catch (e: any) {
+    log(`Research worker failed: ${e.message} — running without research`);
   }
 
-  for (const config of WORKER_CONFIGS) {
-    if (config.name === 'research-worker') continue;
-    if (config.optional && !existsSync(config.script)) {
-      log(`${config.name} skipped (${config.script} not found)`);
-      writeWorkerHealth(config.name, 'skipped');
-      continue;
-    }
-
-    const state: WorkerState = {
-      config,
-      process: null,
-      restartTimestamps: [],
-      stopped: false,
-    };
-    workers.push(state);
-    spawnWorker(state);
+  // ─── 8. Start Trade Engine IN-PROCESS ─────────────────────────────────────
+  try {
+    const { start: startEngine } = await import('./trade-engine.js');
+    tradeEngine = await startEngine(stateStore);
+    log('Trade engine started (in-process)');
+  } catch (e: any) {
+    log(`Trade engine failed: ${e.message}`);
   }
 
-  // Push initial Bayesian beliefs to trade-engine worker via IPC
-  const sendBeliefsToTradeEngine = () => {
-    const tradeWorker = workers.find(w => w.config.name === 'trade-engine');
-    if (tradeWorker?.process?.connected) {
-      try {
-        tradeWorker.process.send({ type: 'intelligence:beliefs', beliefs: bayesianIntel.serialize() });
-      } catch {}
-    }
-  };
-  // Send after a short delay to let worker initialize
-  setTimeout(sendBeliefsToTradeEngine, 3000);
-
-  // Push updated beliefs to trade-engine on every trade:closed (keeps intelligence fresh)
-  eventBus.on('trade:closed' as any, () => {
-    sendBeliefsToTradeEngine();
-  });
+  // Forex scanner runs as a separate Express server on port 3003.
+  // It's managed independently (systemd or Docker Compose sidecar).
+  // Trade engine proxies to it via HTTP when OANDA creds are missing locally.
+  log('Forex scanner: managed separately (port 3003)');
 
   // ─── Real-Time Market Stream (signal detection) ──────────────────────────
-  // Connects to Alpaca SIP WebSocket, fires alerts on volume spikes,
-  // price breakouts, and re-entry signals. Writes to PG research_signals
-  // for the thesis pipeline to pick up. This is what catches BIRD at $5.84
-  // instead of $10.87.
   try {
-    const { loadCredentials } = await import('./config-bus.js');
     const creds = loadCredentials();
     if (creds.alpaca) {
       const { MarketStream } = await import('./market-stream.js');
@@ -606,37 +339,27 @@ async function main(): Promise<void> {
       // Build watchlist from momentum scanner universe + thesis tickers
       const watchTickers: string[] = [];
       try {
-        // Top tickers from research_stars
         const stars = stateStore.getResearchStars();
         for (const s of stars.slice(0, 200)) watchTickers.push(s.symbol);
-        // Thesis tickers
         if (pgQueryFn) {
           const { rows: thesisTickers } = await pgQueryFn('SELECT DISTINCT symbol FROM research_theses WHERE status = \'active\' LIMIT 50');
           for (const r of thesisTickers) watchTickers.push((r as any).symbol);
         }
       } catch {}
-      // Add broad market ETFs for context
       watchTickers.push('SPY', 'QQQ', 'IWM', 'XLE', 'XLF', 'XLK', 'GLD', 'UVXY');
 
       stream.setWatchlist([...new Set(watchTickers)]);
 
+      // Stream alerts go directly to event bus — no IPC needed
       stream.onAlert((alert) => {
         log(`STREAM ALERT: ${alert.alertType} ${alert.ticker} — ${alert.detail}`);
-
-        // Forward to trade-engine via IPC so it can act on the next heartbeat
-        const tradeEngineWorker = workers.find(w => w.config.name === 'trade-engine');
-        if (tradeEngineWorker?.process?.connected) {
-          tradeEngineWorker.process.send({
-            type: 'stream:alert',
-            alert: {
-              ticker: alert.ticker,
-              alertType: alert.alertType,
-              magnitude: alert.magnitude,
-              currentPrice: alert.currentPrice,
-              detail: alert.detail,
-            },
-          });
-        }
+        eventBus.emit('stream:alert' as any, {
+          ticker: alert.ticker,
+          alertType: alert.alertType,
+          magnitude: alert.magnitude,
+          currentPrice: alert.currentPrice,
+          detail: alert.detail,
+        });
       });
 
       stream.start();
@@ -647,37 +370,25 @@ async function main(): Promise<void> {
   }
 
   // ─── Post-Mortem Analyst (Wave 1) ──────────────────────────────────────
-  // Fires at 4:05 PM ET every weekday. Analyzes today's losing trades and
-  // writes machine-readable risk_rules that the Risk Manager enforces next
-  // trading day. This is the learning loop.
   schedulePostMortem(stateStore);
 
   // ─── Macro Analyst (Wave 2) ────────────────────────────────────────────
-  // Fires at 8:15 AM ET every weekday (pre-market). Classifies market
-  // regime and writes a sizing multiplier to the store. Trade-engine reads
-  // the multiplier before sizing each buy.
   scheduleMacroAnalyst(stateStore);
 
   // ─── Catalyst Hunter (Wave 2) ─────────────────────────────────────────
-  // Fires pre-market (8:30 AM ET), midday (12 PM ET), and afternoon (2 PM ET)
-  // every weekday. Writes catalyst-tagged tickers to research_stars, which
-  // feed the trade-engine buy universe alongside Alpaca movers.
   scheduleCatalystHunter(stateStore);
 
-  // ─── Momentum Scanner (broad-market multi-day screening) ────────────
-  // Scans ~300 tickers across all sectors for 5-day momentum.
-  // Runs pre-market (8:00 AM ET) + every 2 hours during market hours.
+  // ─── Momentum Scanner ────────────────────────────────────────────────
   scheduleMomentumScanner(stateStore);
 
-  // Run ALL analysts immediately on startup if it's a weekday during
-  // business hours — don't wait for cron.
+  // Run ALL analysts immediately on startup if it's a weekday during business hours
   if (isBusinessHoursET()) {
     setTimeout(() => runMacroOnce(stateStore), 2000);
     setTimeout(() => runCatalystOnce(stateStore), 5000);
     setTimeout(() => runMomentumOnce(stateStore), 8000);
   }
 
-  log(`Orchestrator ready — ${workers.length} worker(s) spawned`);
+  log('Orchestrator ready — all components running in-process');
 }
 
 // ─── Wave 2 scheduling helpers ─────────────────────────────────────────
@@ -704,7 +415,6 @@ function msUntilETWeekday(hour: number, minute: number): { ms: number; target: D
 async function runMacroOnce(store: GatewayStateStore): Promise<void> {
   try {
     const { MacroAnalyst } = await import('./analysts/index.js');
-    const { loadCredentials } = await import('./config-bus.js');
     const creds = loadCredentials();
     if (!creds.alpaca) { log('Macro: no Alpaca creds, skip'); return; }
     const analyst = new MacroAnalyst(store);
@@ -722,7 +432,6 @@ async function runMacroOnce(store: GatewayStateStore): Promise<void> {
 async function runCatalystOnce(store: GatewayStateStore): Promise<void> {
   try {
     const { CatalystHunter } = await import('./analysts/index.js');
-    const { loadCredentials } = await import('./config-bus.js');
     const creds = loadCredentials();
     if (!creds.alpaca) { log('Catalyst: no Alpaca creds, skip'); return; }
     const hunter = new CatalystHunter(store);
@@ -752,7 +461,6 @@ function scheduleMacroAnalyst(store: GatewayStateStore): void {
 async function runMomentumOnce(store: GatewayStateStore): Promise<void> {
   try {
     const { scanMomentum, persistMomentumData } = await import('./analysts/index.js');
-    const { loadCredentials } = await import('./config-bus.js');
     const creds = loadCredentials();
     if (!creds.alpaca) { log('Momentum: no Alpaca creds, skip'); return; }
     const headers = {
@@ -761,7 +469,6 @@ async function runMomentumOnce(store: GatewayStateStore): Promise<void> {
     };
     const result = await scanMomentum(headers);
 
-    // Sector map for database classification
     const sectorMap: Record<string, string> = {
       NVDA:'Semis',AMD:'Semis',INTC:'Semis',AVGO:'Semis',TSM:'Semis',ASML:'Semis',MRVL:'Semis',ON:'Semis',
       ALAB:'Semis',KLAC:'Semis',LRCX:'Semis',AMAT:'Semis',MU:'Semis',MPWR:'Semis',SMH:'Semis',WOLF:'Semis',
@@ -783,7 +490,6 @@ async function runMomentumOnce(store: GatewayStateStore): Promise<void> {
       RIVN:'EV',NIO:'EV',PLUG:'EV',BE:'EV',
     };
 
-    // Persist to DATABASE tables + research_stars
     const { snapshots, sectors, stars } = persistMomentumData(store, result, sectorMap);
     log(`Momentum: scanned ${result.scanned} | ${result.strong.length} strong + ${result.moderate.length} moderate | DB: ${snapshots} snapshots, ${sectors} sectors, ${stars} stars`);
     if (result.strong.length > 0) {
@@ -795,7 +501,6 @@ async function runMomentumOnce(store: GatewayStateStore): Promise<void> {
 }
 
 function scheduleMomentumScanner(store: GatewayStateStore): void {
-  // Pre-market (8:00 AM) + every 2 hours during market (10, 12, 2 PM)
   const slots: Array<[number, number, string]> = [
     [8, 0, 'pre-market'],
     [10, 0, 'mid-morning'],
@@ -817,7 +522,6 @@ function scheduleMomentumScanner(store: GatewayStateStore): void {
 }
 
 function scheduleCatalystHunter(store: GatewayStateStore): void {
-  // Three runs per weekday: 8:30 AM, 12:00 PM, 2:00 PM ET.
   const slots: Array<[number, number, string]> = [
     [8, 30, 'pre-market'],
     [12, 0, 'midday'],
@@ -837,20 +541,13 @@ function scheduleCatalystHunter(store: GatewayStateStore): void {
   }
 }
 
-/**
- * Schedules the Post-Mortem analyst to fire at 4:05 PM ET every weekday.
- * Uses a simple setTimeout — not full Nanobot cron — so there's no extra
- * infrastructure dependency. Reschedules itself after each run.
- */
 function schedulePostMortem(store: GatewayStateStore): void {
   const scheduleNext = async () => {
-    // Compute ms until next 4:05 PM ET weekday
     const now = new Date();
     const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
     const target = new Date(et);
     target.setHours(16, 5, 0, 0);
     if (target <= et) target.setDate(target.getDate() + 1);
-    // Skip weekends
     while (target.getDay() === 0 || target.getDay() === 6) {
       target.setDate(target.getDate() + 1);
     }
@@ -868,7 +565,6 @@ function schedulePostMortem(store: GatewayStateStore): void {
       } catch (e: any) {
         log(`Post-Mortem error: ${e.message}`);
       }
-      // Reschedule for tomorrow
       scheduleNext();
     }, offsetMs);
   };

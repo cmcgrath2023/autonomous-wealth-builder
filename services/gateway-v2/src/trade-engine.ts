@@ -25,10 +25,7 @@ import { rsi, sma } from '../../neural-trader/src/indicators.js';
 
 function emitTradeClosed(payload: { ticker: string; success: boolean; returnPct: number; reason: string }) {
   eventBus.emit('trade:closed' as any, payload);
-  if (process.send) process.send({ type: 'trade:closed', payload });
 }
-
-process.on('message', (_msg: any) => {});
 
 async function postToDiscord(text: string): Promise<void> {
   const webhook = process.env.DISCORD_WEBHOOK_URL;
@@ -499,7 +496,7 @@ export class TradeEngine {
     this.store.set('session_sells_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), tickers: [...sells] }));
   }
 
-  constructor() {
+  constructor(sharedStore?: GatewayStateStore) {
     const creds = loadCredentials();
     this.executor = new TradeExecutor({
       apiKey: creds.alpaca?.apiKey || '',
@@ -521,8 +518,12 @@ export class TradeEngine {
         }
       });
     }
-    const dbPath = process.env.GATEWAY_DB_PATH || join(process.cwd(), '..', 'data', 'gateway-state.db');
-    this.store = new GatewayStateStore(dbPath);
+    if (sharedStore) {
+      this.store = sharedStore;
+    } else {
+      const dbPath = process.env.GATEWAY_DB_PATH || join(process.cwd(), '..', 'data', 'gateway-state.db');
+      this.store = new GatewayStateStore(dbPath);
+    }
     console.log(`[TE] RSI-2 Connors | ${SP500_UNIVERSE.length} stocks | $${PER_POSITION}/pos | 5% stop`);
   }
 
@@ -1922,15 +1923,30 @@ export class TradeEngine {
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    try { this.store.close(); } catch {}
     console.log('[TE] Stopped.');
   }
 }
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 
-const engine = new TradeEngine();
-export async function start(): Promise<void> { await engine.start(); }
-process.on('SIGTERM', async () => { await engine.stop(); process.exit(0); });
-process.on('SIGINT', async () => { await engine.stop(); process.exit(0); });
-start().catch((e) => { console.error('[TE] Fatal:', e); process.exit(1); });
+let _engine: TradeEngine | null = null;
+
+export function createTradeEngine(sharedStore?: GatewayStateStore): TradeEngine {
+  _engine = new TradeEngine(sharedStore);
+  return _engine;
+}
+
+export async function start(sharedStore?: GatewayStateStore): Promise<TradeEngine> {
+  const engine = createTradeEngine(sharedStore);
+  await engine.start();
+  return engine;
+}
+
+// Standalone mode: auto-start when run directly as a child process or script
+if (process.argv[1]?.match(/trade-engine\.[tj]s$/)) {
+  const engine = new TradeEngine();
+  const shutdown = async () => { await engine.stop(); process.exit(0); };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  engine.start().catch((e) => { console.error('[TE] Fatal:', e); process.exit(1); });
+}
