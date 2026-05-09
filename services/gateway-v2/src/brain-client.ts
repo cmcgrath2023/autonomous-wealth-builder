@@ -198,17 +198,26 @@ export class BrainClient {
   // NOT the /v1/transfer endpoint (that does domain transfer, not reasoning).
 
   async shouldBuy(ticker: string, percentChange: number, context: string): Promise<{ should: boolean; reason: string }> {
-    // Use getTickerHistory which parses WIN/LOSS from TITLES (reliable)
-    // instead of the old tag-based approach (tags are undefined in search results).
-    // The old code was blocking NVDA (2W/0L) because it found "loss" in
-    // research memory content, while approving BTFL (0W/2L) because tags
-    // were undefined so it fell through to "no trade history."
+    // 1. Check SONA training data for explicit "avoid" flags (owner preferences, blacklist)
+    try {
+      const sonaResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' avoid OR blacklist')}&limit=5`);
+      if (Array.isArray(sonaResults)) {
+        for (const m of sonaResults) {
+          const content = (m.content || m.title || '').toLowerCase();
+          // Match: "DIS: avoid", "WOLF: blacklist", "owner blacklist: DIS"
+          if (content.includes(ticker.toLowerCase()) && (content.includes('avoid') || content.includes('blacklist') || content.includes('do not buy'))) {
+            return { should: false, reason: `${ticker}: SONA flag — ${(m.title || m.content || '').slice(0, 80)}` };
+          }
+        }
+      }
+    } catch {} // SONA unavailable — proceed without
+
+    // 2. Check trade history (WIN/LOSS counts from memory)
     const history = await this.getTickerHistory(ticker);
     const total = history.wins + history.losses;
 
     if (total === 0) {
-      // No trade history at all — allow (new ticker, thesis gate is the real filter)
-      return { should: true, reason: `${ticker}: no trade history — allowing (thesis gate decides)` };
+      return { should: true, reason: `${ticker}: no trade history — allowing` };
     }
 
     // Has history — use it
