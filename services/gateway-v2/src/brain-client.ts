@@ -237,6 +237,22 @@ export class BrainClient {
       return { should: true, reason: `${ticker}: no trade history${qual} — allowing` };
     }
 
+    // Check for data corrections — old engine poisoned some tickers' history
+    if (history.shouldAvoid || (history.wins === 0 && history.losses >= 2)) {
+      try {
+        const correctionResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' CORRECTION')}&limit=3`);
+        if (Array.isArray(correctionResults)) {
+          for (const m of correctionResults) {
+            const content = (m.content || m.title || '').toUpperCase();
+            if (content.includes(ticker.toUpperCase()) && content.includes('CORRECTION')) {
+              // Data is known-poisoned — allow through with warning
+              return { should: true, reason: `${ticker}: ${history.wins}W/${history.losses}L — DATA CORRECTED (old engine noise), allowing${buffettTier ? ` [Buffett ${buffettTier}]` : ''}` };
+            }
+          }
+        }
+      } catch {}
+    }
+
     // Has history — use it
     if (history.shouldAvoid) {
       return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L avg ${(history.avgReturn*100).toFixed(1)}% — AVOID (bad track record)` };
