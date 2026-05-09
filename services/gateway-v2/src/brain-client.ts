@@ -7,10 +7,12 @@
  * Brain API requirements:
  *   POST /v1/memories — { content, category, title, tags, source? }
  *     category must be one of: finance, custom, pattern, solution, etc.
- *   GET  /v1/memories/search?q=...&limit=N — returns array of memories
+ *   GET  /v1/memories/search?q=...&limit=N&domain=X — returns array of memories
  *     Response includes: id, category, title, content, tags (NO metadata)
- *   POST /v1/train — { input, output, metadata? } — SONA learning
+ *     domain param scopes search: avoid, trade_outcome, buffett_core, etc.
+ *   POST /v1/train — { input, output, metadata?, domain? } — SONA learning
  *   POST /v1/transfer — { source_domain, query } — cross-domain reasoning
+ *   GET  /v1/sona/domains — list available domains
  */
 
 const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
@@ -77,6 +79,7 @@ export class BrainClient {
       method: 'POST',
       body: JSON.stringify({
         category: 'finance',
+        domain: 'trade_outcome',
         title: `Trade ${result}: ${ticker} ${direction} $${pnl.toFixed(2)}`,
         content: `TRADE CLOSED: ${ticker} ${direction} | P&L: $${pnl.toFixed(2)} (${(returnPct * 100).toFixed(1)}%) | Reason: ${reason} | ${result} | ${new Date().toISOString()}`,
         tags: ['trade', 'outcome', result.toLowerCase(), ticker.toLowerCase(), reason, direction],
@@ -104,8 +107,8 @@ export class BrainClient {
   // We parse win/loss from tags and content instead.
 
   async getTickerHistory(ticker: string): Promise<{ wins: number; losses: number; avgReturn: number; shouldAvoid: boolean }> {
-    // Search for the exact title format we write: "Trade WIN: TICKER" or "Trade LOSS: TICKER"
-    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent('Trade ' + ticker)}&limit=30`);
+    // Domain-scoped search: trade_outcome returns only WIN/LOSS records, not avoid flags or notes
+    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=trade_outcome&limit=30`);
     if (!results || !Array.isArray(results) || results.length === 0) {
       return { wins: 0, losses: 0, avgReturn: 0, shouldAvoid: false };
     }
@@ -198,24 +201,23 @@ export class BrainClient {
   // NOT the /v1/transfer endpoint (that does domain transfer, not reasoning).
 
   async shouldBuy(ticker: string, percentChange: number, context: string): Promise<{ should: boolean; reason: string }> {
-    // 1. Check SONA training data for explicit "avoid" flags (owner preferences, blacklist)
+    // 1. Check SONA avoid domain — explicit "avoid" flags (owner preferences, blacklist)
     try {
-      const sonaResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' avoid OR blacklist')}&limit=5`);
+      const sonaResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=avoid&limit=5`);
       if (Array.isArray(sonaResults)) {
         for (const m of sonaResults) {
           const content = (m.content || m.title || '').toLowerCase();
-          // Match: "DIS: avoid", "WOLF: blacklist", "owner blacklist: DIS"
-          if (content.includes(ticker.toLowerCase()) && (content.includes('avoid') || content.includes('blacklist') || content.includes('do not buy'))) {
+          if (content.includes(ticker.toLowerCase())) {
             return { should: false, reason: `${ticker}: SONA flag — ${(m.title || m.content || '').slice(0, 80)}` };
           }
         }
       }
     } catch {} // SONA unavailable — proceed without
 
-    // 2. Check Buffett quality — search for core/key holding status
+    // 2. Check Buffett quality — domain-scoped search for core/key holding status
     let buffettTier = '';
     try {
-      const buffettResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent('BUFFETT ' + ticker)}&limit=3`);
+      const buffettResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=buffett_core&limit=3`);
       if (Array.isArray(buffettResults)) {
         for (const m of buffettResults) {
           const content = (m.content || m.title || '').toUpperCase();
@@ -240,7 +242,7 @@ export class BrainClient {
     // Check for data corrections — old engine poisoned some tickers' history
     if (history.shouldAvoid || (history.wins === 0 && history.losses >= 2)) {
       try {
-        const correctionResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' CORRECTION')}&limit=3`);
+        const correctionResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' CORRECTION')}&domain=trade_outcome&limit=3`);
         if (Array.isArray(correctionResults)) {
           for (const m of correctionResults) {
             const content = (m.content || m.title || '').toUpperCase();
