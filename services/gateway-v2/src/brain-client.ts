@@ -107,8 +107,12 @@ export class BrainClient {
   // We parse win/loss from tags and content instead.
 
   async getTickerHistory(ticker: string): Promise<{ wins: number; losses: number; avgReturn: number; shouldAvoid: boolean }> {
-    // Domain-scoped search: trade_outcome returns only WIN/LOSS records, not avoid flags or notes
-    const results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=trade_outcome&limit=30`);
+    // Domain-scoped search: trade_outcome returns only WIN/LOSS records
+    // Falls back to keyword search if domain is empty (migration in progress)
+    let results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=trade_outcome&limit=30`);
+    if (!results || !Array.isArray(results) || results.length === 0) {
+      results = await brainFetch(`/v1/memories/search?q=${encodeURIComponent('Trade ' + ticker)}&limit=30`);
+    }
     if (!results || !Array.isArray(results) || results.length === 0) {
       return { wins: 0, losses: 0, avgReturn: 0, shouldAvoid: false };
     }
@@ -202,22 +206,30 @@ export class BrainClient {
 
   async shouldBuy(ticker: string, percentChange: number, context: string): Promise<{ should: boolean; reason: string }> {
     // 1. Check SONA avoid domain — explicit "avoid" flags (owner preferences, blacklist)
+    // Falls back to keyword search if domain=avoid is empty (migration in progress)
     try {
-      const sonaResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=avoid&limit=5`);
+      let sonaResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=avoid&limit=5`);
+      if (!Array.isArray(sonaResults) || sonaResults.length === 0) {
+        // Fallback: unscoped keyword search until avoid domain is populated
+        sonaResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker + ' avoid OR blacklist')}&limit=5`);
+      }
       if (Array.isArray(sonaResults)) {
         for (const m of sonaResults) {
           const content = (m.content || m.title || '').toLowerCase();
-          if (content.includes(ticker.toLowerCase())) {
+          if (content.includes(ticker.toLowerCase()) && (content.includes('avoid') || content.includes('blacklist') || content.includes('do not buy'))) {
             return { should: false, reason: `${ticker}: SONA flag — ${(m.title || m.content || '').slice(0, 80)}` };
           }
         }
       }
     } catch {} // SONA unavailable — proceed without
 
-    // 2. Check Buffett quality — domain-scoped search for core/key holding status
+    // 2. Check Buffett quality — domain-scoped, falls back to keyword
     let buffettTier = '';
     try {
-      const buffettResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=buffett_core&limit=3`);
+      let buffettResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent(ticker)}&domain=buffett_core&limit=3`);
+      if (!Array.isArray(buffettResults) || buffettResults.length === 0) {
+        buffettResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent('BUFFETT ' + ticker)}&limit=3`);
+      }
       if (Array.isArray(buffettResults)) {
         for (const m of buffettResults) {
           const content = (m.content || m.title || '').toUpperCase();
