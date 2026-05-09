@@ -1,29 +1,55 @@
 # MTWM Trading Strategy Specification
 
-**Version:** 2.0 — RSI-2 + ORB + Inverse ETF
-**Implemented:** 2026-04-22
-**Last Updated:** 2026-05-06
+**Version:** 3.0 — Buffett Quality + RSI-2 Timing + Catalyst Momentum
+**Implemented:** 2026-04-22 (RSI-2), evolved 2026-05-08 (Buffett hybrid)
+**Last Updated:** 2026-05-09
+
+---
+
+## Core Philosophy: Warren Buffett Hybrid
+
+Buy high-quality companies with durable competitive advantages that are showing momentum. Quality first, timing second. Owner's manual picks using this approach produced $1,400 days.
+
+**Primary filter:** Is this a great business? (Buffett quality — moats, cash flow, management)
+**Secondary filter:** Is now a good time to buy? (RSI-2 oversold, catalyst momentum, sector strength)
+**Universe:** S&P 500 stocks only + approved inverse ETFs. No speculative small caps.
+
+### Berkshire Portfolio (Pre-Approved Quality)
+
+These tickers get priority when signals appear — they've passed the Buffett quality test:
+
+| Tier | Tickers | Why |
+|------|---------|-----|
+| Core Holdings | AAPL, AXP, BAC, KO, CVX | Largest Berkshire positions |
+| Key Investments | MCO, OXY, COF, GOOGL, KR | Significant Berkshire holdings |
+| Owner Favorites | NVDA, MSFT, AMZN, META, DVA | Proven winners from manual trading |
+
+### Blacklisted Tickers (Trident SONA Avoid)
+
+| Ticker | Reason |
+|--------|--------|
+| DIS | Slow mover, legacy media, never produces meaningful gains |
+| (more added via Discord `!note` or Trident training) | |
 
 ---
 
 ## Overview
 
-Three complementary strategies running in one engine, each covering a different time window and market condition:
-
 | Strategy | When | What It Does | Edge |
 |----------|------|-------------|------|
-| ORB (Opening Range Breakout) | 9:48 AM ET | Buys controlled gap-ups that break their opening range | 58-62% win rate (Crabel, Fisher) |
-| RSI-2 Long (Connors) | 3:50 PM ET | Buys oversold S&P 500 stocks in uptrends | 65-73% win rate (Connors, Alvarez) |
-| RSI-2 Short | 3:50 PM ET | Shorts overbought stocks in downtrends | 55-65% win rate (Connors) |
-| Inverse ETF (Regime) | 3:50 PM ET | Buys SQQQ/SH when SPY < 20-day SMA | Documented regime filter (Faber) |
-
-**Universe:** All ~498 S&P 500 stocks + approved inverse ETFs (SQQQ, SH, SPXS, SDOW, TZA, TSDD, TSLQ, FAZ, SDS, PSQ, DOG, RWM)
+| Morning Prep | 8:00 AM ET | Merges last night RSI-2 + research catalysts + pre-market snapshots | Catches gap-ups at open |
+| ORB | 9:48 AM ET | Buys controlled gap-ups that break opening range | 58-62% (Crabel, Fisher) |
+| Catalyst Buys | 10:00 AM-3:30 PM | Buys high-score research stars moving up today (S&P 500 only) | Research-backed momentum |
+| RSI-2 Long | 3:50 PM ET | Buys oversold S&P 500 stocks in uptrends | 65-73% (Connors) |
+| RSI-2 Short | 3:50 PM ET | Shorts extreme overbought (>96) below SMA200 | 55-65%, max 1 |
+| Inverse ETF | 3:50 PM ET | Buys SQQQ/SH when SPY < 20-day SMA | Regime filter (Faber) |
+| Mover Capture | 3:55 PM ET | Records top 14 S&P 500 winners/losers for analytics | Predictive data |
 
 **Position Sizing:** $10K per position, 5 positions max, $50K total budget
 
-**Protection:** AWB uses a layered protection stack. The heartbeat has a `$100` unrealized-loss stop when the engine is running. Broker-side Alpaca stops remain as disaster protection when AWB is down, delayed, sleeping, or unable to submit an exit.
+**Protection:** $100 heartbeat stop loss + $500 sell-half take-profit + 5% broker-side disaster stop. No shorts overnight. No new buys after 3:30 PM.
 
-**2026-05-06 Strategy Lockdown:** Active equity entries are restricted to the documented ORB, RSI-2, and inverse-regime paths. Premarket momentum buys, priority-watchlist momentum buys, catalyst buys, morning RSI-2 buys, and intraday sector-inverse buys are disabled in code behind explicit feature flags until each has a separate spec, evidence base, and risk model.
+**Trident Gate:** Every buy checked against SONA (avoid flags, owner preferences, trade history). Trident records every outcome for continuous learning via SONA + NOVA.
 
 ---
 
