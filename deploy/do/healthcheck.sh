@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-API="http://127.0.0.1:3001/api/system/status"
+API="http://127.0.0.1:3001/api/status"
 DISCORD_WEBHOOK="${DISCORD_WEBHOOK_URL:-}"
 
 check() {
