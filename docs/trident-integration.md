@@ -9,24 +9,28 @@ AWB uses [Trident](https://trident.cetaceanlabs.com) as its external intelligenc
 ```
 AWB (trade engine, research worker, Ops)
   │
-  ├── POST /v1/train          → SONA training (trade outcomes, preferences)
-  ├── POST /v1/memories        → Memory storage (trade records, catalysts, alerts)
-  ├── GET  /v1/memories/search → Decision queries (shouldBuy, ticker history)
-  ├── POST /v1/nova/train      → NOVA reinforcement (daily summaries)
-  ├── GET  /v1/nova/gaps       → Knowledge gap detection
-  ├── GET  /v1/nova/stats      → Learning metrics
-  └── GET  /v1/health          → System health check
+  ├── POST /v1/memories                          → Memory storage (domain-tagged)
+  ├── GET  /v1/memories/search?q=X&domain=Y      → Domain-scoped queries
+  ├── GET  /v1/sona/domains                      → List available domains
+  ├── POST /v1/train          {domain:"..."}     → SONA training (per-domain)
+  ├── POST /v1/nova/train     {domain:"..."}     → NOVA reinforcement
+  ├── GET  /v1/nova/gaps                         → Knowledge gap detection
+  ├── GET  /v1/nova/stats                        → Learning metrics
+  └── GET  /v1/health                            → System health check
 ```
 
 ## Data Flow
 
-### 1. Before Every Buy: SONA Check
+### 1. Before Every Buy: Domain-Scoped SONA Check
 ```
 Engine calls brain.shouldBuy(ticker)
-  → Searches Trident for "ticker avoid/blacklist" memories
-  → If found: BLOCK (e.g., DIS → "SONA flag — AVOID: owner blacklist")
-  → If not: Check WIN/LOSS trade history
-  → If bad track record (0W/2L+, <35% win rate): BLOCK
+  → GET /v1/memories/search?q=TICKER&domain=avoid
+    → If found: BLOCK (e.g., DIS → "SONA flag — AVOID: owner blacklist")
+  → GET /v1/memories/search?q=TICKER&domain=buffett_core
+    → Detect tier: core, key, owner_favorite (relaxes win-rate thresholds)
+  → GET /v1/memories/search?q=TICKER&domain=trade_outcome
+    → Parse WIN/LOSS history, check for CORRECTION flags
+    → If bad track record (0W/2L+, <35% win rate): BLOCK
   → Otherwise: ALLOW
 ```
 
@@ -76,20 +80,23 @@ Owner types: !note MCHP was our best RSI-2 pick
   → SONA learns from owner context
 ```
 
-## SONA Data Categories
+## SONA Domains (live on Trident prod)
 
-| Category | Example | Used By |
-|----------|---------|---------|
-| `buffett_core` | AAPL: largest Berkshire holding | shouldBuy() priority |
-| `buffett_key` | OXY: significant energy position | shouldBuy() priority |
+Domains scope search results — `GET /v1/memories/search?q=TICKER&domain=X` returns only records in that domain.
+
+| Domain | Example | AWB Usage |
+|--------|---------|-----------|
+| `avoid` | DIS: slow mover, do not buy | shouldBuy() block — first check |
+| `buffett_core` | AAPL: largest Berkshire holding | shouldBuy() tier detection — relaxes thresholds |
+| `trade_outcome` | Trade WIN: NVDA long $397.70 | getTickerHistory() — WIN/LOSS counts, avg return |
 | `owner_preference` | Owner buys strong momentum stocks | Strategy selection |
-| `avoid` / `blacklist` | DIS: slow mover, do not buy | shouldBuy() block |
-| `trade_outcome` | MCHP: +$1100, RSI-2 pick, 4-day hold | Per-ticker learning |
 | `daily_learning` | 2026-05-08: +$1400, datacenter picks | Day pattern learning |
 | `market_data` | S&P 500 movers 2026-05-08 | Predictive analytics |
 | `strategy_knowledge` | RSI-2: buy when RSI(2)<10, above SMA200 | Strategy reference |
 | `lesson_loss` | Buying top movers had 30% win rate | Anti-pattern detection |
 | `sector_knowledge` | AI/Datacenter leaders: NVDA, MSFT, AMZN | Sector identification |
+
+Use `GET /v1/sona/domains` to list all available domains.
 
 ## Authentication
 
