@@ -1015,41 +1015,22 @@ export class TradeEngine {
     const totalDeployed = equityPos.reduce((s, p) => s + Math.abs(p.marketValue), 0);
 
     // Clean stale stop_order keys for positions we no longer hold.
-    // If we sold a position but the stop key remains, it blocks future stop placement.
     const heldTickers = new Set(equityPos.map(p => p.ticker));
     try {
       const trackedRaw = this.store.get('stop_order_tickers') || '[]';
       const tracked: string[] = JSON.parse(trackedRaw);
-      const credsForStopCleanup = loadCredentials();
+      const cleaned: string[] = [];
       for (const sym of tracked) {
         if (!heldTickers.has(sym) && this.store.get(`stop_order_${sym}`)) {
-          if (credsForStopCleanup.alpaca) {
-            try {
-              const headers = {
-                'APCA-API-KEY-ID': credsForStopCleanup.alpaca.apiKey,
-                'APCA-API-SECRET-KEY': credsForStopCleanup.alpaca.apiSecret,
-              };
-              const ordersRes = await fetch(`${credsForStopCleanup.alpaca.baseUrl}/v2/orders?status=open&symbols=${sym}`, {
-                headers,
-                signal: AbortSignal.timeout(5000),
-              });
-              if (ordersRes.ok) {
-                const orders = await ordersRes.json() as any[];
-                for (const o of orders) {
-                  if ((o.side === 'sell' || o.side === 'buy') && o.type === 'stop') {
-                    await fetch(`${credsForStopCleanup.alpaca.baseUrl}/v2/orders/${o.id}`, {
-                      method: 'DELETE',
-                      headers,
-                      signal: AbortSignal.timeout(5000),
-                    }).catch(() => {});
-                  }
-                }
-              }
-            } catch {}
-          }
           this.store.set(`stop_order_${sym}`, '');
-          console.log(`  [STOP CLEANUP] Removed stale stop key for ${sym}`);
+          cleaned.push(sym);
         }
+      }
+      // Update tracked list to only held tickers
+      if (cleaned.length > 0) {
+        const remaining = tracked.filter(t => heldTickers.has(t));
+        this.store.set('stop_order_tickers', JSON.stringify(remaining));
+        console.log(`  [STOP CLEANUP] Cleared ${cleaned.length} stale keys: ${cleaned.join(', ')}`);
       }
     } catch {}
 
