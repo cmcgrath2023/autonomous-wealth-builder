@@ -56,12 +56,9 @@ interface WorkerState {
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);
 
-// research-worker: fundamental/catalyst research layer. Scans RSS feeds,
-// analyzes sectors, writes catalyst-backed candidates to the store. These
-// candidates are MERGED with Alpaca movers to form the universe that
-// NeuralTrader evaluates — research-worker widens the candidate pool with
-// news/catalyst context, it does NOT replace NeuralTrader as the signal
-// authority.
+// research-worker: scans RSS feeds (Yahoo, Bloomberg, CNBC), analyzes sectors,
+// writes catalyst-backed research stars to the store. Trade engine reads these
+// for the morning prep pipeline and catalyst buy path.
 const WORKER_CONFIGS: WorkerConfig[] = [
   { name: 'trade-engine',    script: resolve(SRC_DIR, 'trade-engine.ts'),    restartDelay: 5000,  maxRestarts: 10, optional: false },
   { name: 'data-feed',       script: resolve(SRC_DIR, 'data-feed.ts'),       restartDelay: 3000,  maxRestarts: 20, optional: true },

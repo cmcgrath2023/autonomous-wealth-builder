@@ -1053,38 +1053,6 @@ export class TradeEngine {
       }
     } catch {}
 
-    // Retrofit stops DISABLED — stop orders block manual selling on Alpaca.
-    // Stops are placed at buy time only. No retroactive placement.
-    const RETROFIT_DISABLED = true;
-    for (const pos of equityPos) {
-      if (RETROFIT_DISABLED) break;
-      const stopKey = `stop_order_${pos.ticker}`;
-      const isSystemBought = this.store.isSystemBought(pos.ticker) || this._recentBuys.has(pos.ticker);
-      if (!this.store.get(stopKey) && pos.avgPrice > 0 && isSystemBought) {
-        const stopPrice = Math.round(pos.avgPrice * (1 - STOP_PCT) * 100) / 100;
-        console.log(`  [RETROFIT SL] ${pos.ticker} — no broker stop found, placing @$${stopPrice.toFixed(2)}`);
-        const creds2 = loadCredentials();
-        if (creds2.alpaca) {
-          try {
-            const slRes = await fetch(`${creds2.alpaca.baseUrl}/v2/orders`, {
-              method: 'POST',
-              headers: { 'APCA-API-KEY-ID': creds2.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds2.alpaca.apiSecret, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ symbol: pos.ticker, qty: String(Math.abs(pos.shares)), side: 'sell', type: 'stop', stop_price: String(stopPrice), time_in_force: 'gtc' }),
-              signal: AbortSignal.timeout(10_000),
-            });
-            if (slRes.ok) {
-              const slOrder = await slRes.json() as any;
-              this.store.set(stopKey, JSON.stringify({ symbol: pos.ticker, qty: Math.abs(pos.shares), stopPrice, orderId: slOrder.id, placedAt: new Date().toISOString(), retrofit: true }));
-              this._trackStopTicker(pos.ticker);
-              console.log(`  [RETROFIT SL] ${pos.ticker} stop @$${stopPrice.toFixed(2)} — ${slOrder.status}`);
-            } else {
-              console.log(`  [RETROFIT SL] FAILED ${pos.ticker}: ${slRes.status} ${(await slRes.text()).slice(0, 80)}`);
-            }
-          } catch (e: any) { console.log(`  [RETROFIT SL] ERROR ${pos.ticker}: ${e.message}`); }
-        }
-      }
-    }
-
     // Detect manual sells: if a position we knew about is now gone, add to session sells
     // This prevents the engine from rebuying something you manually sold
     try {
@@ -1583,51 +1551,7 @@ export class TradeEngine {
         }
       } catch {}
 
-      // CATALYST SHORTS — DISABLED. Only RSI-2 extreme shorts (>96) and inverse ETFs.
-      // Individual catalyst shorts were net losers. Use ERY/SOXS/SQQQ for sector shorts.
-      if (false) { // disabled
-      try {
-        const shortStars = this.store.getResearchStars();
-        const shortHeld = new Set(equityPos.map(p => p.ticker));
-        const freshPos2 = await this.executor.getPositions();
-        let shortSlots = MAX_POSITIONS - freshPos2.filter(p => !isCrypto(p.ticker)).length;
-
-        const shortCandidates = shortStars
-          .filter((s: any) => !shortHeld.has(s.symbol))
-          .filter((s: any) => !this._sessionSells.has(s.symbol))
-          .filter((s: any) => !this._recentBuys.has(s.symbol))
-          .filter((s: any) => {
-            const cat = (s.catalyst || '').toLowerCase();
-            return cat.includes('loser') || cat.includes('miss') || cat.includes('downgrade') ||
-                   cat.includes('cut') || cat.includes('warning') || cat.includes('rsi2_candidate');
-          });
-
-        for (const star of shortCandidates.slice(0, shortSlots)) {
-          if (shortSlots <= 0) break;
-          try {
-            const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${star.symbol}&feed=iex`, {
-              headers: alpacaHeaders, signal: AbortSignal.timeout(5000),
-            });
-            if (!snapRes.ok) continue;
-            const snapData = await snapRes.json() as any;
-            const snap = snapData[star.symbol];
-            if (!snap) continue;
-            const price = snap.latestTrade?.p;
-            const prevClose = snap.prevDailyBar?.c;
-            if (!price || !prevClose || price < 10) continue;
-            const dayChange = ((price - prevClose) / prevClose) * 100;
-
-            // Must be down 3%+ today — confirms the catalyst is driving price down
-            if (dayChange < -3.0) {
-              console.log(`  [CATALYST SHORT] ${star.symbol} ${dayChange.toFixed(1)}% today | ${star.catalyst?.slice(0, 60)}`);
-              const shorted = await this.shortPosition(star.symbol, price, `CATALYST ${dayChange.toFixed(1)}% ${star.catalyst?.slice(0, 30)}`);
-              if (shorted) shortSlots--;
-            }
-          } catch {}
-        }
-      } catch {}
     }
-    } // end disabled catalyst shorts
 
     // ── 5d. MORNING RSI-2 EXECUTION — rescan at 10:15 AM ──
 
