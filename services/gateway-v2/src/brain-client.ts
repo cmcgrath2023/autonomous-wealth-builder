@@ -212,12 +212,29 @@ export class BrainClient {
       }
     } catch {} // SONA unavailable — proceed without
 
-    // 2. Check trade history (WIN/LOSS counts from memory)
+    // 2. Check Buffett quality — search for core/key holding status
+    let buffettTier = '';
+    try {
+      const buffettResults = await brainFetch(`/v1/memories/search?q=${encodeURIComponent('BUFFETT ' + ticker)}&limit=3`);
+      if (Array.isArray(buffettResults)) {
+        for (const m of buffettResults) {
+          const content = (m.content || m.title || '').toUpperCase();
+          if (content.includes(ticker.toUpperCase())) {
+            if (content.includes('CORE HOLDING')) buffettTier = 'core';
+            else if (content.includes('KEY INVESTMENT')) buffettTier = 'key';
+            else if (content.includes('OWNER FAVOR') || content.includes('OWNER PREFER')) buffettTier = 'owner_favorite';
+          }
+        }
+      }
+    } catch {}
+
+    // 3. Check trade history (WIN/LOSS counts from memory)
     const history = await this.getTickerHistory(ticker);
     const total = history.wins + history.losses;
 
     if (total === 0) {
-      return { should: true, reason: `${ticker}: no trade history — allowing` };
+      const qual = buffettTier ? ` [Buffett ${buffettTier}]` : '';
+      return { should: true, reason: `${ticker}: no trade history${qual} — allowing` };
     }
 
     // Has history — use it
@@ -232,17 +249,24 @@ export class BrainClient {
       return { should: false, reason: `${ticker}: 0W/${history.losses}L — known loser, blocking` };
     }
 
-    // Reject: <35% win rate with 2+ trades
-    if (total >= 2 && winRate < 0.35) {
-      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) — reject (below 35%)` };
+    // Buffett-quality stocks get more lenient thresholds — these are proven businesses
+    // that may have short-term losses but are fundamentally sound
+    const isBuffett = !!buffettTier;
+    const minWinRate2 = isBuffett ? 0.25 : 0.35;  // Buffett stocks: 25% vs normal 35%
+    const minWinRate4 = isBuffett ? 0.35 : 0.50;  // Buffett stocks: 35% vs normal 50%
+
+    // Reject: <35% win rate with 2+ trades (25% for Buffett)
+    if (total >= 2 && winRate < minWinRate2) {
+      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) — reject (below ${(minWinRate2*100).toFixed(0)}%${isBuffett ? ' Buffett' : ''})` };
     }
 
-    // Reject: <50% with 4+ trades
-    if (total >= 4 && winRate < 0.50) {
-      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) — reject (below 50% with ${total} trades)` };
+    // Reject: <50% with 4+ trades (35% for Buffett)
+    if (total >= 4 && winRate < minWinRate4) {
+      return { should: false, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) — reject (below ${(minWinRate4*100).toFixed(0)}% with ${total} trades${isBuffett ? ' Buffett' : ''})` };
     }
 
-    return { should: true, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) avg ${(history.avgReturn*100).toFixed(1)}% — approved` };
+    const qual = buffettTier ? ` [Buffett ${buffettTier}]` : '';
+    return { should: true, reason: `${ticker}: ${history.wins}W/${history.losses}L (${(winRate*100).toFixed(0)}%) avg ${(history.avgReturn*100).toFixed(1)}%${qual} — approved` };
   }
 
   // ── Reasoning — should we sell this position? ─────────────────
