@@ -1154,8 +1154,10 @@ export class TradeEngine {
 
         if (tookProfitToday.length > 0) {
           // Find the best performing held position by unrealized P&L %
+          // Exclude tickers we just sold (wash trade protection — Alpaca blocks same-day sell+buy)
+          const soldToday = new Set(tookProfitToday.map(p => p.ticker));
           const bestPerformer = [...equityPos]
-            .filter(p => p.unrealizedPnlPercent > 2) // must be solidly green
+            .filter(p => p.unrealizedPnlPercent > 2 && !soldToday.has(p.ticker))
             .sort((a, b) => b.unrealizedPnlPercent - a.unrealizedPnlPercent)[0];
 
           if (bestPerformer) {
