@@ -1180,9 +1180,12 @@ export class TradeEngine {
                   if (addRes.ok) {
                     this.store.set(reinvestKey, `${bestPerformer.ticker}:${addQty}:${new Date().toISOString()}`);
                     this._trackBuy(bestPerformer.ticker, bestPerformer.currentPrice, addQty);
+                    console.log(`  [REINVEST] ${bestPerformer.ticker} — bought ${addQty} shares`);
                     await postToDiscord(`REINVEST: +${addQty} ${bestPerformer.ticker} (+${bestPerformer.unrealizedPnlPercent.toFixed(1)}%) — concentrating on strength`);
                   } else {
-                    console.error(`  [REINVEST FAILED] ${bestPerformer.ticker}: ${addRes.status}`);
+                    const errBody = await addRes.text().catch(() => '');
+                    console.error(`  [REINVEST FAILED] ${bestPerformer.ticker}: ${addRes.status} ${errBody.slice(0, 150)}`);
+                    this.store.set(reinvestKey, `failed:${new Date().toISOString()}`);
                   }
                 }
               }
