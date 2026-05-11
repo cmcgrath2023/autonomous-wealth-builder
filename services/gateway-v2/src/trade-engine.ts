@@ -43,7 +43,7 @@ async function postToDiscord(text: string): Promise<void> {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const HEARTBEAT_MS = 120_000;        // 2 min — monitors positions, exits, forex
-const MAX_POSITIONS = 5;              // Recovery spec: max 5 concentrated positions
+const MAX_POSITIONS = 8;              // Increased from 5 — more room to concentrate on winners
 const PER_POSITION = 10_000;          // Recovery spec: $10K per documented strategy slot
 const BUDGET_MAX = 50_000;            // Recovery spec: $50K total deployed cap
 
