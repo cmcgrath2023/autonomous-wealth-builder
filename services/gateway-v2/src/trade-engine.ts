@@ -1139,41 +1139,66 @@ export class TradeEngine {
     } // end take-profit market hours gate
 
     // ── 4b2. REINVEST IN WINNERS — after take-profit frees capital ────────
-    // When take-profit sells half, use the freed capital + slot to buy
-    // a new high-conviction pick. Can't add to existing positions due to
-    // Alpaca wash trade + complex order restrictions on positions with stops.
-    // Uses buyPosition() which runs the full Trident gate + budget check.
+    // After take-profit sells half, reinvest freed capital into the best
+    // performing held position. Cancel stops → buy → re-place stops.
+    // Excludes tickers sold today (Alpaca wash trade protection).
     if (mkt.isMarketOpen && mkt.etHour >= 10 && mkt.etHour < 15) {
       const reinvestKey = `reinvested_${today}`;
-      if (!this.store.get(reinvestKey) && equityPos.length < MAX_POSITIONS) {
-        // Only reinvest if take-profit freed a slot today
-        const tookProfitToday = equityPos.some(p => {
+      if (!this.store.get(reinvestKey)) {
+        const tookProfitToday = equityPos.filter(p => {
           const tpKey = `took_profit_${p.ticker}_${today}`;
           const val = this.store.get(tpKey);
           return val && !val.startsWith('failed') && !val.startsWith('error');
         });
 
-        if (tookProfitToday) {
-          // Pick best candidate from research stars or morning prep (not already held)
-          const candidates: Array<{ symbol: string; score: number }> = [];
-          try {
-            const stars = this.store.getResearchStars();
-            for (const s of stars) {
-              if (!heldTickers.has(s.symbol) && new Set(SP500_UNIVERSE).has(s.symbol)) {
-                candidates.push({ symbol: s.symbol, score: s.score || 0 });
-              }
-            }
-          } catch {}
-          candidates.sort((a, b) => b.score - a.score);
+        if (tookProfitToday.length > 0) {
+          const soldToday = new Set(tookProfitToday.map(p => p.ticker));
+          const bestPerformer = [...equityPos]
+            .filter(p => p.unrealizedPnlPercent > 2 && !soldToday.has(p.ticker))
+            .sort((a, b) => b.unrealizedPnlPercent - a.unrealizedPnlPercent)[0];
 
-          if (candidates.length > 0) {
-            const pick = candidates[0];
-            console.log(`  [REINVEST] Freed slot → buying ${pick.symbol} (score: ${pick.score.toFixed(2)}) from research stars`);
-            const bought = await this.buyPosition(pick.symbol, pick.score, `reinvest:freed_slot`);
-            if (bought) {
-              this.store.set(reinvestKey, `${pick.symbol}:${new Date().toISOString()}`);
-            } else {
-              this.store.set(reinvestKey, `failed:${pick.symbol}:${new Date().toISOString()}`);
+          if (bestPerformer) {
+            const currentDeployed = equityPos.reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const available = BUDGET_MAX - currentDeployed;
+            const reinvestAmount = Math.min(available, PER_POSITION / 2);
+
+            if (reinvestAmount >= 1000) {
+              const addQty = Math.floor(reinvestAmount / bestPerformer.currentPrice);
+              if (addQty > 0) {
+                const creds4 = loadCredentials();
+                if (creds4.alpaca) {
+                  const hdr = { 'APCA-API-KEY-ID': creds4.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds4.alpaca.apiSecret };
+                  try {
+                    // Cancel stops → buy → re-place stops (same pattern as take-profit)
+                    await this.cancelOpenStopOrders(bestPerformer.ticker, hdr, creds4.alpaca.baseUrl, 'sell');
+                    console.log(`  [REINVEST] Adding ${addQty} ${bestPerformer.ticker} (+${bestPerformer.unrealizedPnlPercent.toFixed(1)}%) — $${(addQty * bestPerformer.currentPrice).toFixed(0)}`);
+                    const addRes = await fetch(`${creds4.alpaca.baseUrl}/v2/orders`, {
+                      method: 'POST',
+                      headers: { ...hdr, 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ symbol: bestPerformer.ticker, qty: String(addQty), side: 'buy', type: 'market', time_in_force: 'day' }),
+                      signal: AbortSignal.timeout(10_000),
+                    });
+                    if (addRes.ok) {
+                      this.store.set(reinvestKey, `${bestPerformer.ticker}:${addQty}:${new Date().toISOString()}`);
+                      this._trackBuy(bestPerformer.ticker, bestPerformer.currentPrice, addQty);
+                      console.log(`  [REINVEST] ${bestPerformer.ticker} — bought ${addQty} shares`);
+                      // Re-place stop for entire position (old + new shares)
+                      const totalQty = Math.abs(bestPerformer.shares) + addQty;
+                      await this.placeProtectiveStop(bestPerformer.ticker, totalQty, 'sell', bestPerformer.avgPrice * (1 - STOP_PCT), 'reinvest_stop');
+                      await postToDiscord(`REINVEST: +${addQty} ${bestPerformer.ticker} (+${bestPerformer.unrealizedPnlPercent.toFixed(1)}%) — concentrating on strength`);
+                    } else {
+                      const errBody = await addRes.text().catch(() => '');
+                      console.error(`  [REINVEST FAILED] ${bestPerformer.ticker}: ${addRes.status} ${errBody.slice(0, 150)}`);
+                      // Re-place the stop we cancelled even if buy failed
+                      await this.placeProtectiveStop(bestPerformer.ticker, Math.abs(bestPerformer.shares), 'sell', bestPerformer.avgPrice * (1 - STOP_PCT), 'reinvest_restore');
+                      this.store.set(reinvestKey, `failed:${new Date().toISOString()}`);
+                    }
+                  } catch (e: any) {
+                    console.error(`  [REINVEST ERROR] ${bestPerformer.ticker}: ${e.message}`);
+                    this.store.set(reinvestKey, `error:${new Date().toISOString()}`);
+                  }
+                }
+              }
             }
           }
         }
