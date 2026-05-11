@@ -1078,13 +1078,16 @@ export class TradeEngine {
       if (pos.unrealizedPnl >= HALF_PROFIT_TRIGGER && !this.store.get(tpKey)) {
         const halfQty = Math.floor(Math.abs(pos.shares) / 2);
         if (halfQty > 0) {
-          console.log(`  [TAKE PROFIT] ${pos.ticker} +$${pos.unrealizedPnl.toFixed(0)} — selling HALF (${halfQty} of ${Math.abs(pos.shares)}), rest rides with $100 stop`);
           const creds3 = loadCredentials();
           if (creds3.alpaca) {
             try {
+              const tpHeaders = { 'APCA-API-KEY-ID': creds3.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds3.alpaca.apiSecret };
+              // Cancel protective stops FIRST — shares are held_for_orders until stops are cancelled
+              await this.cancelOpenStopOrders(pos.ticker, tpHeaders, creds3.alpaca.baseUrl, 'sell');
+              console.log(`  [TAKE PROFIT] ${pos.ticker} +$${pos.unrealizedPnl.toFixed(0)} — selling HALF (${halfQty} of ${Math.abs(pos.shares)}), rest rides with $100 stop`);
               const tpRes = await fetch(`${creds3.alpaca.baseUrl}/v2/orders`, {
                 method: 'POST',
-                headers: { 'APCA-API-KEY-ID': creds3.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds3.alpaca.apiSecret, 'Content-Type': 'application/json' },
+                headers: { ...tpHeaders, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ symbol: pos.ticker, qty: String(halfQty), side: 'sell', type: 'market', time_in_force: 'day' }),
                 signal: AbortSignal.timeout(10_000),
               });
@@ -1107,11 +1110,8 @@ export class TradeEngine {
                   source: 'engine_take_profit',
                   orderId,
                 });
+                // Re-place stop for remaining shares
                 const remainingQty = Math.abs(pos.shares) - halfQty;
-                await this.cancelOpenStopOrders(pos.ticker, {
-                  'APCA-API-KEY-ID': creds3.alpaca.apiKey,
-                  'APCA-API-SECRET-KEY': creds3.alpaca.apiSecret,
-                }, creds3.alpaca.baseUrl, 'sell');
                 if (remainingQty > 0) {
                   await this.placeProtectiveStop(
                     pos.ticker,
@@ -1121,9 +1121,17 @@ export class TradeEngine {
                     'take_profit_resize',
                   );
                 }
-                await postToDiscord(`💰 TAKE PROFIT: sold half of ${pos.ticker} (+$${pos.unrealizedPnl.toFixed(0)}) — ${halfQty} shares, rest rides`);
+                await postToDiscord(`TAKE PROFIT: sold half of ${pos.ticker} (+$${pos.unrealizedPnl.toFixed(0)}) — ${halfQty} shares, rest rides`);
+              } else {
+                const errBody = await tpRes.text().catch(() => '');
+                console.error(`  [TAKE PROFIT FAILED] ${pos.ticker}: ${tpRes.status} ${errBody.slice(0, 100)}`);
+                // Mark as attempted so we don't spam retries — will retry next day
+                this.store.set(tpKey, `failed:${new Date().toISOString()}`);
               }
-            } catch {}
+            } catch (e: any) {
+              console.error(`  [TAKE PROFIT ERROR] ${pos.ticker}: ${e.message}`);
+              this.store.set(tpKey, `error:${new Date().toISOString()}`);
+            }
           }
         }
       }
