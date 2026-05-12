@@ -59,7 +59,11 @@ const ENABLE_MORNING_RSI2_BUYS = true;               // RE-ENABLED: RSI-2 scan a
 const ENABLE_MORNING_PREP = true;                    // NEW: 8 AM unified prep — merges last night's RSI-2 + research catalysts
 
 // Core holdings — buy and hold, engine NEVER sells these
-const CORE_HOLDINGS = new Set<string>(); // Empty — no permanent holds until system proves itself
+const CORE_HOLDINGS = new Set<string>(['AMZN', 'NVDA']); // Owner long-term holds — engine NEVER sells these
+const WATCHLIST_REBUY = new Map<string, number>([ // Ticker → max rebuy price — alert when price drops to this level
+  ['AMD', 420],   // Sold at $437 — rebuy on meaningful dip
+  ['NFLX', 85],   // FANG stock — rebuy if it dips back
+]);
 const DAILY_LOSS_LIMIT = -5_000;     // Raised — broker stops are the real protection now. CB was blocking all trading.
 const STOP_PCT = 0.05;               // 5% broker-side disaster stop
 const DOLLAR_STOP_LOSS = 100;         // Primary active stop when heartbeat is running
@@ -1062,6 +1066,33 @@ export class TradeEngine {
       console.log(`  [AUTO-STOP ERR] ${e.message}`);
     }
 
+    // ── 3c. WATCHLIST REBUY ALERTS — monitor sold stocks for re-entry ────
+    if (WATCHLIST_REBUY.size > 0) {
+      try {
+        const watchSyms = [...WATCHLIST_REBUY.keys()].filter(s => !heldTickers.has(s)).join(',');
+        if (watchSyms) {
+          const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${watchSyms}&feed=iex`, {
+            headers: (() => { const c = loadCredentials(); return { 'APCA-API-KEY-ID': c.alpaca?.apiKey || '', 'APCA-API-SECRET-KEY': c.alpaca?.apiSecret || '' }; })(),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (snapRes.ok) {
+            const snaps = await snapRes.json() as any;
+            const alertKey = `watchlist_alert_${today}`;
+            const alerted = new Set((this.store.get(alertKey) || '').split(',').filter(Boolean));
+            for (const [sym, maxPrice] of WATCHLIST_REBUY) {
+              const price = snaps[sym]?.latestTrade?.p;
+              if (price && price <= maxPrice && !alerted.has(sym)) {
+                console.log(`  [WATCH] ${sym} hit rebuy zone: $${price.toFixed(2)} <= $${maxPrice.toFixed(2)}`);
+                await postToDiscord(`👀 WATCHLIST: ${sym} at $${price.toFixed(2)} — below rebuy target $${maxPrice.toFixed(2)}`);
+                alerted.add(sym);
+                this.store.set(alertKey, [...alerted].join(','));
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
     // Detect manual sells: if a position we knew about is now gone, add to session sells
     // This prevents the engine from rebuying something you manually sold
     try {
@@ -1270,6 +1301,8 @@ export class TradeEngine {
 
       try {
         const sp500Set = new Set(SP500_UNIVERSE);
+        const PREP_ALLOWED_ETFS = new Set(['SQQQ','SH','SPXS','SDOW','TZA','GLD','SLV','TSDD','TSLQ','FAZ','SDS','PSQ']);
+        const isAllowedSymbol = (sym: string) => sp500Set.has(sym) || PREP_ALLOWED_ETFS.has(sym);
         const heldSet = new Set(equityPos.map(p => p.ticker));
 
         // SOURCE 1: Last night's RSI-2 scan signals
@@ -1279,7 +1312,7 @@ export class TradeEngine {
           if (scanRaw) {
             const scan = JSON.parse(scanRaw);
             for (const b of (scan.buys || [])) {
-              if (sp500Set.has(b.symbol) && !heldSet.has(b.symbol)) {
+              if (isAllowedSymbol(b.symbol) && !heldSet.has(b.symbol)) {
                 rsi2Signals.push({ symbol: b.symbol, rsi2: b.rsi2, price: b.price });
               }
             }
@@ -1293,13 +1326,13 @@ export class TradeEngine {
         try {
           const stars = this.store.getResearchStars();
           for (const s of stars) {
-            if (sp500Set.has(s.symbol)) {
+            if (isAllowedSymbol(s.symbol)) {
               researchStars.add(s.symbol);
               catalystMap.set(s.symbol, s.catalyst || '');
             }
           }
         } catch {}
-        console.log(`  [PREP] Research catalysts: ${researchStars.size} S&P 500 names`);
+        console.log(`  [PREP] Research catalysts: ${researchStars.size} (S&P 500 + ETFs)`);
 
         // SOURCE 3: Pre-market snapshots — check which signals are confirming
         // Scan RSI-2 signals + top research stars for pre-market movement
