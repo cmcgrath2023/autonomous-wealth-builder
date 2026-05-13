@@ -1093,6 +1093,103 @@ export class TradeEngine {
       } catch {}
     }
 
+    // ── 3d. CORE REINFORCEMENT — auto-add to high-scoring core holdings ──
+    // When deep research scores a core holding >= 90 and there's free capital,
+    // consult Trident and add to the position automatically. Records every
+    // decision (buy or skip) to Trident for pattern learning.
+    if (mkt.isMarketOpen && CORE_HOLDINGS.size > 0) {
+      const reinforceKey = `core_reinforce_${today}`;
+      const reinforced = new Set((this.store.get(reinforceKey) || '').split(',').filter(Boolean));
+
+      for (const ticker of CORE_HOLDINGS) {
+        if (reinforced.has(ticker)) continue; // already checked today
+        const pos = equityPos.find(p => p.ticker === ticker);
+        if (!pos) continue; // not held — skip
+
+        try {
+          const { deepResearchTicker } = await import('./analysts/deep-research.js');
+          const profile = await deepResearchTicker(ticker);
+          if (!profile || profile.fundamentalScore < 90) {
+            reinforced.add(ticker);
+            this.store.set(reinforceKey, [...reinforced].join(','));
+            continue;
+          }
+
+          // Check free budget
+          const currentDeployed = equityPos.reduce((s, p) => s + Math.abs(p.marketValue), 0);
+          const freeCapital = BUDGET_MAX - currentDeployed;
+          if (freeCapital < PER_POSITION) {
+            console.log(`  [CORE REINFORCE] ${ticker} score=${profile.fundamentalScore} but no free capital ($${freeCapital.toFixed(0)})`);
+            reinforced.add(ticker);
+            this.store.set(reinforceKey, [...reinforced].join(','));
+            continue;
+          }
+
+          // Consult Trident
+          const tridentAdvice = await brain.shouldBuy(ticker, 0, `core_reinforce: score=${profile.fundamentalScore}, target=$${profile.analystTargetMean?.toFixed(2)}`);
+          if (!tridentAdvice.should) {
+            console.log(`  [CORE REINFORCE] ${ticker} score=${profile.fundamentalScore} — Trident says NO: ${tridentAdvice.reason}`);
+            brain.recordRule(
+              `CORE REINFORCE SKIP: ${ticker} score=${profile.fundamentalScore} — Trident blocked: ${tridentAdvice.reason}`,
+              'autonomous_decision',
+            ).catch(() => {});
+            reinforced.add(ticker);
+            this.store.set(reinforceKey, [...reinforced].join(','));
+            continue;
+          }
+
+          // Add to position
+          const price = pos.currentPrice;
+          const addQty = Math.floor(PER_POSITION / price);
+          if (addQty <= 0) continue;
+
+          // Cancel existing stop, buy more, re-place stop
+          const creds3 = loadCredentials();
+          if (!creds3.alpaca) continue;
+          const hdrs3 = { 'APCA-API-KEY-ID': creds3.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds3.alpaca.apiSecret, 'Content-Type': 'application/json' };
+          await this.cancelOpenStopOrders(ticker, hdrs3, creds3.alpaca.baseUrl, 'sell');
+
+          const buyRes = await fetch(`${creds3.alpaca.baseUrl}/v2/orders`, {
+            method: 'POST', headers: hdrs3,
+            body: JSON.stringify({ symbol: ticker, qty: String(addQty), side: 'buy', type: 'market', time_in_force: 'day' }),
+            signal: AbortSignal.timeout(10_000),
+          });
+
+          if (buyRes.ok) {
+            console.log(`  [CORE REINFORCE] ${ticker} +${addQty} shares — score=${profile.fundamentalScore}, Trident approved`);
+            await postToDiscord(`🏗️ CORE REINFORCE: Added ${addQty} ${ticker} — fundamental score ${profile.fundamentalScore}/100, analyst target $${profile.analystTargetMean?.toFixed(2)}`);
+            this._trackBuy(ticker, price, addQty, ((await buyRes.json()) as any).id ?? null);
+
+            // Re-place stop on full position after brief settle
+            await new Promise(r => setTimeout(r, 1500));
+            try {
+              const updatedPos = await this.executor.getPositions();
+              const newPos = updatedPos.find(p => p.ticker === ticker);
+              if (newPos) {
+                const newStop = Math.round(newPos.avgPrice * (1 - STOP_PCT) * 100) / 100;
+                await this.placeProtectiveStop(ticker, Math.abs(newPos.shares), 'sell', newStop, 'core_reinforce');
+              }
+            } catch {}
+
+            // Record to Trident for learning
+            brain.recordRule(
+              `CORE REINFORCE BUY: ${ticker} +${addQty}@$${price.toFixed(2)} — score=${profile.fundamentalScore}, target=$${profile.analystTargetMean?.toFixed(2)}, ${profile.recommendationKey}, ${profile.analystCount} analysts, ${profile.recentUpgrades} upgrades`,
+              'autonomous_decision',
+            ).catch(() => {});
+          } else {
+            console.log(`  [CORE REINFORCE] ${ticker} buy failed: ${(await buyRes.text()).slice(0, 80)}`);
+          }
+
+          reinforced.add(ticker);
+          this.store.set(reinforceKey, [...reinforced].join(','));
+        } catch (e: any) {
+          console.log(`  [CORE REINFORCE ERR] ${ticker}: ${e.message}`);
+          reinforced.add(ticker);
+          this.store.set(reinforceKey, [...reinforced].join(','));
+        }
+      }
+    }
+
     // Detect manual sells: if a position we knew about is now gone, add to session sells
     // This prevents the engine from rebuying something you manually sold
     try {
