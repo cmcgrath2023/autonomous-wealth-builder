@@ -44,8 +44,8 @@ async function postToDiscord(text: string): Promise<void> {
 
 const HEARTBEAT_MS = 120_000;        // 2 min — monitors positions, exits, forex
 const MAX_POSITIONS = 8;              // Increased from 5 — more room to concentrate on winners
-const PER_POSITION = 10_000;          // Recovery spec: $10K per documented strategy slot
-const BUDGET_MAX = 50_000;            // Recovery spec: $50K total deployed cap
+const PER_POSITION = 6_000;           // $50K budget / 8 positions = $6,250 per slot
+const BUDGET_MAX = 50_000;            // $50K total deployed cap
 
 // Strategy lockdown: only documented strategies may open equity positions.
 // The prior recovery build accreted momentum/catalyst/watchlist entries while
@@ -118,7 +118,7 @@ const ORB_SCAN_TIME_START = 9;      // 9:45 AM ET — opening range established
 const ORB_SCAN_TIME_END = 10;       // Stop looking for ORB entries after 10:00 AM
 const ORB_FLATTEN_HOUR = 11;        // Flatten ORB positions by 11:30 AM if no target hit
 const ORB_FLATTEN_MIN = 30;
-const ORB_PER_POSITION = 10_000;    // $10K per ORB trade
+const ORB_PER_POSITION = 6_000;     // Match PER_POSITION
 
 // Full S&P 500 universe — Connors tested on the complete index
 const SP500_UNIVERSE = [
