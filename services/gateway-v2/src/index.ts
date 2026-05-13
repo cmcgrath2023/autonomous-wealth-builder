@@ -381,11 +381,15 @@ async function main(): Promise<void> {
   // ─── Momentum Scanner ────────────────────────────────────────────────
   scheduleMomentumScanner(stateStore);
 
+  // ─── Deep Research Analyst ──────────────────────────────────────────
+  scheduleDeepResearch(stateStore);
+
   // Run ALL analysts immediately on startup if it's a weekday during business hours
   if (isBusinessHoursET()) {
     setTimeout(() => runMacroOnce(stateStore), 2000);
     setTimeout(() => runCatalystOnce(stateStore), 5000);
     setTimeout(() => runMomentumOnce(stateStore), 8000);
+    setTimeout(() => runDeepResearchOnce(stateStore), 12000);
   }
 
   log('Orchestrator ready — all components running in-process');
@@ -539,6 +543,60 @@ function scheduleCatalystHunter(store: GatewayStateStore): void {
     };
     scheduleNext();
   }
+}
+
+// ─── Deep Research (7 AM ET daily) ────────────────────────────────────────
+function getDeepResearchTickers(store: GatewayStateStore): string[] {
+  const tickers = new Set<string>();
+
+  // Core holdings
+  for (const t of ['AMZN', 'NVDA']) tickers.add(t);
+
+  // Watchlist
+  for (const t of ['AMD', 'NFLX']) tickers.add(t);
+
+  // Top research stars
+  try {
+    const stars = store.getResearchStars();
+    for (const s of stars.sort((a: any, b: any) => b.score - a.score).slice(0, 10)) {
+      if (/^[A-Z]{1,5}$/.test(s.symbol) && !s.symbol.includes('-')) tickers.add(s.symbol);
+    }
+  } catch {}
+
+  return [...tickers];
+}
+
+async function runDeepResearchOnce(store: GatewayStateStore): Promise<void> {
+  try {
+    const tickers = getDeepResearchTickers(store);
+    log(`Deep Research: starting on ${tickers.length} tickers`);
+    const { runDeepResearch } = await import('./analysts/index.js');
+    const result = await runDeepResearch(tickers);
+    log(`Deep Research done: ${result.succeeded}/${result.scanned} | ${result.tridentRecorded} to Trident | top: ${result.profiles.sort((a, b) => b.fundamentalScore - a.fundamentalScore).slice(0, 3).map(p => `${p.symbol}(${p.fundamentalScore})`).join(', ')}`);
+  } catch (e: any) {
+    log(`Deep Research error: ${e.message}`);
+  }
+}
+
+function scheduleDeepResearch(store: GatewayStateStore): void {
+  const scheduleNext = () => {
+    const now = new Date();
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const target = new Date(et);
+    target.setHours(7, 0, 0, 0); // 7 AM ET
+    if (target <= et) target.setDate(target.getDate() + 1);
+    while (target.getDay() === 0 || target.getDay() === 6) {
+      target.setDate(target.getDate() + 1);
+    }
+    const offsetMs = target.getTime() - et.getTime();
+    log(`Deep Research scheduled for ${target.toISOString()} (in ${Math.round(offsetMs / 60_000)} min)`);
+
+    setTimeout(async () => {
+      await runDeepResearchOnce(store);
+      scheduleNext();
+    }, offsetMs);
+  };
+  scheduleNext();
 }
 
 function schedulePostMortem(store: GatewayStateStore): void {

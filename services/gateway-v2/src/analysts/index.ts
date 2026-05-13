@@ -42,3 +42,6 @@ export { scoreConviction } from './conviction-scorer.js';
 export type { SignalCluster, ActiveSignal, ConvictionResult } from './conviction-scorer.js';
 
 export { detectSignalClusters, generateThesis, runResearchCycle } from './thesis-generator.js';
+
+export { deepResearchTicker, runDeepResearch } from './deep-research.js';
+export type { TickerFundamentals, DeepResearchResult } from './deep-research.js';
