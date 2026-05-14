@@ -1776,7 +1776,8 @@ export class TradeEngine {
     }
 
     // ── 5d2. CATALYST SHORTS — short the biggest losers from Biz Insider + research ──
-    if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+    // Only open shorts 10 AM - 2 PM ET — gives time to manage and cover before close
+    if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && mkt.etHour < 14) {
       try {
         const stars = this.store.getResearchStars();
         const heldSet = new Set(equityPos.map(p => p.ticker));
