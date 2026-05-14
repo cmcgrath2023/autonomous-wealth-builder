@@ -723,8 +723,9 @@ export class TradeEngine {
       const posCheck = await this.executor.getPositions();
       const deployed = posCheck.reduce((s, p) => s + Math.abs(p.marketValue), 0);
       const available = BUDGET_MAX - deployed;
-      if (available < price) {
-        console.log(`  [BUY] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free, can't afford ${symbol} @ $${price.toFixed(2)}`);
+      const MIN_BUY = 500; // Don't waste slots on tiny positions
+      if (available < MIN_BUY || available < price) {
+        console.log(`  [BUY] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
         return false;
       }
       if (posCheck.length >= MAX_POSITIONS) {
