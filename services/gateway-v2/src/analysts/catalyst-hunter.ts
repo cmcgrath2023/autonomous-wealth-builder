@@ -25,6 +25,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { GatewayStateStore } from '../../../gateway/src/state-store.js';
+import { loadCredentials } from '../config-bus.js';
 
 const CATALYST_MODEL = 'claude-sonnet-4-6';
 
@@ -98,7 +99,7 @@ export class CatalystHunter {
       try {
         const candidates = await this.scanWithLLM();
         if (candidates.length > 0) {
-          this.persistCandidates(candidates);
+          await this.persistCandidates(candidates);
           return { candidates, source: 'llm', timestamp: new Date().toISOString() };
         }
         console.log('[CATALYST] LLM returned 0 candidates, trying Alpaca news fallback');
@@ -110,7 +111,7 @@ export class CatalystHunter {
     // Deterministic fallback: Alpaca news endpoint + keyword matching
     try {
       const candidates = await this.scanAlpacaNews(alpacaHeaders);
-      this.persistCandidates(candidates);
+      await this.persistCandidates(candidates);
       return { candidates, source: 'alpaca_news', timestamp: new Date().toISOString() };
     } catch (e: any) {
       console.error(`[CATALYST] Alpaca news path failed: ${e.message}`);
@@ -311,7 +312,7 @@ Return ONLY the JSON array. No commentary.`;
 
   // ─── Persistence ─────────────────────────────────────────────────────
 
-  private persistCandidates(candidates: CatalystCandidate[]): void {
+  private async persistCandidates(candidates: CatalystCandidate[]): Promise<void> {
     for (const c of candidates) {
       try {
         // SQLite: research_stars (for trade-engine buy/short pipeline)
@@ -348,6 +349,68 @@ Return ONLY the JSON array. No commentary.`;
         }
       } catch {}
     }
+    // After-hours extended buy: when market is closed and we find a high-confidence
+    // earnings beat, buy immediately with extended_hours so we get in before the gap-up
+    const BULLISH_AH_TYPES = new Set(['earnings_beat', 'guidance_raise', 'fda_approval']);
+    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const etHour = et.getHours();
+    const isAfterHours = (etHour >= 16 || etHour < 4); // 4 PM - 4 AM ET
+    const isPreMarket = (etHour >= 4 && etHour < 9) || (etHour === 9 && et.getMinutes() < 30); // 4 AM - 9:30 AM ET
+    const isExtendedHours = isAfterHours || isPreMarket;
+
+    if (isExtendedHours) {
+      const creds = loadCredentials();
+      if (creds.alpaca) {
+        const ahHeaders = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
+        const PER_POS = 6000;
+
+        for (const c of candidates.filter(c => BULLISH_AH_TYPES.has(c.catalystType) && c.confidence >= 0.95)) {
+          try {
+            // Check we don't already hold it
+            const posRes = await fetch(`${creds.alpaca.baseUrl}/v2/positions/${c.symbol}`, { headers: ahHeaders }).catch(() => null);
+            if (posRes?.ok) continue; // already held
+
+            // Get current extended hours price
+            const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${c.symbol}&feed=iex`, {
+              headers: { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!snapRes.ok) continue;
+            const snap = (await snapRes.json() as any)[c.symbol];
+            const price = snap?.latestTrade?.p;
+            if (!price || price < 10) continue;
+
+            const qty = Math.floor(PER_POS / price);
+            if (qty <= 0) continue;
+
+            // Place extended hours limit order (required for extended hours on Alpaca)
+            const orderRes = await fetch(`${creds.alpaca.baseUrl}/v2/orders`, {
+              method: 'POST', headers: ahHeaders,
+              body: JSON.stringify({
+                symbol: c.symbol,
+                qty: String(qty),
+                side: 'buy',
+                type: 'limit',
+                limit_price: String(Math.round(price * 1.02 * 100) / 100), // 2% above current for fill
+                time_in_force: 'day',
+                extended_hours: true,
+              }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (orderRes.ok) {
+              const order = await orderRes.json() as any;
+              console.log(`[CATALYST AH BUY] ${c.symbol} ${qty} shares @ ~$${price.toFixed(2)} | ${c.catalystType}: ${c.catalyst.slice(0, 60)} | order ${order.id}`);
+            } else {
+              const body = await orderRes.text();
+              console.log(`[CATALYST AH] ${c.symbol} order failed: ${orderRes.status} ${body.slice(0, 80)}`);
+            }
+          } catch (e: any) {
+            console.log(`[CATALYST AH] ${c.symbol} error: ${e.message}`);
+          }
+        }
+      }
+    }
+
     if (candidates.length > 0) {
       console.log(`[CATALYST] Wrote ${candidates.length} candidates to research_stars + PG: ${candidates.map(c => `${c.symbol}(${c.catalystType})`).join(', ')}`);
     } else {
