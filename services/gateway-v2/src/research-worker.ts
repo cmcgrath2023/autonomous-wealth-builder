@@ -31,6 +31,7 @@ const MIN_USEFUL_SCORE = 0.68;
 const DATA_URL = 'https://data.alpaca.markets';
 const FETCH_TIMEOUT = 10_000;
 
+// Approved sources: Biz Insider, Yahoo, Bloomberg (+ Zacks RSS when available)
 const RSS_FEEDS = [
   { name: 'Yahoo SP500',  url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US' },
   { name: 'Yahoo DJI',    url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EDJI&region=US&lang=en-US' },
@@ -38,17 +39,10 @@ const RSS_FEEDS = [
   { name: 'Yahoo Gold',   url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC%3DF&region=US&lang=en-US' },
   { name: 'Yahoo BTC',    url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=BTC-USD&region=US&lang=en-US' },
   { name: 'Yahoo VIX',    url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EVIX&region=US&lang=en-US' },
-  { name: 'CNBC Top',     url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114' },
-  { name: 'CNBC Market',  url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258' },
-  { name: 'SA Currents',  url: 'https://seekingalpha.com/market_currents.xml' },
-  { name: 'Bloomberg',   url: 'https://feeds.bloomberg.com/markets/news.rss' },
-  { name: 'CNBC PreMkt',  url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664' },
-  { name: 'CNBC Earnings', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=15839135' },
-  { name: 'Investing.com', url: 'https://www.investing.com/rss/news.rss' },
-  { name: 'MarketWatch',  url: 'https://feeds.marketwatch.com/marketwatch/topstories' },
-  { name: 'Barrons',     url: 'https://www.barrons.com/market-data/rss' },
-  { name: 'MW TopStories', url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' },
+  { name: 'Bloomberg',    url: 'https://feeds.bloomberg.com/markets/news.rss' },
 ];
+
+const BIZ_INSIDER_MOVERS_URL = 'https://markets.businessinsider.com/index/market-movers/s&p_500';
 
 interface SectorDef { name: string; key: string; tickers: string[]; catalystKeywords: string[] }
 
@@ -350,7 +344,41 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     }
   } catch (e) { errors.push(`Yahoo losers: ${e}`); }
 
-  // 3c. Crypto — scan Alpaca crypto movers (24/7 market, 100% win rate historically)
+  // 3c. Biz Insider S&P 500 movers — top gainers + losers (scrape)
+  try {
+    const biRes = await fetch(BIZ_INSIDER_MOVERS_URL, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
+    if (biRes.ok) {
+      const html = await biRes.text();
+      // Parse ticker + percentage pairs from the page
+      const entries = [...html.matchAll(/\/stocks\/([a-z]+)-stock[^"]*"[^>]*>[^<]+<\/a>.*?([+-]?\d+\.\d+)\s*%/gis)];
+      let biGainers = 0, biLosers = 0;
+      for (const m of entries) {
+        const sym = m[1].toUpperCase();
+        const pct = parseFloat(m[2]);
+        if (!sym || sym.length > 5 || Math.abs(pct) < 1) continue;
+        const existing = store.getResearchStars().find((s: any) => s.symbol === sym);
+        if (existing) continue;
+
+        if (pct >= 3) {
+          // Top gainer — high-priority buy candidate
+          const score = Math.min(0.99, 0.90 + pct / 100);
+          store.saveResearchStar(sym, 'momentum', `BI GAINER +${pct.toFixed(1)}% | S&P 500 top mover`, bayesianAdjustScore(sym, score));
+          starsWritten++; biGainers++;
+        } else if (pct <= -3) {
+          // Top loser — short candidate
+          const score = Math.min(0.95, 0.85 + Math.abs(pct) / 100);
+          store.saveResearchStar(sym, 'short_candidate', `BI LOSER ${pct.toFixed(1)}% | S&P 500 short candidate`, bayesianAdjustScore(sym, score));
+          starsWritten++; biLosers++;
+        }
+      }
+      if (biGainers + biLosers > 0) console.log(`[Research] Biz Insider: ${biGainers} gainers, ${biLosers} short candidates`);
+    }
+  } catch (e) { errors.push(`BizInsider: ${e}`); }
+
+  // 3d. Crypto — scan Alpaca crypto movers (24/7 market, 100% win rate historically)
   if (headers) {
     const CRYPTO_PAIRS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'BCH/USD', 'AVAX/USD', 'LINK/USD', 'DOGE/USD', 'LTC/USD'];
     try {
