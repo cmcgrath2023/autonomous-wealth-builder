@@ -213,10 +213,20 @@ async function main(): Promise<void> {
   // 3. Start API server in-process
   await startApiServer(stateStore);
 
-  // 4. Ops (SRE) + OpenClaw (position intelligence coordinator)
+  // 4. Ops (SRE) + Research team + OpenClaw
   const { Ops } = await import('./managers/ops.js');
   const ops = new Ops(DB_PATH);
   ops.start();
+
+  // Research: News Intelligence (90s cycle — catalysts, sentiment, critical events)
+  const { ResearchNews } = await import('./managers/research-news.js');
+  const researchNews = new ResearchNews(DB_PATH);
+  researchNews.start();
+
+  // Research: Quality & Sector Performance (120s cycle — promote/demote sectors)
+  const { ResearchQuality } = await import('./managers/research-quality.js');
+  const researchQuality = new ResearchQuality(DB_PATH);
+  researchQuality.start();
 
   // OpenClaw: monitors held positions, triggers targeted research when they drop
   const openClaw = new OpenClawEngine(stateStore, 60_000); // 60-second cycle

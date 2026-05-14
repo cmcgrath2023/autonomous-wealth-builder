@@ -262,7 +262,33 @@ export async function runResearchCycle(
     }
   }
 
-  // 4. Expire old theses
+  // 4. Promote triggered theses → research_stars so the buy pipeline can act
+  try {
+    const { rows: triggered } = await pgQuery(`
+      SELECT symbol, conviction, thesis, narrative
+      FROM research_theses
+      WHERE status = 'triggered'
+        AND created_at > NOW() - INTERVAL '24 hours'
+      ORDER BY conviction DESC
+      LIMIT 10
+    `);
+    let promoted = 0;
+    for (const t of triggered) {
+      const score = Math.min(0.99, 0.85 + (t.conviction * 0.15)); // conviction 0-1 → score 0.85-1.0
+      sqliteStore.saveResearchStar(
+        t.symbol,
+        'thesis',
+        `THESIS(${(t.conviction * 100).toFixed(0)}): ${(t.narrative || t.thesis || '').slice(0, 80)}`,
+        score,
+      );
+      promoted++;
+    }
+    if (promoted > 0) console.log(`[research] Promoted ${promoted} triggered theses → research_stars`);
+  } catch (e: any) {
+    console.log(`[research] Thesis promotion failed: ${e.message}`);
+  }
+
+  // 5. Expire old theses
   try {
     await pgQuery(`
       UPDATE research_theses

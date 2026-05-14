@@ -1,9 +1,9 @@
 /**
- * Ferd — Research Manager (OpenClaw Pattern)
+ * Research: Quality & Sector Performance
  *
  * Monitors research quality on a 120-second heartbeat.
  * Tracks sector performance, promotes/demotes sectors,
- * manages FACT cache, and aligns research with Liza's catalysts.
+ * manages FACT cache, and aligns research with catalyst themes.
  */
 
 import { GatewayStateStore, ClosedTradeRow } from '../../../gateway/src/state-store.js';
@@ -25,7 +25,7 @@ interface SectorPerf {
   status: 'promoted' | 'demoted' | 'neutral';
 }
 
-interface FerdStatus {
+interface ResearchQualityStatus {
   lastCycle: string;
   cycleCount: number;
   sectorPerformance: SectorPerf[];
@@ -34,31 +34,31 @@ interface FerdStatus {
   catalystAlignment: string[];
 }
 
-export class Ferd {
+export class ResearchQuality {
   private store: GatewayStateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cycleCount = 0;
-  private lastStatus: FerdStatus | null = null;
+  private lastStatus: ResearchQualityStatus | null = null;
 
   constructor(dbPath: string) {
     this.store = new GatewayStateStore(dbPath);
   }
 
   async start(): Promise<void> {
-    console.log('[Ferd] Research Manager starting — 120s loop');
+    console.log('[ResearchQuality] Research Manager starting — 120s loop');
     await this.cycle();
     this.timer = setInterval(() => {
-      this.cycle().catch((e) => console.error('[Ferd] Cycle error (non-fatal):', e));
+      this.cycle().catch((e) => console.error('[ResearchQuality] Cycle error (non-fatal):', e));
     }, LOOP_MS);
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     try { this.store.close(); } catch {}
-    console.log('[Ferd] Stopped');
+    console.log('[ResearchQuality] Stopped');
   }
 
-  getStatus(): FerdStatus | null {
+  getStatus(): ResearchQualityStatus | null {
     return this.lastStatus;
   }
 
@@ -88,9 +88,9 @@ export class Ferd {
       // 6. Read Warren's directive — act on it
       const warrenDirective = this.store.get('ferd:directive') || '';
       if (warrenDirective === 'urgent_research_needed') {
-        console.log('[Ferd] Warren demands more picks — running urgent scan');
+        console.log('[ResearchQuality] Warren demands more picks — running urgent scan');
         // Record to Brain that research was inadequate
-        brain.recordRule('Ferd: Warren flagged insufficient research stars — need broader scanning', 'ferd:directive').catch(() => {});
+        brain.recordRule('ResearchQuality: Warren flagged insufficient research stars — need broader scanning', 'ferd:directive').catch(() => {});
       }
 
       // 7. Every 10 cycles, query Brain for research patterns that worked
@@ -108,7 +108,7 @@ export class Ferd {
             const data = await res.json() as any;
             const patterns = (data.memories || data.results || []).slice(0, 3);
             if (patterns.length > 0) {
-              console.log(`[Ferd] Brain patterns: ${patterns.map((p: any) => p.content?.substring(0, 60)).join(' | ')}`);
+              console.log(`[ResearchQuality] Brain patterns: ${patterns.map((p: any) => p.content?.substring(0, 60)).join(' | ')}`);
             }
           }
         } catch {}
@@ -126,14 +126,14 @@ export class Ferd {
         const promoted = sectorPerf.filter((s) => s.status === 'promoted').map((s) => s.sector);
         const demoted = sectorPerf.filter((s) => s.status === 'demoted').map((s) => s.sector);
         console.log(
-          `[Ferd] #${this.cycleCount} | ${sectorPerf.length} sectors | ` +
+          `[ResearchQuality] #${this.cycleCount} | ${sectorPerf.length} sectors | ` +
           `Promoted: ${promoted.join(', ') || 'none'} | ` +
           `Demoted: ${demoted.join(', ') || 'none'} | ` +
           `FACT pruned: ${factPruned} | Stars: ${starQuality}`,
         );
       }
     } catch (e: any) {
-      console.error(`[Ferd] Cycle #${this.cycleCount} error:`, e.message);
+      console.error(`[ResearchQuality] Cycle #${this.cycleCount} error:`, e.message);
     }
   }
 
@@ -250,7 +250,7 @@ export class Ferd {
       const promotedSectors = sectorPerf.filter((s) => s.status === 'promoted').map((s) => s.sector);
 
       // No hardcoded catalyst→ticker mapping — research worker discovers tickers dynamically
-      // Ferd logs detected catalysts for context only
+      // ResearchQuality logs detected catalysts for context only
       for (const catalyst of catalysts) {
         aligned.push(`CATALYST: ${catalyst} detected`);
         if (promotedSectors.includes(catalyst)) {

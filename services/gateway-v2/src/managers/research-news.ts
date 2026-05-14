@@ -1,5 +1,5 @@
 /**
- * Liza — News Desk Manager (OpenClaw Pattern)
+ * Research: News Intelligence
  *
  * Monitors news/event intelligence on a 90-second heartbeat.
  * Detects critical events, tracks economic calendar, computes
@@ -43,7 +43,7 @@ const ECON_EVENTS = [
   { name: 'NFP', dayOfWeek: 5, weekOfMonth: 1, critical: true },
 ];
 
-interface LizaStatus {
+interface ResearchNewsStatus {
   lastCycle: string;
   cycleCount: number;
   headlineCount: number;
@@ -53,31 +53,31 @@ interface LizaStatus {
   newsAge: string;
 }
 
-export class Liza {
+export class ResearchNews {
   private store: GatewayStateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cycleCount = 0;
-  private lastStatus: LizaStatus | null = null;
+  private lastStatus: ResearchNewsStatus | null = null;
 
   constructor(dbPath: string) {
     this.store = new GatewayStateStore(dbPath);
   }
 
   async start(): Promise<void> {
-    console.log('[Liza] News Desk Manager starting — 90s loop');
+    console.log('[ResearchNews] News Desk Manager starting — 90s loop');
     await this.cycle();
     this.timer = setInterval(() => {
-      this.cycle().catch((e) => console.error('[Liza] Cycle error (non-fatal):', e));
+      this.cycle().catch((e) => console.error('[ResearchNews] Cycle error (non-fatal):', e));
     }, LOOP_MS);
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     try { this.store.close(); } catch {}
-    console.log('[Liza] Stopped');
+    console.log('[ResearchNews] Stopped');
   }
 
-  getStatus(): LizaStatus | null {
+  getStatus(): ResearchNewsStatus | null {
     return this.lastStatus;
   }
 
@@ -95,7 +95,7 @@ export class Liza {
       // 3. Detect critical events
       const criticalEvents = this.detectCritical(headlines);
       if (criticalEvents.length > 0) {
-        console.log(`[Liza] CRITICAL events detected: ${criticalEvents.join(' | ')}`);
+        console.log(`[ResearchNews] CRITICAL events detected: ${criticalEvents.join(' | ')}`);
         this.store.set('critical_events', JSON.stringify({
           events: criticalEvents, detectedAt: now, detectedBy: 'liza',
         }));
@@ -132,14 +132,14 @@ export class Liza {
 
       if (this.cycleCount % 4 === 1) {
         console.log(
-          `[Liza] #${this.cycleCount} | ${headlines.length} headlines | ` +
+          `[ResearchNews] #${this.cycleCount} | ${headlines.length} headlines | ` +
           `Sentiment: ${sentiment.label} (${sentiment.score.toFixed(2)}) | ` +
           `Catalysts: ${activeCatalysts.join(', ') || 'none'} | ` +
           `Critical: ${criticalEvents.length}`,
         );
       }
     } catch (e: any) {
-      console.error(`[Liza] Cycle #${this.cycleCount} error:`, e.message);
+      console.error(`[ResearchNews] Cycle #${this.cycleCount} error:`, e.message);
     }
   }
 
@@ -164,7 +164,7 @@ export class Liza {
     const results = await Promise.allSettled(
       RSS_FEEDS.map(async (feed) => {
         const res = await fetch(feed.url, {
-          headers: { 'User-Agent': 'MTWM-Liza/1.0' },
+          headers: { 'User-Agent': 'MTWM-ResearchNews/1.0' },
           signal: AbortSignal.timeout(FETCH_TIMEOUT),
         });
         if (!res.ok) return [];
