@@ -52,6 +52,7 @@ const BUDGET_MAX = 50_000;            // $50K total deployed cap
 // debugging losses. Keep those paths visible but off until they have a spec,
 // backtest, and explicit risk model.
 const ENABLE_PREMARKET_MOMENTUM_BUYS = false;       // Pure momentum — no edge proven
+const ENABLE_MIDDAY_MOMENTUM = true;                 // NEW: buy top S&P 500 movers at 11 AM ET
 const ENABLE_SECTOR_INTRADAY_INVERSE_BUYS = false;  // Whipsaw risk — use 3:50 PM regime only
 const ENABLE_PRIORITY_WATCHLIST_BUYS = false;        // Pure momentum chasing — no edge
 const ENABLE_CATALYST_BUYS = true;                   // RE-ENABLED: buys high-score research stars (S&P 500 only)
@@ -1767,7 +1768,93 @@ export class TradeEngine {
 
     }
 
-    // ── 5d. MORNING RSI-2 EXECUTION — rescan at 10:15 AM ──
+    // ── 5e. MIDDAY MOMENTUM — buy top S&P 500 movers (11:00-11:15 AM ET) ──
+    // Scans entire S&P 500, ranks by % gain, buys top movers with Trident gate.
+    // This catches CSCO +14%, F +7% days the RSI-2 strategy misses.
+    const isMiddayMomentum = mkt.etHour === 11 && mkt.etMin >= 0 && mkt.etMin <= 15;
+    const middayKey = `midday_momentum_${today}`;
+
+    if (ENABLE_MIDDAY_MOMENTUM && isMiddayMomentum && mkt.isMarketOpen && !this.store.get(middayKey)) {
+      this.store.set(middayKey, 'running');
+      console.log(`  [MIDDAY MOMENTUM] 11 AM — scanning S&P 500 for top movers...`);
+
+      try {
+        const heldSet = new Set(equityPos.map(p => p.ticker));
+        const freshPos = await this.executor.getPositions();
+        let openSlots = MAX_POSITIONS - freshPos.filter(p => !isCrypto(p.ticker)).length;
+        const deployed = freshPos.reduce((s, p) => s + Math.abs(p.marketValue), 0);
+
+        if (openSlots > 0 && deployed + PER_POSITION <= BUDGET_MAX) {
+          // Scan S&P 500 in batches of 50
+          const allMovers: Array<{ symbol: string; price: number; pctChange: number; volume: number }> = [];
+          for (let i = 0; i < SP500_UNIVERSE.length; i += 50) {
+            const batch = SP500_UNIVERSE.slice(i, i + 50).join(',');
+            try {
+              const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${batch}&feed=iex`, {
+                headers: alpacaHeaders, signal: AbortSignal.timeout(8000),
+              });
+              if (!snapRes.ok) continue;
+              const snapData = await snapRes.json() as any;
+              for (const [sym, snap] of Object.entries(snapData) as any) {
+                const price = snap?.latestTrade?.p;
+                const prev = snap?.prevDailyBar?.c;
+                const vol = snap?.minuteBar?.v || snap?.dailyBar?.v || 0;
+                if (!price || !prev || price < 10) continue;
+                const pctChange = ((price - prev) / prev) * 100;
+                if (pctChange >= 3) { // Only care about 3%+ movers
+                  allMovers.push({ symbol: sym, price, pctChange, volume: vol });
+                }
+              }
+            } catch {}
+            await new Promise(r => setTimeout(r, 200));
+          }
+
+          // Rank by % change, filter out held + sold today
+          allMovers.sort((a, b) => b.pctChange - a.pctChange);
+          const candidates = allMovers
+            .filter(m => !heldSet.has(m.symbol))
+            .filter(m => !this._sessionSells.has(m.symbol))
+            .filter(m => !this._recentBuys.has(m.symbol));
+
+          console.log(`  [MIDDAY] Found ${allMovers.length} movers (3%+), ${candidates.length} buyable. Top: ${candidates.slice(0, 5).map(m => `${m.symbol}+${m.pctChange.toFixed(1)}%`).join(', ')}`);
+
+          // Buy top movers up to open slots (max 2 per scan to avoid over-concentration)
+          let placed = 0;
+          for (const mover of candidates.slice(0, Math.min(openSlots, 2))) {
+            if (placed >= 2) break;
+            console.log(`  [MIDDAY BUY] ${mover.symbol} +${mover.pctChange.toFixed(1)}% today @ $${mover.price.toFixed(2)}`);
+            const bought = await this.buyPosition(mover.symbol, mover.price, `MIDDAY_MOMENTUM +${mover.pctChange.toFixed(1)}%`);
+            if (bought) {
+              placed++;
+              openSlots--;
+              brain.recordRule(
+                `MIDDAY MOMENTUM BUY: ${mover.symbol} +${mover.pctChange.toFixed(1)}% @ $${mover.price.toFixed(2)}`,
+                'autonomous_decision',
+              ).catch(() => {});
+            }
+          }
+
+          this.store.set(middayKey, JSON.stringify({
+            time: new Date().toISOString(),
+            scanned: SP500_UNIVERSE.length,
+            movers: allMovers.length,
+            candidates: candidates.length,
+            placed,
+            top5: candidates.slice(0, 5).map(m => `${m.symbol}+${m.pctChange.toFixed(1)}%`),
+          }));
+
+          if (placed > 0) {
+            await postToDiscord(`🚀 MIDDAY MOMENTUM: Bought ${placed} top S&P 500 movers — ${candidates.slice(0, placed).map(m => `${m.symbol} +${m.pctChange.toFixed(1)}%`).join(', ')}`);
+          } else {
+            await postToDiscord(`📊 MIDDAY MOMENTUM: ${allMovers.length} movers found, ${candidates.length} buyable — no slots/budget available`);
+          }
+        }
+      } catch (e: any) {
+        console.log(`  [MIDDAY MOMENTUM ERR] ${e.message}`);
+      }
+    }
+
+    // ── 5f. MORNING RSI-2 EXECUTION — rescan at 10:15 AM ──
 
     const isMorningBuyTime = mkt.etHour === 10 && mkt.etMin >= 13 && mkt.etMin <= 20;
     const morningBuyKey = `morning_rsi2_buy_${today}`;
