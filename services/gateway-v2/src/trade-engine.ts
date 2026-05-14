@@ -45,7 +45,7 @@ async function postToDiscord(text: string): Promise<void> {
 const HEARTBEAT_MS = 120_000;        // 2 min — monitors positions, exits, forex
 const MAX_POSITIONS = 8;              // Increased from 5 — more room to concentrate on winners
 const PER_POSITION = 6_000;           // $50K budget / 8 positions = $6,250 per slot
-const BUDGET_MAX = 55_000;            // Raised — account equity is $54K, gains push market value over old $50K cap
+const BUDGET_MAX = 70_000;            // Cash available — room for longs + shorts without using margin
 
 // Strategy lockdown: only documented strategies may open equity positions.
 // The prior recovery build accreted momentum/catalyst/watchlist entries while
