@@ -844,20 +844,24 @@ export class TradeEngine {
     if (!creds.alpaca) return false;
     const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
 
+    let shortAmount = PER_POSITION;
     try {
       const posCheck = await this.executor.getPositions();
       const deployed = posCheck.reduce((s, p) => s + Math.abs(p.marketValue), 0);
-      if (deployed + PER_POSITION > BUDGET_MAX) {
-        console.log(`  [SHORT] BUDGET CAP — $${deployed.toFixed(0)} deployed + $${PER_POSITION} > $${BUDGET_MAX}. Skipping ${symbol}.`);
+      const available = BUDGET_MAX - deployed;
+      const MIN_SHORT = 500;
+      if (available < MIN_SHORT || available < price) {
+        console.log(`  [SHORT] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
         return false;
       }
       if (posCheck.length >= MAX_POSITIONS) {
         console.log(`  [SHORT] POSITION CAP — ${posCheck.length}/${MAX_POSITIONS}. Skipping ${symbol}.`);
         return false;
       }
+      shortAmount = Math.min(PER_POSITION, available);
     } catch {}
 
-    const qty = Math.floor(PER_POSITION / price);
+    const qty = Math.floor(shortAmount / price);
     if (qty <= 0) return false;
 
     try {
@@ -1731,11 +1735,10 @@ export class TradeEngine {
         const freshPos = await this.executor.getPositions();
         let openSlots = MAX_POSITIONS - freshPos.filter(p => !isCrypto(p.ticker)).length;
 
-        // Filter: high score (>0.95) + catalyst type (earnings, M&A, FDA) + not already held + not sold today
-        const sp500Only = new Set(SP500_UNIVERSE);
-        const ALLOWED_ETF = new Set(['SQQQ','SH','SPXS','SDOW','SOXS','TZA','TSDD','TSLQ','FAZ','SDS','ERY','DRV']);
+        // Filter: high score (>0.95) + not already held + not sold today
+        // No SP500 filter — research worker + Biz Insider already handle quality
         const catalystBuys = stars
-          .filter(s => sp500Only.has(s.symbol) || ALLOWED_ETF.has(s.symbol)) // S&P 500 + inverse ETFs ONLY
+          .filter(s => (s.sector || '') !== 'short_candidate') // longs only here
           .filter(s => s.score >= 0.95)
           .filter(s => !heldSet.has(s.symbol))
           .filter(s => !this._sessionSells.has(s.symbol))
@@ -1770,6 +1773,52 @@ export class TradeEngine {
         }
       } catch {}
 
+    }
+
+    // ── 5d2. CATALYST SHORTS — short the biggest losers from Biz Insider + research ──
+    if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+      try {
+        const stars = this.store.getResearchStars();
+        const heldSet = new Set(equityPos.map(p => p.ticker));
+        const freshPos = await this.executor.getPositions();
+        const existingShorts = freshPos.filter(p => p.shares < 0).length;
+        let openSlots = MAX_POSITIONS - freshPos.filter(p => !isCrypto(p.ticker)).length;
+
+        // Max 2 shorts at a time
+        if (existingShorts < 2 && openSlots > 0) {
+          const shortCandidates = stars
+            .filter(s => s.sector === 'short_candidate')
+            .filter(s => s.score >= 0.85)
+            .filter(s => !heldSet.has(s.symbol))
+            .filter(s => !this._sessionSells.has(s.symbol))
+            .filter(s => !this._recentBuys.has(s.symbol))
+            .sort((a: any, b: any) => b.score - a.score);
+
+          for (const star of shortCandidates.slice(0, 2 - existingShorts)) {
+            if (openSlots <= 0) break;
+            try {
+              const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${star.symbol}&feed=iex`, {
+                headers: alpacaHeaders, signal: AbortSignal.timeout(5000),
+              });
+              if (!snapRes.ok) continue;
+              const snapData = await snapRes.json() as any;
+              const snap = snapData[star.symbol];
+              if (!snap) continue;
+              const price = snap.latestTrade?.p;
+              const prevClose = snap.prevDailyBar?.c;
+              if (!price || !prevClose || price < 10) continue;
+              const dayChange = ((price - prevClose) / prevClose) * 100;
+
+              // Must be down 3%+ today — confirms weakness
+              if (dayChange < -3.0) {
+                console.log(`  [CATALYST SHORT] ${star.symbol} ${dayChange.toFixed(1)}% today | ${star.catalyst?.slice(0, 60)} | score=${star.score.toFixed(2)}`);
+                const shorted = await this.shortPosition(star.symbol, price, `CATALYST_SHORT ${dayChange.toFixed(1)}% ${star.catalyst?.slice(0, 30)}`);
+                if (shorted) openSlots--;
+              }
+            } catch {}
+          }
+        }
+      } catch {}
     }
 
     // ── 5e. MIDDAY MOMENTUM — buy top S&P 500 movers (11:00-11:15 AM ET) ──
