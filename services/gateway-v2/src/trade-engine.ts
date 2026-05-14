@@ -52,7 +52,7 @@ const BUDGET_MAX = 50_000;            // $50K total deployed cap
 // debugging losses. Keep those paths visible but off until they have a spec,
 // backtest, and explicit risk model.
 const ENABLE_PREMARKET_MOMENTUM_BUYS = false;       // Pure momentum — no edge proven
-const ENABLE_MIDDAY_MOMENTUM = true;                 // NEW: buy top S&P 500 movers at 11 AM ET
+const ENABLE_MIDDAY_MOMENTUM = false;                 // DISABLED: use catalyst buy path instead
 const ENABLE_SECTOR_INTRADAY_INVERSE_BUYS = false;  // Whipsaw risk — use 3:50 PM regime only
 const ENABLE_PRIORITY_WATCHLIST_BUYS = false;        // Pure momentum chasing — no edge
 const ENABLE_CATALYST_BUYS = true;                   // RE-ENABLED: buys high-score research stars (S&P 500 only)
@@ -717,21 +717,24 @@ export class TradeEngine {
       // Trident unavailable — proceed without (don't block on failure)
     }
 
-    // Budget gate — check total deployed before buying
+    // Budget gate — use available capital, not fixed PER_POSITION
+    let buyAmount = PER_POSITION;
     try {
       const posCheck = await this.executor.getPositions();
       const deployed = posCheck.reduce((s, p) => s + Math.abs(p.marketValue), 0);
-      if (deployed + PER_POSITION > BUDGET_MAX) {
-        console.log(`  [BUY] BUDGET CAP — $${deployed.toFixed(0)} deployed + $${PER_POSITION} > $${BUDGET_MAX}. Skipping ${symbol}.`);
+      const available = BUDGET_MAX - deployed;
+      if (available < price) {
+        console.log(`  [BUY] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free, can't afford ${symbol} @ $${price.toFixed(2)}`);
         return false;
       }
       if (posCheck.length >= MAX_POSITIONS) {
         console.log(`  [BUY] POSITION CAP — ${posCheck.length}/${MAX_POSITIONS}. Skipping ${symbol}.`);
         return false;
       }
+      buyAmount = Math.min(PER_POSITION, available);
     } catch {}
 
-    const qty = Math.floor(PER_POSITION / price);
+    const qty = Math.floor(buyAmount / price);
     if (qty <= 0) return false;
 
     try {
