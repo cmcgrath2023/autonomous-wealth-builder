@@ -537,6 +537,7 @@ function scheduleMomentumScanner(store: GatewayStateStore): void {
 
 function scheduleCatalystHunter(store: GatewayStateStore): void {
   const slots: Array<[number, number, string]> = [
+    [7, 0, 'overnight-earnings'],  // Catch AH earnings before morning prep at 8 AM
     [8, 30, 'pre-market'],
     [12, 0, 'midday'],
     [14, 0, 'afternoon'],

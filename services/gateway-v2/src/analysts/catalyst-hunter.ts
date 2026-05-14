@@ -40,15 +40,24 @@ const CATALYST_KEYWORDS: Array<{ pattern: RegExp; type: string; weight: number }
   { pattern: /\b(fed rate|rate hike|rate cut|interest rate|fomc)\b/i, type: 'fed_action', weight: 0.88 },
   // === Company-specific catalysts ===
   { pattern: /\bfda\s+(approval|approved|clearance|cleared|breakthrough)\b/i, type: 'fda_approval', weight: 0.95 },
-  { pattern: /\b(earnings|q[1-4])\s+(beat|beats|crushed|smashed|surpass)/i, type: 'earnings_beat', weight: 0.90 },
-  { pattern: /\b(upgrade|upgraded to|initiated.*(buy|outperform))/i, type: 'upgrade', weight: 0.85 },
-  { pattern: /\b(guidance raised|raises guidance|raised outlook)/i, type: 'guidance_raise', weight: 0.88 },
+  { pattern: /\b(earnings|q[1-4])\s+(beat|beats|crushed|smashed|surpass|top|exceed)/i, type: 'earnings_beat', weight: 0.98 },
+  { pattern: /\b(record revenue|revenue.*beat|revenue.*surge|blowout quarter)/i, type: 'earnings_beat', weight: 0.97 },
+  { pattern: /\b(earnings.*rise|earnings.*jump|earnings.*soar|profit.*surge)/i, type: 'earnings_beat', weight: 0.96 },
+  { pattern: /\b(upgrade|upgraded to|initiated.*(buy|outperform))/i, type: 'upgrade', weight: 0.92 },
+  { pattern: /\b(guidance raised|raises guidance|raised outlook|raises forecast)/i, type: 'guidance_raise', weight: 0.95 },
   { pattern: /\b(acquisition|acquires|buyout|to acquire|merger|takeover)\b/i, type: 'ma_rumor', weight: 0.85 },
   { pattern: /\b(contract win|awarded contract|\$\d+[bmk]?\s*(contract|deal))/i, type: 'contract_win', weight: 0.80 },
   { pattern: /\b(insider buying|insider purchased|director bought)/i, type: 'insider_buying', weight: 0.75 },
   { pattern: /\b(short squeeze|short interest|high short)/i, type: 'short_squeeze', weight: 0.70 },
   { pattern: /\b(partnership|strategic partnership|collaboration)\b/i, type: 'partnership', weight: 0.65 },
-  { pattern: /\b(record revenue|beats estimates|exceeds expectations)/i, type: 'earnings_beat', weight: 0.80 },
+  { pattern: /\b(record revenue|beats estimates|exceeds expectations)/i, type: 'earnings_beat', weight: 0.96 },
+  // === Bearish catalysts → short candidates ===
+  { pattern: /\b(earnings|q[1-4])\s+(miss|misses|missed|disappoints|fell short)/i, type: 'earnings_miss', weight: 0.97 },
+  { pattern: /\b(guidance cut|lowers guidance|lowered outlook|cuts forecast|warns)/i, type: 'guidance_cut', weight: 0.95 },
+  { pattern: /\b(downgrade|downgraded to|cut to sell|initiated.*underperform)/i, type: 'downgrade', weight: 0.92 },
+  { pattern: /\b(plunge|crash|tank|tumble|nosedive|collapse)\b/i, type: 'crash', weight: 0.90 },
+  { pattern: /\b(sec investigation|sec probe|fraud|accounting irregularity|restatement)/i, type: 'sec_probe', weight: 0.95 },
+  { pattern: /\b(layoff|restructur|job cuts|workforce reduction)/i, type: 'restructuring', weight: 0.75 },
 ];
 
 export interface CatalystCandidate {
@@ -305,11 +314,13 @@ Return ONLY the JSON array. No commentary.`;
   private persistCandidates(candidates: CatalystCandidate[]): void {
     for (const c of candidates) {
       try {
-        // SQLite: research_stars (for trade-engine buy pipeline)
+        // SQLite: research_stars (for trade-engine buy/short pipeline)
+        const BEARISH_TYPES = new Set(['earnings_miss', 'guidance_cut', 'downgrade', 'crash', 'sec_probe', 'restructuring']);
+        const isBearish = BEARISH_TYPES.has(c.catalystType);
         const score = Math.min(0.99, 0.85 + c.confidence * 0.14);
         this.store.saveResearchStar(
           c.symbol,
-          'catalyst',
+          isBearish ? 'short_candidate' : 'catalyst',
           `[${c.catalystType}] ${c.catalyst}`,
           score,
         );
