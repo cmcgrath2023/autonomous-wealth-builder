@@ -2124,24 +2124,38 @@ export class TradeEngine {
         } catch {}
       }
 
-      // Buy inverse ETFs only at 3:50 PM scan time (daily decision, not intraday whipsaw)
-      if (isScanTime && heldInverse.length === 0) {
-        const regime = await detectRegime(alpacaHeaders);
-        if (regime) {
-          console.log(`  [REGIME] SPY $${regime.spyPrice.toFixed(2)} vs SMA20 $${regime.spySma20.toFixed(2)} — ${regime.bearish ? 'BEARISH' : 'BULLISH'}`);
-          this.store.set('regime', JSON.stringify({ ...regime, checkedAt: new Date().toISOString() }));
-          if (regime.bearish) {
-            const price = await this.fetchPrice(INVERSE_ETF);
-            if (price && price > 0) {
-              const freshPos3 = await this.executor.getPositions();
-              if (freshPos3.filter(p => !isCrypto(p.ticker)).length < MAX_POSITIONS) {
-                console.log(`  [INVERSE] Bearish regime — buying ${INVERSE_ETF} @$${price.toFixed(2)}`);
-                const stopPrice = Math.round(price * (1 - INVERSE_STOP_PCT) * 100) / 100;
-                await this.buyPosition(INVERSE_ETF, price, `BEARISH regime SPY<SMA20`, stopPrice);
+      // Buy inverse ETF when SPY drops 0.5%+ intraday and we're heavy in tech — hedge the core
+      // Runs once per day between 10 AM and 2 PM (morning action, not EOD)
+      const hedgeKey = `hedge_inverse_${today}`;
+      if (heldInverse.length === 0 && !this.store.get(hedgeKey) && mkt.isMarketOpen && mkt.etHour >= 10 && mkt.etHour < NEW_BUY_CUTOFF_HOUR) {
+        try {
+          const spySnap2 = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=SPY&feed=iex`, {
+            headers: alpacaHeaders, signal: AbortSignal.timeout(5000),
+          });
+          if (spySnap2.ok) {
+            const snapData2 = await spySnap2.json() as any;
+            const spyPrice2 = snapData2.SPY?.latestTrade?.p;
+            const spyPrev2 = snapData2.SPY?.prevDailyBar?.c;
+            if (spyPrice2 && spyPrev2) {
+              const spyDrop = ((spyPrice2 - spyPrev2) / spyPrev2) * 100;
+              // SPY down 0.5%+ and we hold core tech (NVDA/AMZN) = buy SQQQ hedge
+              const holdsCoretech = equityPos.some(p => CORE_HOLDINGS.has(p.ticker));
+              if (spyDrop < -0.5 && holdsCoretech) {
+                const price = await this.fetchPrice(INVERSE_ETF);
+                if (price && price > 0) {
+                  const freshPos3 = await this.executor.getPositions();
+                  if (freshPos3.filter(p => !isCrypto(p.ticker)).length < MAX_POSITIONS) {
+                    console.log(`  [HEDGE] SPY ${spyDrop.toFixed(1)}% + core tech exposed — buying ${INVERSE_ETF} @$${price.toFixed(2)}`);
+                    const stopPrice = Math.round(price * (1 - INVERSE_STOP_PCT) * 100) / 100;
+                    await this.buyPosition(INVERSE_ETF, price, `HEDGE SPY${spyDrop.toFixed(1)}% core_exposed`, stopPrice);
+                    this.store.set(hedgeKey, 'placed');
+                    await postToDiscord(`🛡️ HEDGE: SPY ${spyDrop.toFixed(1)}% — bought ${INVERSE_ETF} to offset core tech losses`);
+                  }
+                }
               }
             }
           }
-        }
+        } catch {}
       }
     }
 
