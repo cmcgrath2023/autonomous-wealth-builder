@@ -154,6 +154,8 @@ export class ResearchQuality {
     }
 
     const results: SectorPerf[] = [];
+    // short_candidate is a signal type, not a sector — don't evaluate/demote it
+    sectorMap.delete('short_candidate');
     for (const [sector, sectorTrades] of sectorMap) {
       const wins = sectorTrades.filter((t) => t.pnl > 0).length;
       const losses = sectorTrades.filter((t) => t.pnl <= 0).length;
