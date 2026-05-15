@@ -55,9 +55,10 @@ const ENABLE_PREMARKET_MOMENTUM_BUYS = false;       // Pure momentum — no edge
 const ENABLE_MIDDAY_MOMENTUM = false;                 // DISABLED: use catalyst buy path instead
 const ENABLE_SECTOR_INTRADAY_INVERSE_BUYS = false;  // Whipsaw risk — use 3:50 PM regime only
 const ENABLE_PRIORITY_WATCHLIST_BUYS = false;        // Pure momentum chasing — no edge
-const ENABLE_CATALYST_BUYS = true;                   // RE-ENABLED: buys high-score research stars (S&P 500 only)
-const ENABLE_MORNING_RSI2_BUYS = true;               // RE-ENABLED: RSI-2 scan at 10:15 AM with fresh data
-const ENABLE_MORNING_PREP = true;                    // NEW: 8 AM unified prep — merges last night's RSI-2 + research catalysts
+const ENABLE_CATALYST_BUYS = true;                   // Buys high-score research stars from Biz Insider + catalyst hunter
+const ENABLE_MORNING_RSI2_BUYS = false;              // DISABLED: RSI-2 buys consistently pick losers (UNP -$639, GWW -$101)
+const ENABLE_MORNING_PREP = true;                    // 8 AM unified prep — overnight catalysts + pre-market snapshots
+const NEW_BUY_CUTOFF_HOUR = 14;                      // No new buys after 2 PM ET — avoid late-day entries that go red AH
 
 // Core holdings — buy and hold, engine NEVER sells these
 const CORE_HOLDINGS = new Set<string>(['AMZN', 'NVDA']); // Owner long-term holds — engine NEVER sells these
@@ -1728,7 +1729,7 @@ export class TradeEngine {
     // ── 5d. CATALYST BUYS — research worker finds it, engine buys it. Every heartbeat. ──
 
     // Read research stars and buy high-conviction catalysts that are moving up today
-    if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && (mkt.etHour < 15 || (mkt.etHour === 15 && mkt.etMin < 30))) {
+    if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && mkt.etHour < NEW_BUY_CUTOFF_HOUR) {
       try {
         const stars = this.store.getResearchStars();
         const heldSet = new Set(equityPos.map(p => p.ticker));
@@ -2052,24 +2053,11 @@ export class TradeEngine {
         }
       }
 
-      // Execute buys — fill available slots (circuit breaker blocks this, not the scan)
-      if (circuitBreakerTripped) {
-        console.log(`  [RSI-2] Circuit breaker — ${buys.length} signals found but NOT buying. Signals: ${buys.slice(0, 5).map(b => `${b.symbol} RSI=${b.rsi2.toFixed(1)}`).join(', ')}`);
-      } else {
-        const freshPos = await this.executor.getPositions();
-        const freshEquity = freshPos.filter(p => !isCrypto(p.ticker));
-        let openSlots = MAX_POSITIONS - freshEquity.length;
-        const freshDeployed = freshEquity.reduce((s, p) => s + Math.abs(p.marketValue), 0);
-
-        for (const buy of buys) {
-          if (openSlots <= 0) break;
-          if (freshDeployed + PER_POSITION > BUDGET_MAX) break;
-          if (this._sessionSells.has(buy.symbol)) continue;
-
-          console.log(`  [RSI-2 BUY] ${buy.symbol} RSI(2)=${buy.rsi2.toFixed(1)} price=$${buy.price.toFixed(2)} > SMA200=$${buy.sma200.toFixed(2)}`);
-          const bought = await this.buyPosition(buy.symbol, buy.price, `RSI2=${buy.rsi2.toFixed(1)} mean_reversion`);
-          if (bought) openSlots--;
-        }
+      // RSI-2 buys DISABLED — scan data saved for morning prep but no 3:50 PM entries.
+      // Reason: RSI-2 buys at EOD consistently go red after hours (UNP -$639, GWW -$101).
+      // Morning prep uses the scan data to identify bounce candidates for next-day open.
+      if (buys.length > 0) {
+        console.log(`  [RSI-2] ${buys.length} buy signals saved for morning prep (NOT buying at 3:50 PM). Top: ${buys.slice(0, 5).map(b => `${b.symbol} RSI=${b.rsi2.toFixed(1)}`).join(', ')}`);
       }
 
       // Execute covers (close short positions)
