@@ -1,485 +1,203 @@
-# Autonomous Wealth Builder
+# MTWM — Autonomous Wealth Builder
 
-Autonomous wealth generation system combining algorithmic trading, real estate acquisition, and multi-agent coordination — multiple streams of income feeding each other.
+Autonomous trading system that finds high-conviction opportunities, executes with discipline, and learns from every outcome. Built on Buffett quality principles with modern market sensing.
 
-**Investment Strategy Foundations:**
-- **Michael Burry** — Deep value analysis, contrarian conviction, concentrated positions on highest-confidence setups
-- **Warren Buffett** — Buy quality at a discount, compound winners, cut losers fast, let the star run
-- **Robert Allen** — *Nothing Down* real estate acquisition, *Multiple Streams of Income* cross-pollination between trading profits and real estate capital deployment
+**Philosophy:** Buy what you'd hold for 100 years, but trade it with momentum. Concentrate on winners, cut losers fast, earn from both directions.
 
-## System Architecture
+## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        AWB UI (Next.js 16)                        │
-│  Dashboard │ Trading │ Real Estate │ Agents │ Strategy │ Roadmap    │
-│  HeroUI + Tailwind CSS 4 │ Three.js 3D Portfolio Globe             │
-│  Port 3000                                                          │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │ REST API
-┌────────────────────────────┴────────────────────────────────────────┐
-│                     Gateway (Express) — Port 3001                   │
-│  Event Bus (EventEmitter3) │ Service Router │ API Layer             │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐               │
-│  │ MidStream    │  │ Neural      │  │ MinCut       │               │
-│  │ Market Data  │  │ Trader      │  │ Portfolio    │               │
-│  │ Alpaca API   │  │ 7-Vote      │  │ Optimizer    │               │
-│  │ Dynamic Watch│  │ Signal Sys  │  │ Kelly Sizing │               │
-│  └─────────────┘  └─────────────┘  └──────────────┘               │
-│                                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐               │
-│  │ Authority   │  │ SAFLA       │  │ QuDAG        │               │
-│  │ Matrix      │  │ Oversight   │  │ Witness      │               │
-│  │ Governance  │  │ Drift Detect│  │ SHA-256 Chain│               │
-│  │ 3-Phase     │  │ Recalibrate │  │ AES-256 Vault│               │
-│  └─────────────┘  └─────────────┘  └──────────────┘               │
-│                                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐               │
-│  │ AgentDB     │  │ Bayesian    │  │ Learning     │               │
-│  │ Vector Mem  │  │ Intelligence│  │ Engine       │               │
-│  │ RuVector    │  │ Cross-Agent │  │ Event-Driven │               │
-│  │ HNSW + SONA │  │ Belief Share│  │ Recording    │               │
-│  └─────────────┘  └─────────────┘  └──────────────┘               │
-│                                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐               │
-│  │ Strategic   │  │ Analyst     │  │ Autonomy     │               │
-│  │ Planner     │  │ Agent       │  │ Engine       │               │
-│  │ Goalie GOAP │  │ 24/7 Scanner│  │ OpenClaw     │               │
-│  │ A* Planning │  │ Dynamic WL  │  │ Heartbeat    │               │
-│  └─────────────┘  └─────────────┘  └──────────────┘               │
-│                                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐               │
-│  │ RVF Engine  │  │ Trait Engine│  │ RE Evaluator │               │
-│  │ Versioned   │  │ Bayesian    │  │ Allen Score  │               │
-│  │ Containers  │  │ Beta Dist   │  │ Deal Eval    │               │
-│  │ SQLite      │  │ Posteriors  │  │ ND Viability │               │
-│  └─────────────┘  └─────────────┘  └──────────────┘               │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────┐              │
-│  │ Sublinear Time Solver (WASM)                     │              │
-│  │ Neumann Series │ Push │ Hybrid Random Walk       │              │
-│  │ O(log n) optimization for deal scoring & alloc   │              │
-│  └──────────────────────────────────────────────────┘              │
-└─────────────────────────────────────────────────────────────────────┘
+Overnight Research (5 PM → 7 AM)
+  ├── Catalyst Hunter scans Alpaca news for earnings beats, upgrades, FDA approvals
+  ├── Research Worker reads Yahoo Finance, Bloomberg RSS, Biz Insider movers
+  ├── Deep Research pulls analyst targets, insider activity, key financials per ticker
+  └── Results written as research stars → ready for morning
+
+Morning Prep (8 AM ET)
+  ├── Merges overnight catalysts + research stars + pre-market price snapshots
+  ├── Confirms movers are actually moving pre-market
+  └── Places market-on-open (opg) orders → fill at 9:30 AM
+
+Market Hours (9:30 AM → 4 PM ET)
+  ├── Catalyst buys: high-score research stars moving up (10 AM → 2 PM)
+  ├── Catalyst shorts: biggest losers from Biz Insider (10 AM → 2 PM)
+  ├── SQQQ auto-hedge: when SPY drops 0.5%+ and core tech is exposed
+  ├── Core reinforcement: auto-add to high-scoring core holdings
+  ├── $100 heartbeat stop + 5% broker stop on every position
+  └── All shorts auto-covered at 3:45 PM — no overnight short exposure
+
+Extended Hours (4 PM → 8 PM / 4 AM → 9:30 AM)
+  ├── Catalyst hunter catches earnings beats → immediate limit buy
+  └── Gets in before the gap-up at open
 ```
 
 ## Intelligence Stack
 
-AWB uses a three-tier intelligence architecture where every agent learns, stores learnings as vectors, and shares them across the system.
+### Trident (External Intelligence Platform)
+Domain-scoped knowledge that persists across sessions and learns from every trade.
 
-### AgentDB (Vector Memory + Self-Learning)
-
-System-wide vector store powered by [AgentDB v3](https://www.npmjs.com/package/agentdb) with [RuVector](https://www.npmjs.com/package/ruvector) HNSW indexing. All agent learnings are stored as vector embeddings in a single `.rvf` file.
-
-| Component | Role |
-|-----------|------|
-| **ReasoningBank** | Stores proven trading patterns searchable by semantic similarity |
-| **ReflexionMemory** | Trade episodes with self-critiques — learns from wins and losses |
-| **SkillLibrary** | Auto-promotes high-reward patterns into reusable skills (every 30min) |
-| **LearningSystem** | Decision Transformer + 9 RL algorithms for optimal action sequences |
-| **SONA** | Micro-LoRA adapter that improves search quality per-agent over time |
-| **HNSW Index** | 61-microsecond similarity search across all stored patterns |
-
-```
-Agent executes action → outcome stored as episode (ReflexionMemory)
-  → successful patterns → ReasoningBank
-  → high-reward patterns → SkillLibrary (reusable skills)
-  → all experiences → LearningSystem (Decision Transformer training)
-
-Next time ANY agent faces similar situation:
-  → queries ReasoningBank for proven approaches
-  → queries ReflexionMemory for past wins/failures
-  → queries SkillLibrary for reusable skills
-  → SONA adapts search quality based on feedback
-```
-
-### Bayesian Intelligence (Cross-Agent Belief Sharing)
-
-Real-time shared belief system where all agents contribute outcomes and query priors before acting.
-
-| Domain | What It Tracks |
+| Domain | What It Stores |
 |--------|---------------|
-| **ticker** | Per-ticker win/loss rate from closed trades |
-| **indicator** | Which signal types (RSI oversold, MACD cross) are reliable |
-| **strategy** | Which exit reasons (stop-loss, take-profit) work best |
-| **timing** | Which times/days produce winning trades |
-| **market_condition** | Bull/bear/sideways regime detection |
+| `trade_outcome` | Every closed trade — ticker, strategy, P&L, holding period |
+| `avoid` | Blacklisted tickers (railroads, TTWO, owner preferences) |
+| `buffett_core` | Berkshire portfolio quality benchmarks |
+| `fundamental_profile` | Deep research scores, analyst targets, insider activity |
+| `strategy_knowledge` | Strategy rules, earnings dates, catalyst patterns |
+| `autonomous_decision` | Every autonomous buy/sell decision for pattern learning |
+| `owner_preference` | Owner directives, sector preferences, risk tolerance |
 
-Confidence adjustment: before executing any trade, the system blends the raw signal confidence with Bayesian priors and AgentDB pattern matches.
+**SONA** learns from trade outcomes → improves `shouldBuy()` decisions over time.
 
-```
-Raw Signal (0.72) → Bayesian Adjustment (ticker prior: 0.85) → Pattern Boost
-(AgentDB: proven pattern found) → Final Confidence (0.76) → Execute if >= 0.60
-```
+### Research Team (In-Process)
 
-### Trident Intelligence Platform (SONA + NOVA + FACT)
+| Component | Cycle | What It Does |
+|-----------|-------|-------------|
+| **Research Worker** | 2 min | Biz Insider movers scrape, Yahoo gainers/losers, Bloomberg RSS, Alpaca movers |
+| **Research News** | 90 sec | News sentiment, catalyst themes (energy/tech/defense/macro), critical events |
+| **Research Quality** | 120 sec | Sector performance tracking, promote/demote based on win rates |
+| **Catalyst Hunter** | 6x daily | Alpaca news scan for earnings beats, upgrades, FDA, M&A. Overnight: 5 PM, 10 PM, 7 AM |
+| **Deep Research** | Daily 7 AM | Yahoo Finance fundamentals per ticker — analyst targets, insider activity, earnings dates |
+| **Momentum Scanner** | 2x daily | Yahoo gainers, Alpaca movers, volume leaders → PostgreSQL + research stars |
 
-AWB uses [Trident](https://trident.cetaceanlabs.com) as its external intelligence layer — a complete AI reasoning platform with three complementary systems that learn continuously from every trade, research scan, and market observation.
-
-#### SONA (Self-Optimizing Neural Architecture)
-Per-domain micro-LoRA adapters that improve with every interaction. SONA learns from trade outcomes, owner preferences, and strategy patterns.
-
-```
-Trade closes → recordClosedTrade() → SONA training
-  → "MCHP: RSI-2 pick, held 4 days, +$1,100" → learns "RSI-2 works on semis"
-  → "DIS: slow mover, owner dislikes" → learns "avoid DIS for day trading"
-  → "WOLF: 0W/30L" → learns "block volatile small caps"
-```
-
-**What SONA knows:**
-- Buffett quality investment framework (core philosophy)
-- Owner preferences (sectors, risk tolerance, blacklisted tickers)
-- Trade history patterns (which strategies win, which lose)
-- Berkshire Hathaway portfolio as quality benchmark (AAPL, AXP, BAC, KO, CVX, MCO, OXY, COF, GOOGL, KR)
-
-#### NOVA (Neural Optimized Value Architecture)
-15-minute autonomous learning cycles that run continuously. NOVA reinforces winning strategies and identifies knowledge gaps while the system is idle.
+### Conviction Pipeline
 
 ```
-Endpoints:
-  GET  /v1/nova/stats  — decision counts, latency, model fallback rates
-  GET  /v1/nova/gaps   — identifies what NOVA needs more training on
-  POST /v1/nova/train  — submit winning/losing patterns for reinforcement
+Research Worker finds movers (Biz Insider, Yahoo, Bloomberg)
+  → Research stars (SQLite) scored 0.85-0.99
+    → Signal scan bridges to PostgreSQL research_signals (every 15 min)
+      → Thesis generator clusters signals → conviction score (0-100)
+        → Triggered theses (conviction ≥ 65) promoted back to research stars
+          → Catalyst buy path executes (score ≥ 0.95, Trident shouldBuy gate)
 ```
 
-**NOVA enhances AWB by:**
-- Getting smarter overnight — trains while we sleep, ready at 8 AM
-- Reinforcing winning patterns from $1K+ days
-- Flagging gaps in knowledge (new sectors, unfamiliar tickers)
+### Bayesian Intelligence
+Per-ticker win/loss tracking from closed trades. Adjusts research star scores based on historical performance. Tickers with <40% win rate on 3+ observations get rejected.
 
-#### FACT Cache (Fast Approximate Context Trie)
-Memory-first query resolution. 90% of "should I buy X?" decisions answered from cached knowledge without hitting a model — sub-millisecond latency.
+## Trading Rules
+
+### Buy Logic
+- **Morning prep** at 8 AM: overnight catalysts → `opg` orders at open
+- **Catalyst buys** 10 AM - 2 PM: Biz Insider movers + catalyst hunter picks
+- **Core reinforcement**: auto-add to NVDA/AMZN when deep research score ≥ 90 and Trident approves
+- **No new buys after 2 PM ET** — late entries go red after hours
+- **$500 minimum** per position — no 1-share waste
+- **Extended hours buying**: earnings beats trigger immediate AH limit orders
+
+### Short Logic
+- **Catalyst shorts** 10 AM - 2 PM: Biz Insider biggest losers + bearish catalysts (earnings miss, downgrade, guidance cut)
+- **Max 2 shorts** at a time
+- **All shorts covered at 3:45 PM** — no overnight short exposure
+- **5% buy-stop** on every short position
+
+### Hedge Logic
+- **SQQQ auto-hedge**: when SPY drops 0.5%+ intraday and we hold core tech (NVDA/AMZN)
+- Auto-sells if SPY flips green +1%
+
+### Protection
+- **5% broker-side stop** on every position (placed automatically by heartbeat)
+- **$100 heartbeat stop** — active monitoring every 2 minutes
+- **Core holdings** (AMZN, NVDA) — engine never auto-sells
+- **Watchlist rebuy alerts** — Discord notification when sold stocks hit rebuy target
+
+### Avoid List (Trident `avoid` domain)
+- Railroads: UNP, CSX, NSC
+- TTWO (moral objection)
+- DIS (slow mover)
+- Additional tickers added via Discord `!note` or Trident training
+
+## Data Sources
+
+| Source | Method | What It Provides |
+|--------|--------|-----------------|
+| **Biz Insider** | Scrape (curl) | S&P 500 top gainers + biggest losers, updated every 2 min |
+| **Yahoo Finance** | RSS + quoteSummary API | Headlines, gainers/losers screener, analyst targets, financials, insider transactions |
+| **Bloomberg** | RSS | Market news headlines |
+| **Alpaca News** | REST API | Company-specific news with ticker extraction |
+| **Alpaca Market Data** | REST + WebSocket | Real-time quotes, snapshots, historical bars |
+
+## Architecture
+
+Single-process Node.js orchestrator running all components in-process:
 
 ```
-Engine asks: "Should I buy AAPL?"
-  → FACT cache: "AAPL is Buffett core holding, 4W/4L, owner favors" → ALLOW (0ms)
-Engine asks: "Should I buy WOLF?"
-  → FACT cache: "WOLF 0W/30L, volatile small cap, not S&P 500" → BLOCK (0ms)
+services/gateway-v2/src/
+├── index.ts              # Orchestrator — starts everything, schedules crons
+├── trade-engine.ts       # Heartbeat (2 min), buy/sell/short execution, all trading logic
+├── research-worker.ts    # 2-min cycle: RSS, Yahoo, Biz Insider, Alpaca movers
+├── research-crons.ts     # Knowledge graph refresh, signal scan, thesis resolution
+├── brain-client.ts       # Trident API client (shouldBuy, recordTrade, search)
+├── trade-recorder.ts     # Alpaca reconciler, closed trade recording
+├── config-bus.ts         # Credential loading (Alpaca, OANDA)
+├── openclaw.ts           # Position monitoring, drop alerts
+├── analysts/
+│   ├── catalyst-hunter.ts    # News-driven catalyst detection + AH extended hours buying
+│   ├── deep-research.ts      # Yahoo Finance per-ticker fundamentals
+│   ├── momentum-scanner.ts   # Yahoo gainers, Alpaca movers, volume leaders
+│   ├── macro-analyst.ts      # SPY regime detection (bull/bear/choppy)
+│   ├── conviction-scorer.ts  # 7-factor conviction scoring from PG + Bayesian + Trident
+│   ├── thesis-generator.ts   # Signal clustering → thesis → research star promotion
+│   ├── post-mortem.ts        # Daily loss analysis, rule generation
+│   ├── sector-rotator.ts     # 16 sector ETF ranking
+│   ├── exit-analyst.ts       # Exit strategy recommendations
+│   └── risk-manager.ts       # Pre-trade risk checks
+└── managers/
+    ├── research-news.ts      # 90-sec news intelligence cycle
+    ├── research-quality.ts   # 120-sec sector performance tracking
+    └── ops.ts                # SRE monitoring
 ```
 
-#### How AWB Uses Trident
+### Data Stores
 
-| Integration Point | Trident Feature | What Happens |
-|---|---|---|
-| **Before every buy** | SONA `shouldBuy()` | Checks trade history + owner preferences + Buffett quality filter |
-| **Every trade close** | SONA training | Teaches Trident win/loss outcome for that ticker/strategy |
-| **Daily summary (3:55 PM)** | SONA + NOVA training | Day's P&L, best/worst picks, strategy effectiveness |
-| **Research worker (every 2 min)** | Memory storage | RSS catalysts, sector analysis, geopolitical events |
-| **Owner notes (Discord !note)** | SONA training | Manual context — "DIS is a dog", "bullish on datacenter" |
-| **Morning prep (8 AM)** | FACT + SONA query | Fast decisions on pre-market candidates using cached knowledge |
-| **Position alerts (OpenClaw)** | Memory + search | When a holding drops 2%+, searches Yahoo for why and alerts |
+| Store | Technology | What It Holds |
+|-------|-----------|--------------|
+| **State Store** | SQLite | Research stars, positions snapshot, scan results, daily keys |
+| **Research DB** | PostgreSQL (DO) | Companies, relationships, signals, theses, momentum, fundamentals |
+| **Trident** | External API | Domain-scoped memories, SONA patterns, trade history |
 
-**Trident API endpoints used:**
-- `POST /v1/train` — SONA training (trade outcomes, strategy lessons, owner preferences)
-- `POST /v1/memories` — Trade records, research catalysts, position alerts
-- `GET /v1/memories/search` — Ticker history, pattern lookup
-- `GET /v1/nova/stats` — NOVA learning status and decision metrics
-- `GET /v1/nova/gaps` — Knowledge gaps for targeted training
-- `POST /v1/nova/train` — NOVA pattern reinforcement
-- `GET /v1/health` — System health (44 tools, DB connected)
+## Deployment
 
-### Trait Engine (Per-Ticker Bayesian Modeling)
-
-```
-Prior:      Beta(0.5, 0.5) — uninformative
-Update:     posterior = (successes + prior * 5) / (observations + 5)
-Confidence: 1 - 1/(1 + observations * 0.1)
-Trend:      Last 10 posteriors — improving (>+5%), degrading (>-5%), stable
-Snapshots:  Every 30 minutes with aggregate quality score
-```
-
-## Neural Trading System (7-Vote Signal Engine)
-
-The Neural Trader uses a multi-confirmation signal system. All 7 indicators must agree at 60%+ before a signal fires.
-
-| Vote | Indicator | Buy Signal | Sell/Short Signal |
-|------|-----------|-----------|-------------------|
-| 1 | **RSI** | < 25 (oversold) or recovering from < 30 | > 75 (overbought) or falling from > 70 |
-| 2 | **MACD** | Bullish crossover or bullish momentum | Bearish crossunder or bearish momentum |
-| 3 | **Bollinger Bands** | Lower extreme (< 5%) or bounce from lower | Upper extreme (> 95%) or rejection from upper |
-| 4 | **EMA Stack** | Bullish alignment (9 > 21 > 50) | Bearish alignment (9 < 21 < 50) |
-| 5 | **Momentum** | Strong 5-bar momentum (> 2%) + positive 10-bar | Weak 5-bar (< -2%) + negative 10-bar |
-| 6 | **Mean Reversion** | Oversold bounce (20-bar drawdown > 4%, recovering) | Overextended reversal (20-bar run > 10%, rolling) |
-| 7 | **ruv-FANN Neural** | LSTM+GRU ensemble predicts UP with model agreement | LSTM+GRU ensemble predicts DOWN with model agreement |
-
-Additional gates:
-- **Confidence floor:** 60% minimum (4+ of 7 indicators confirming)
-- **Confirmation count:** 3+ distinct confirmations required
-- **Expected value check:** Reward/risk ratio must be >= 1.5:1
-- **Position limit:** Max 10 positions, $25K budget
-- **Price floor:** Minimum $10/share — no penny stocks
-- **Anti-churn:** Max 1 buy per ticker per day
-
-### Short Selling
-
-The system supports short selling as a distinct direction from sell:
-- **sell** = close an existing long position
-- **short** = open a new short position (stocks only, not crypto on Alpaca)
-
-### ruv-FANN Neural Forecast (Vote #7)
-
-Powered by [ruv-swarm](https://www.npmjs.com/package/ruv-swarm) — CPU-native WASM-based neural inference.
-
-- LSTM and GRU models run in parallel on normalized price data
-- Models agree = full vote weight (1.0), disagree = reduced weight (0.3)
-- Sub-100ms inference per ticker
-- Sliding window sequences with ephemeral training
-
-### Dynamic Watchlist (Analyst Agent + News Desk + Research Agent)
-
-The system does NOT use a hardcoded portfolio. Three agents work together to discover opportunities:
-
-**Analyst Agent (deep_scan):**
-1. **Alpaca Screener APIs** — most-actives (by trades + volume), top movers (gainers + losers)
-2. **Quality Filter** — Minimum $10/share, no penny stocks, max 1 buy per ticker per day
-3. **Sector/ETF Universe** — 160+ symbols across all sectors, commodities, metals, inverse ETFs
-4. **Crypto** — Currently disabled (market downturn). Re-enable when recovery starts.
-5. **Oversold bounces** — RSI < 32, short candidates RSI > 72
-6. **Bayesian prioritization** — deprioritize tickers with low win rates
-
-**News Desk Agent (scan_feeds):**
-- 10 RSS feeds: Yahoo Finance (S&P, DJI, Oil, Gold, BTC, VIX), CNBC (Top + Market), Seeking Alpha (Currents + IPOs)
-- Extracts tickers from headlines, detects sentiment (bullish/bearish/neutral)
-- Auto-adds discovered tickers to watchlist
-- Flags high-priority catalysts: IPOs, crashes, surges, geopolitical events
-
-**Research Agent (deep_research):**
-- Queries AgentDB ReasoningBank for proven patterns matching current market regime
-- Queries ReflexionMemory for past trade episodes (wins + failures)
-- Trains GNN model on accumulated pattern outcomes
-- Stores news catalysts as searchable patterns for future reference
-- Checks GOAP progress against daily return target, adjusts aggression when behind
-
-## Strategic Planner (Goalie GOAP + MinCut)
-
-Goal-Oriented Action Planning with A* pathfinding toward financial objectives.
-
-- Creates phased capital growth trajectories (100% return in 30 days)
-- GOAP actions: scan_signals, trade_crypto, trade_stock, take_profit, rebalance, compound, diversify_re, scale_positions
-- Evaluates progress vs expected trajectory every heartbeat
-- Feasibility scoring based on daily return target, win rate, volatility, capital size
-- Mathematical case generator (proves why targets are achievable)
-
-## Core Services
-
-### Trading Module
-
-| Service | Purpose | Key Algorithms |
-|---------|---------|---------------|
-| **MidStream** | Live market data from Alpaca (stocks + crypto) | IEX feed, real-time streaming, dynamic watchlist |
-| **Neural Trader** | 7-vote technical + neural signal generation | RSI, MACD, BB, EMA, momentum, mean reversion, LSTM+GRU |
-| **MinCut** | Portfolio optimization | Kelly criterion, correlation analysis, position sizing |
-| **Trade Executor** | Order execution via Alpaca | Market/limit orders, position tracking, short selling |
-| **Position Manager** | Tiered exits (crypto/equity/resilient) | Crypto -5%, equity -7%, resilient -10% SL, Trident LoRA exits |
-| **Analyst Agent** | 24/7 dynamic opportunity discovery | Alpaca screener APIs, oversold/overbought scanning |
-| **Strategic Planner** | Outcome-based goal planning | Goalie GOAP + A* pathfinding + MinCut Kelly sizing |
-
-### Governance Module
-
-| Service | Purpose | Key Features |
-|---------|---------|-------------|
-| **Authority Matrix** | Three-phase decision routing | Paper → Real Initial → Real Full thresholds |
-| **SAFLA** | Meta-cognitive oversight | Strategy drift detection (0.3 threshold), recalibration |
-| **QuDAG Witness** | Tamper-proof audit trail | SHA-256 hash chain, AES-256-GCM credential vault |
-
-### Intelligence Module
-
-| Service | Purpose | Approach |
-|---------|---------|---------|
-| **AgentDB** | System-wide vector memory | RuVector HNSW, ReasoningBank, ReflexionMemory, SkillLibrary, SONA |
-| **Bayesian Intelligence** | Cross-agent belief sharing | Beta-distribution posteriors across 5 domains, confidence adjustment |
-| **Trait Engine** | Per-ticker Bayesian modeling | Beta posteriors, trend detection, 30-min snapshots |
-| **Learning Engine** | Event-driven recording | Captures signals, trades, risk alerts, decisions, drift events |
-| **RVF Engine** | Versioned container storage | Knowledge, roadmap, learning, property, strategy containers |
-
-### Real Estate Module
-
-| Service | Purpose | Allen Techniques |
-|---------|---------|-----------------|
-| **RE Evaluator** | Deal scoring & analysis | Cap rate, DSCR, cash-on-cash, Nothing Down viability |
-| **Property Scout** | Listing aggregation | MLS, FSBO, foreclosures, auctions |
-| **Deal Analyst** | Financial underwriting | NOI, debt service, Kelly allocation |
-| **Offer Strategist** | Creative term design | Seller financing, lease options, subject-to, wraps |
-| **Owner Outreach** | Seller acquisition | Direct outreach, motivated seller ads, follow-up automation |
-| **RE Compliance** | Due diligence | Title, liens, zoning, Thurston County records |
-| **RE Portfolio Mgr** | Allocation optimizer | MinCut Kelly for RE, reinvestment threshold monitoring |
-
-### Optimization Layer
-
-| Service | Purpose | Complexity |
-|---------|---------|-----------|
-| **Sublinear Time Solver** | WASM-accelerated optimization | O(log n) via Johnson-Lindenstrauss |
-| Neumann Series | Iterative matrix solving | O(k·nnz) |
-| Forward/Backward Push | Sparse graph traversal | O(1/ε) |
-| Hybrid Random Walk | Monte Carlo for large systems | O(√n/ε) |
-
-## Agent Roster
-
-### Trading & Intelligence Agents (14)
-- **Neural Trader** — 7-vote signal generation (6 classical + 1 neural)
-- **MinCut Optimizer** — Portfolio optimization, Kelly sizing, strategy evaluation
-- **SAFLA** — Risk oversight and drift monitoring
-- **MidStream** — Real-time market data ingestion, dynamic watchlist
-- **QuDAG Witness** — Audit chain and credential management
-- **Authority Matrix** — Governance threshold enforcement
-- **Trait Learner** — Bayesian learning from trade outcomes
-- **Bayesian Intelligence** — Cross-agent shared belief synchronization
-- **Analyst Agent** — 24/7 opportunity scanner (260+ tickers, penny stocks, IPOs, gems)
-- **News Desk Agent** — RSS feed intelligence (Yahoo Finance, CNBC, Seeking Alpha)
-- **Research Agent** — AgentDB-powered autonomous research, GNN training, GOAP tracking
-- **Strategic Planner** — Goalie GOAP goal-oriented planning
-- **ruv-FANN (ruv-swarm)** — LSTM+GRU neural price forecasting
-- **Autonomy Engine** — OpenClaw 2-minute heartbeat orchestration
-
-### Real Estate Agents (6) — "Platoon of Robert Allens"
-- **Property Scout** — Listing scanner for Olympia/Tumwater WA
-- **Deal Analyst** — Underwriting with Allen scoring
-- **Offer Strategist** — Nothing Down term sheet design
-- **Owner Outreach** — Direct seller acquisition + ad campaigns
-- **RE Compliance** — Title/lien/zoning verification
-- **RE Portfolio Mgr** — Kelly-based allocation and reinvestment timing
-
-## Robert Allen Strategy Framework
-
-### Three Money Mountains
-1. **Real Estate** — Rental properties via Nothing Down techniques
-2. **Investment** — Algorithmic paper trading → real capital
-3. **Marketing** — Revenue through info products and consulting
-
-### Nothing Down Techniques (12)
-Seller financing, lease option, subject-to, wraparound mortgage, hard money + refi, partner split, blanket mortgage, contract for deed, equity sharing, option assignment, master lease, and government programs.
-
-### 5-Phase Reinvestment Strategy
-1. **Foundation** — Paper trading, system calibration
-2. **Capital Building** — Proven trading strategies, profit accumulation
-3. **First Property** — Deploy trading profits into RE via creative financing
-4. **Portfolio Growth** — Multiple streams, diversified income
-5. **Financial Fortress** — Self-sustaining wealth machine
-
-## Autonomy System (OpenClaw-style)
-
-Heartbeat-driven autonomous operations with three levels:
-- **Observe** — Monitor only, no autonomous actions
-- **Suggest** — Generate signals and queue for approval
-- **Act** — Execute within Authority Matrix thresholds
-
-Features: configurable heartbeat interval (1min–1hr), crypto 24/7 (no night mode), per-agent enable/disable, activity feed logging.
-
-Heartbeat: 2 minutes during market hours. Every cycle runs all 12 agents in sequence.
-
-### Registered Heartbeat Actions (12)
-1. `neural-trader:scan_signals` — Scan and execute trades with Bayesian-adjusted confidence
-2. `neural-trader:check_exits` — Stop-loss, take-profit, circuit breaker checks
-3. `midstream-feed:refresh_quotes` — Market data health check
-4. `safla-oversight:check_drift` — Strategy drift monitoring
-5. `trait-learner:snapshot_traits` — Bayesian trait snapshots
-6. `authority-matrix:check_pending` — Pending decision alerts
-7. `qudag-witness:verify_chain` — Witness chain integrity verification
-8. `mincut-optimizer:evaluate_strategy` — GOAP progress evaluation
-9. `analyst-agent:deep_scan` — Dynamic opportunity discovery (260+ tickers, penny stocks, IPOs, gems)
-10. `news-desk:scan_feeds` — RSS intelligence from Yahoo Finance, CNBC, Seeking Alpha (10 feeds)
-11. `bayesian-intel:sync_intelligence` — Cross-agent learning sync + RVF persistence
-12. `research-agent:deep_research` — AgentDB ReasoningBank queries, GNN training, GOAP progress tracking
-
-## Real Estate Pipeline — Olympia/Tumwater WA
-
-Target market: Thurston County, WA (Olympia, Tumwater, Lacey)
-
-**Market Benchmarks:**
-- Median home price: $450K
-- Median rent: $1,800/mo
-- Target cap rate: >8%
-- Target cash-on-cash: >12%
-- Target DSCR: >1.25
-- Property tax: ~1.05%
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 16, HeroUI, Tailwind CSS 4, Three.js/R3F |
-| Backend | Express gateway, TypeScript, EventEmitter3 |
-| Vector Store | AgentDB v3 (RuVector HNSW, SONA, .rvf format) |
-| Storage | SQLite (RVF containers, witness chain) |
-| Equity Broker | Alpaca Markets (paper + live trading) |
-| Forex Broker | OANDA (7 pairs, 25:1 leverage) |
-| Trade Intelligence | Trident (LoRA-trained reasoning, SONA adaptive learning) |
-| Neural | ruv-swarm (LSTM, GRU — CPU-native WASM) |
-| Planning | Goalie GOAP (A* pathfinding, STRIPS-style) |
-| Optimization | sublinear-time-solver (Rust/WASM) |
-| Security | AES-256-GCM vault, SHA-256 witness chain, scrypt KDF |
-| AI | Claude API for query processing |
-
-## API Endpoints
-
-### Intelligence
-- `GET /api/intelligence` — Cross-agent collective intelligence summary
-- `GET /api/intelligence/beliefs` — All Bayesian beliefs (filterable by domain)
-- `GET /api/intelligence/ticker/:ticker` — Bayesian prior for a ticker
-- `GET /api/intelligence/top-performers` — Best performing tickers by win rate
-- `GET /api/intelligence/worst-performers` — Worst performing (avoid/short)
-- `GET /api/intelligence/timing` — Best trading times
-- `GET /api/memory/stats` — AgentDB memory statistics
-- `GET /api/memory/patterns` — Query ReasoningBank for proven patterns
-- `GET /api/memory/episodes` — Query ReflexionMemory for past trades
-- `GET /api/memory/skills` — Query SkillLibrary for reusable skills
-
-### Trading
-- `GET /api/signals` — Active and historical signals
-- `POST /api/signals/scan` — Trigger manual signal scan
-- `GET /api/signals/diagnose` — Raw indicator scores for all tickers
-
-### Strategy
-- `POST /api/strategy/plan` — Create GOAP strategy plan
-- `GET /api/strategy/current` — Current active strategy
-- `GET /api/strategy/progress` — Progress vs expected trajectory
-- `GET /api/strategy/case` — Mathematical feasibility case
-
-## Running
-
+### DigitalOcean (Production)
 ```bash
-# Gateway V2 — orchestrator + trade engine + data feed + research worker (port 3001)
-cd services && npx tsx gateway-v2/src/index.ts
-
-# Forex Service — OANDA connection (port 3003)
-cd services && npx tsx forex-scanner/src/server.ts
-
-# UI (port 3000)
-cd mtwm-ui && npm run dev
+ssh root@104.236.206.28
+cd /opt/awb && git pull --ff-only
+docker compose -f deploy/do/docker-compose.build.yml build awb-services
+docker compose -f deploy/do/docker-compose.build.yml up -d awb-services
 ```
 
-## Project Structure
+### Local Development
+```bash
+cd services/gateway-v2
+npm run build    # TypeScript compile + verify sell paths
+npm test         # Run tests
+```
 
-```
-mtwm/
-├── services/
-│   ├── gateway-v2/src/       # V2 orchestrator + trade engine + workers
-│   ├── gateway/src/          # Legacy gateway (deprecated)
-│   ├── midstream/src/        # Market data (Alpaca) + dynamic watchlist
-│   ├── neural-trader/src/    # 7-vote signal engine + neural forecast + executor
-│   ├── mincut/src/           # Portfolio optimizer + strategic planner (GOAP)
-│   ├── authority-matrix/src/ # Governance + risk controls
-│   ├── safla/src/            # Strategy drift detection
-│   ├── qudag/src/            # Witness chain + credential vault
-│   ├── rvf-engine/src/       # Container storage + knowledge + learning + traits
-│   ├── realestate/src/       # Property evaluator + RE agent roster
-│   └── shared/
-│       ├── types/            # Shared TypeScript interfaces
-│       ├── crypto/           # SHA-256, AES-256 utilities
-│       ├── utils/            # Event bus
-│       └── intelligence/     # BayesianIntelligence + AgentDB memory layer
-├── mtwm-ui/
-│   ├── app/                  # Pages: dashboard, trading, realestate, agents, etc.
-│   ├── components/           # HeroUI components, Three.js portfolio globe
-│   ├── stores/               # Zustand state management
-│   └── lib/                  # Utilities, formatters, RuVector client
-├── docs/
-│   ├── playbooks/            # Gekko-Buffett Expansion, Commodities Expansion
-│   ├── initial-specs/        # Original AWB Spec v6
-│   ├── prompts/              # Setup prompts
-│   └── ROADMAP.md            # Future roadmap (6 phases)
-├── speckit-specs/            # Generated specifications (constitution, trading, RE, optimization, etc.)
-└── README.md
-```
+## Configuration
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `BUDGET_MAX` | $70,000 | Total deployed cap (cash, no margin) |
+| `PER_POSITION` | $6,000 | Default position size |
+| `MAX_POSITIONS` | 8 | Maximum concurrent positions |
+| `STOP_PCT` | 5% | Broker-side stop loss |
+| `DOLLAR_STOP_LOSS` | $100 | Heartbeat active stop |
+| `NEW_BUY_CUTOFF_HOUR` | 14 (2 PM ET) | No new buys after this |
+| `HEARTBEAT_MS` | 120,000 | 2-minute monitoring cycle |
+
+## Broker Connections
+
+| Broker | Market | Status |
+|--------|--------|--------|
+| **Alpaca** (Paper) | US Equities + Extended Hours | Active |
+| **OANDA** | Forex (7 pairs) | Configured, not active |
+| **Crypto** | BTC, ETH, SOL via Alpaca | Disabled (re-enable when market recovers) |
+
+## Key Lessons Learned
+
+1. **Fix basics before adding features** — budget gate math blocked all buys for days
+2. **Concentrate on winners** — NVDA at 175 shares beats 8 positions of random picks
+3. **Buy movers at open, not oversold losers at close** — RSI-2 consistently lost money
+4. **Research must trigger trades** — finding CSCO +15% means nothing if budget blocks the buy
+5. **Hedge red days** — SQQQ auto-buy when SPY drops and core tech is exposed
+6. **Short the losers early** — not at 2 PM after they've already bottomed
+7. **Extended hours = edge** — earnings beats at 5 PM, buy before the gap-up
+8. **WWBD (What Would Buffett Do)** — on every trade, both directions
