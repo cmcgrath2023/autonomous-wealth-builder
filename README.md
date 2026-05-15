@@ -117,33 +117,73 @@ Per-ticker win/loss tracking from closed trades. Adjusts research star scores ba
 
 ## Architecture
 
-Single-process Node.js orchestrator running all components in-process:
+Single-process Node.js orchestrator running all components in-process.
 
 ```
-services/gateway-v2/src/
-├── index.ts              # Orchestrator — starts everything, schedules crons
-├── trade-engine.ts       # Heartbeat (2 min), buy/sell/short execution, all trading logic
-├── research-worker.ts    # 2-min cycle: RSS, Yahoo, Biz Insider, Alpaca movers
-├── research-crons.ts     # Knowledge graph refresh, signal scan, thesis resolution
-├── brain-client.ts       # Trident API client (shouldBuy, recordTrade, search)
-├── trade-recorder.ts     # Alpaca reconciler, closed trade recording
-├── config-bus.ts         # Credential loading (Alpaca, OANDA)
-├── openclaw.ts           # Position monitoring, drop alerts
-├── analysts/
-│   ├── catalyst-hunter.ts    # News-driven catalyst detection + AH extended hours buying
-│   ├── deep-research.ts      # Yahoo Finance per-ticker fundamentals
-│   ├── momentum-scanner.ts   # Yahoo gainers, Alpaca movers, volume leaders
-│   ├── macro-analyst.ts      # SPY regime detection (bull/bear/choppy)
-│   ├── conviction-scorer.ts  # 7-factor conviction scoring from PG + Bayesian + Trident
-│   ├── thesis-generator.ts   # Signal clustering → thesis → research star promotion
-│   ├── post-mortem.ts        # Daily loss analysis, rule generation
-│   ├── sector-rotator.ts     # 16 sector ETF ranking
-│   ├── exit-analyst.ts       # Exit strategy recommendations
-│   └── risk-manager.ts       # Pre-trade risk checks
-└── managers/
-    ├── research-news.ts      # 90-sec news intelligence cycle
-    ├── research-quality.ts   # 120-sec sector performance tracking
-    └── ops.ts                # SRE monitoring
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         MTWM UI (Next.js 16)                           │
+│   Dashboard │ Trading │ Research │ Intelligence │ Strategy              │
+│   HeroUI + Tailwind CSS │ Port 3000                                    │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │ REST API
+┌───────────────────────────────┴─────────────────────────────────────────┐
+│                   Gateway V2 Orchestrator — Port 3001                   │
+│              Single-process │ 2-min heartbeat │ All in-process          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
+│  │ Trade Engine  │  │ Research     │  │ Catalyst      │                 │
+│  │ Buy/Sell/Short│  │ Worker       │  │ Hunter        │                 │
+│  │ Heartbeat SL  │  │ Biz Insider  │  │ Earnings Beats│                 │
+│  │ Core Reinforce│  │ Yahoo/BBG    │  │ AH Extended   │                 │
+│  │ SQQQ Hedge   │  │ 2-min cycle  │  │ 6x daily      │                 │
+│  └──────┬───────┘  └──────┬───────┘  └───────┬───────┘                 │
+│         │                  │                   │                         │
+│  ┌──────┴──────────────────┴───────────────────┴───────┐               │
+│  │              Research Stars (SQLite)                  │               │
+│  │         Scored 0.85-0.99 │ Buy + Short candidates    │               │
+│  └──────────────────────────┬──────────────────────────┘               │
+│                              │                                          │
+│  ┌──────────────┐  ┌────────┴─────┐  ┌───────────────┐                 │
+│  │ Deep Research │  │ Conviction   │  │ Research Team  │                 │
+│  │ Yahoo Finance │  │ Scorer       │  │ News (90s)     │                 │
+│  │ Analyst Targets│ │ 7-Factor     │  │ Quality (120s) │                 │
+│  │ Insider Activity│ │ PG + Trident│  │ Sector Perf    │                 │
+│  │ Daily 7 AM    │  │ Thesis Gen   │  │ Promote/Demote │                 │
+│  └──────────────┘  └──────────────┘  └───────────────┘                 │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
+│  │ Macro Analyst │  │ Momentum     │  │ Post-Mortem   │                 │
+│  │ SPY Regime    │  │ Scanner      │  │ Daily Loss    │                 │
+│  │ Bull/Bear/Chop│  │ Yahoo+Alpaca │  │ Analysis      │                 │
+│  │ Sizing 0.6-1x │  │ 2x daily    │  │ Rule Gen      │                 │
+│  └──────────────┘  └──────────────┘  └───────────────┘                 │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
+│  │ Bayesian     │  │ OpenClaw     │  │ Ops (SRE)     │                 │
+│  │ Intelligence │  │ Position     │  │ Health Monitor │                 │
+│  │ Win/Loss Prior│  │ Drop Alerts │  │ Component Chk  │                 │
+│  │ Score Adjust  │  │ Yahoo Search │  │ Tara Reports   │                 │
+│  └──────────────┘  └──────────────┘  └───────────────┘                 │
+│                                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                        External Connections                             │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
+│  │ Alpaca       │  │ Trident      │  │ PostgreSQL    │                 │
+│  │ Paper Trading │  │ SONA/NOVA    │  │ Research DB   │                 │
+│  │ Extended Hours│  │ Domain Intel │  │ Companies     │                 │
+│  │ Market Data  │  │ shouldBuy()  │  │ Signals/Theses│                 │
+│  │ News API     │  │ recordTrade()│  │ Fundamentals  │                 │
+│  └──────────────┘  └──────────────┘  └───────────────┘                 │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
+│  │ Biz Insider  │  │ Yahoo Finance│  │ Bloomberg     │                 │
+│  │ S&P 500      │  │ RSS + API    │  │ RSS Feed      │                 │
+│  │ Movers Scrape│  │ quoteSummary │  │ Market News   │                 │
+│  │ Gainers+Losers│ │ Gainers/Losers│ │               │                 │
+│  └──────────────┘  └──────────────┘  └───────────────┘                 │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Stores
