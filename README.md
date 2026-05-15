@@ -1,4 +1,4 @@
-# MTWM — Autonomous Wealth Builder
+# Autonomous Wealth Builder
 
 Autonomous trading system that finds high-conviction opportunities, executes with discipline, and learns from every outcome. Built on Buffett quality principles with modern market sensing.
 
