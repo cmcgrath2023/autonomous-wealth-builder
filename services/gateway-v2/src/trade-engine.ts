@@ -66,6 +66,22 @@ const WATCHLIST_REBUY = new Map<string, number>([ // Ticker → max rebuy price 
   ['AMD', 420],   // Sold at $437 — rebuy on meaningful dip
   ['NFLX', 85],   // FANG stock — rebuy if it dips back
 ]);
+
+// Quality gate — system may ONLY auto-buy tickers on this list
+// Everything else gets logged as a signal but NOT executed
+// "Would I stake my family on this for 100 years?" — WWBD
+const APPROVED_TICKERS = new Set<string>([
+  // Core + Watchlist
+  'AMZN', 'NVDA', 'AAPL', 'MSFT', 'AMD', 'NFLX', 'GOOGL', 'GOOG',
+  // Category makers — tech/cloud/AI
+  'META', 'NOW', 'CRM', 'DDOG', 'PANW', 'CRWD', 'SNOW', 'PLTR',
+  // Berkshire portfolio
+  'AXP', 'BAC', 'KO', 'CVX', 'MCO', 'OXY', 'COF', 'KR',
+  // Owner approved — quality businesses
+  'TSLA', 'UBER', 'COIN', 'V', 'MA', 'JPM', 'GS',
+  // Inverse ETFs for hedging
+  'SQQQ', 'SH', 'SPXS', 'GLD', 'SLV',
+]);
 const DAILY_LOSS_LIMIT = -5_000;     // Raised — broker stops are the real protection now. CB was blocking all trading.
 const STOP_PCT = 0.05;               // 5% broker-side disaster stop
 const DOLLAR_STOP_LOSS = 100;         // Primary active stop when heartbeat is running
@@ -707,6 +723,12 @@ export class TradeEngine {
     if (!creds.alpaca) return false;
     const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
 
+    // Quality gate — WWBD? Only buy approved tickers
+    if (!APPROVED_TICKERS.has(symbol)) {
+      console.log(`  [QUALITY GATE] ${symbol} not in approved list — skipping. Signal: ${reason}`);
+      return false;
+    }
+
     // Trident gate — check if SONA says avoid this ticker
     try {
       const tridentAdvice = await brain.shouldBuy(symbol, 0, reason);
@@ -724,7 +746,7 @@ export class TradeEngine {
       const posCheck = await this.executor.getPositions();
       const deployed = posCheck.reduce((s, p) => s + Math.abs(p.marketValue), 0);
       const available = BUDGET_MAX - deployed;
-      const MIN_BUY = 500; // Don't waste slots on tiny positions
+      const MIN_BUY = 1000; // Don't waste slots on tiny positions
       if (available < MIN_BUY || available < price) {
         console.log(`  [BUY] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
         return false;
@@ -1471,10 +1493,10 @@ export class TradeEngine {
               if (hasCatalyst) reasons.push(`catalyst:${catalystMap.get(sym)?.slice(0, 40)}`);
               if (pctChange > 0) reasons.push(`premarket+${pctChange.toFixed(1)}%`);
 
-              // Score: RSI-2 oversold + catalyst = highest conviction
-              // At minimum need RSI-2 signal OR (catalyst + up pre-market)
-              if (hasRSI2 || (hasCatalyst && pctChange > 1)) {
-                confirmedBuys.push({ symbol: sym, price, preMarketPct: pctChange, hasRSI2, hasCatalyst, rsi2: rsi2Val, reason: reasons.join(' | ') });
+              // Only buy catalyst-driven movers that are up pre-market
+              // RSI-2 oversold buys DISABLED — consistently picked losers
+              if (hasCatalyst && pctChange > 1) {
+                confirmedBuys.push({ symbol: sym, price, preMarketPct: pctChange, hasRSI2: false, hasCatalyst, rsi2: rsi2Val, reason: reasons.join(' | ') });
               }
             }
           } catch {}
