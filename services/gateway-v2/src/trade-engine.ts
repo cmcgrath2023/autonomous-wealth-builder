@@ -1520,6 +1520,10 @@ export class TradeEngine {
         let placed = 0;
         for (const b of confirmedBuys) {
           if (placed >= MAX_POSITIONS - equityPos.length) break;
+          if (!APPROVED_TICKERS.has(b.symbol)) {
+            console.log(`  [MORNING SKIP] ${b.symbol} not approved — ${b.reason}`);
+            continue;
+          }
           const qty = Math.floor(PER_POSITION / b.price);
           if (qty <= 0) continue;
           try {

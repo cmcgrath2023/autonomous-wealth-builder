@@ -358,13 +358,21 @@ Return ONLY the JSON array. No commentary.`;
     const isPreMarket = (etHour >= 4 && etHour < 9) || (etHour === 9 && et.getMinutes() < 30); // 4 AM - 9:30 AM ET
     const isExtendedHours = isAfterHours || isPreMarket;
 
+    // Quality gate — same approved list as trade engine (WWBD)
+    const AH_APPROVED = new Set([
+      'AMZN','NVDA','AAPL','MSFT','AMD','NFLX','GOOGL','GOOG',
+      'META','NOW','CRM','DDOG','PANW','CRWD','SNOW','PLTR',
+      'AXP','BAC','KO','CVX','MCO','OXY','COF','KR',
+      'TSLA','UBER','COIN','V','MA','JPM','GS',
+    ]);
+
     if (isExtendedHours) {
       const creds = loadCredentials();
       if (creds.alpaca) {
         const ahHeaders = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
         const PER_POS = 6000;
 
-        for (const c of candidates.filter(c => BULLISH_AH_TYPES.has(c.catalystType) && c.confidence >= 0.95)) {
+        for (const c of candidates.filter(c => BULLISH_AH_TYPES.has(c.catalystType) && c.confidence >= 0.95 && AH_APPROVED.has(c.symbol))) {
           try {
             // Check we don't already hold it
             const posRes = await fetch(`${creds.alpaca.baseUrl}/v2/positions/${c.symbol}`, { headers: ahHeaders }).catch(() => null);
