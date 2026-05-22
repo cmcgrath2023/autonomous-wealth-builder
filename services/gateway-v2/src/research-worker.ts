@@ -6,6 +6,7 @@
  * write stars + reports, expire stale stars (>4h).
  */
 
+import Anthropic from '@anthropic-ai/sdk';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { MarketFACTCache } from '../../shared/src/fact-cache.js';
 import { CredentialVault } from '../../qudag/src/vault.js';
@@ -23,6 +24,84 @@ function bayesianAdjustScore(ticker: string, rawScore: number): number {
   if (prior.observations < 3) return rawScore; // not enough data
   // Penalize tickers with bad track records, boost proven winners
   return _bayesian.adjustSignalConfidence(ticker, rawScore, 'buy');
+}
+
+// ─── LLM Research Gate ───────────────────────────────────────────────────────
+// Before tagging a Biz Insider mover as a buy/short candidate, ask Claude:
+// "Why did this stock move? Is there more to go or has the move already happened?"
+// This is what a human trader does — they don't just see -5% and short it.
+
+let _anthropic: Anthropic | null = null;
+try {
+  if (process.env.ANTHROPIC_API_KEY) _anthropic = new Anthropic();
+} catch { /* no key = no research gate, fall back to mechanical scoring */ }
+
+interface ResearchVerdict {
+  symbol: string;
+  direction: 'long' | 'short' | 'skip';
+  confidence: number;      // 0-1
+  reason: string;           // one-line why
+}
+
+async function researchMovers(
+  movers: Array<{ symbol: string; pct: number }>,
+): Promise<ResearchVerdict[]> {
+  if (!_anthropic || movers.length === 0) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const moverList = movers.map(m => `${m.symbol} ${m.pct > 0 ? '+' : ''}${m.pct.toFixed(1)}%`).join(', ');
+
+  const prompt = `You are a research analyst for a trading system. Today is ${today}.
+
+These S&P 500 stocks are the biggest movers today: ${moverList}
+
+For EACH ticker, use web search to find out WHY it moved. Then decide:
+- **long**: the catalyst has legs — earnings beat, guidance raise, sector tailwind, breakout from base. More upside ahead.
+- **short**: structural damage — earnings miss, guidance cut, product failure, regulatory action. More downside ahead.
+- **skip**: move is noise — sector rotation, index rebalance, already priced in, at major support/resistance, or unclear catalyst.
+
+Return ONLY a JSON array:
+[{"symbol":"AAPL","direction":"long","confidence":0.85,"reason":"Beat earnings by 12%, raised guidance, iPhone cycle"}]
+
+Rules:
+- If you can't find a clear catalyst, the answer is "skip"
+- If the stock is already at 52-week low support after a drop, it's probably "skip" not "short"
+- If the stock gapped up on news and is fading intraday, it's probably "skip" not "long"
+- Confidence reflects how clear the catalyst is and how much room remains
+- Be selective — a missed trade is better than a bad one`;
+
+  try {
+    const response = await _anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2000,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' } as any],
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = response.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('');
+
+    const cleaned = text.replace(/```json\s*|\s*```/g, '').trim();
+    const start = cleaned.indexOf('[');
+    const end = cleaned.lastIndexOf(']');
+    if (start < 0 || end <= start) return [];
+
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter((v: any) => v && typeof v.symbol === 'string' && ['long', 'short', 'skip'].includes(v.direction))
+      .map((v: any) => ({
+        symbol: v.symbol.toUpperCase(),
+        direction: v.direction as 'long' | 'short' | 'skip',
+        confidence: Math.max(0, Math.min(1, Number(v.confidence) || 0.5)),
+        reason: String(v.reason || '').slice(0, 200),
+      }));
+  } catch (e: any) {
+    console.error(`[Research] LLM research gate failed: ${e.message}`);
+    return [];
+  }
 }
 
 const CYCLE_MS = 120_000;
@@ -345,6 +424,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
   } catch (e) { errors.push(`Yahoo losers: ${e}`); }
 
   // 3c. Biz Insider S&P 500 movers — top gainers + losers (scrape)
+  // Research gate: don't blindly tag gainers/losers. Ask WHY they moved first.
   try {
     const biRes = await fetch(BIZ_INSIDER_MOVERS_URL, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
@@ -352,29 +432,54 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
     });
     if (biRes.ok) {
       const html = await biRes.text();
-      // Parse ticker + percentage pairs from the page
       const entries = [...html.matchAll(/\/stocks\/([a-z]+)-stock[^"]*"[^>]*>[^<]+<\/a>.*?([+-]?\d+\.\d+)\s*%/gis)];
-      let biGainers = 0, biLosers = 0;
+      const moversToResearch: Array<{ symbol: string; pct: number }> = [];
       for (const m of entries) {
         const sym = m[1].toUpperCase();
         const pct = parseFloat(m[2]);
-        if (!sym || sym.length > 5 || Math.abs(pct) < 1) continue;
+        if (!sym || sym.length > 5 || Math.abs(pct) < 3) continue;
         const existing = store.getResearchStars().find((s: any) => s.symbol === sym);
         if (existing) continue;
+        moversToResearch.push({ symbol: sym, pct });
+      }
 
-        if (pct >= 3) {
-          // Top gainer — high-priority buy candidate
-          const score = Math.min(0.99, 0.90 + pct / 100);
-          store.saveResearchStar(sym, 'momentum', `BI GAINER +${pct.toFixed(1)}% | S&P 500 top mover`, bayesianAdjustScore(sym, score));
-          starsWritten++; biGainers++;
-        } else if (pct <= -3) {
-          // Top loser — short candidate
-          const score = Math.min(0.95, 0.85 + Math.abs(pct) / 100);
-          store.saveResearchStar(sym, 'short_candidate', `BI LOSER ${pct.toFixed(1)}% | S&P 500 short candidate`, bayesianAdjustScore(sym, score));
-          starsWritten++; biLosers++;
+      // Research gate — ask LLM why each mover moved and whether to trade it
+      const verdicts = await researchMovers(moversToResearch.slice(0, 10));
+      const verdictMap = new Map(verdicts.map(v => [v.symbol, v]));
+
+      let biGainers = 0, biLosers = 0, biSkipped = 0;
+      for (const mover of moversToResearch) {
+        const verdict = verdictMap.get(mover.symbol);
+
+        if (verdict) {
+          // LLM researched this ticker — use its verdict
+          if (verdict.direction === 'skip') {
+            console.log(`  [BI SKIP] ${mover.symbol} ${mover.pct > 0 ? '+' : ''}${mover.pct.toFixed(1)}% — ${verdict.reason}`);
+            biSkipped++;
+            continue;
+          }
+          const score = Math.min(0.99, 0.85 + verdict.confidence * 0.14);
+          if (verdict.direction === 'long') {
+            store.saveResearchStar(mover.symbol, 'momentum', `BI GAINER +${mover.pct.toFixed(1)}% | ${verdict.reason}`, bayesianAdjustScore(mover.symbol, score));
+            starsWritten++; biGainers++;
+          } else if (verdict.direction === 'short') {
+            store.saveResearchStar(mover.symbol, 'short_candidate', `BI LOSER ${mover.pct.toFixed(1)}% | ${verdict.reason}`, bayesianAdjustScore(mover.symbol, score));
+            starsWritten++; biLosers++;
+          }
+        } else {
+          // No LLM available — fall back to mechanical scoring (same as before)
+          if (mover.pct >= 3) {
+            const score = Math.min(0.99, 0.90 + mover.pct / 100);
+            store.saveResearchStar(mover.symbol, 'momentum', `BI GAINER +${mover.pct.toFixed(1)}% | S&P 500 top mover`, bayesianAdjustScore(mover.symbol, score));
+            starsWritten++; biGainers++;
+          } else if (mover.pct <= -3) {
+            const score = Math.min(0.95, 0.85 + Math.abs(mover.pct) / 100);
+            store.saveResearchStar(mover.symbol, 'short_candidate', `BI LOSER ${mover.pct.toFixed(1)}% | S&P 500 short candidate`, bayesianAdjustScore(mover.symbol, score));
+            starsWritten++; biLosers++;
+          }
         }
       }
-      if (biGainers + biLosers > 0) console.log(`[Research] Biz Insider: ${biGainers} gainers, ${biLosers} short candidates`);
+      if (biGainers + biLosers + biSkipped > 0) console.log(`[Research] Biz Insider: ${biGainers} longs, ${biLosers} shorts, ${biSkipped} skipped by research gate`);
     }
   } catch (e) { errors.push(`BizInsider: ${e}`); }
 
