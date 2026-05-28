@@ -59,6 +59,11 @@ const ENABLE_CATALYST_BUYS = true;                   // Buys high-score research
 const ENABLE_MORNING_RSI2_BUYS = false;              // DISABLED: RSI-2 buys consistently pick losers (UNP -$639, GWW -$101)
 const ENABLE_MORNING_PREP = true;                    // 8 AM unified prep — overnight catalysts + pre-market snapshots
 const NEW_BUY_CUTOFF_HOUR = 14;                      // No new buys after 2 PM ET — avoid late-day entries that go red AH
+const PREMARKET_MIN_STAR_SCORE = 0.85;               // Biz Insider / catalyst stars at or above this can be acted on pre-market
+const PREMARKET_MIN_MOVE_PCT = 0.25;                 // Early confirmation threshold; do not wait for the full move
+const PREMARKET_MAX_CHASE_PCT = 8;                   // Match ORB gap discipline; avoid buying blow-off gaps
+const PREMARKET_LIMIT_BUFFER_PCT = 0.01;             // Limit order cap above current pre-market print/ask
+const PREMARKET_MAX_ORDERS_PER_RUN = 3;              // Re-runs every 15 min; keep each batch focused
 
 // Core holdings — buy and hold, engine NEVER sells these
 const CORE_HOLDINGS = new Set<string>(['AMZN', 'NVDA']); // Owner long-term holds — engine NEVER sells these
@@ -82,6 +87,12 @@ const APPROVED_TICKERS = new Set<string>([
   // Inverse ETFs for hedging
   'SQQQ', 'SH', 'SPXS', 'GLD', 'SLV',
 ]);
+
+function isAutoBuyAllowedSymbol(symbol: string): boolean {
+  return APPROVED_TICKERS.has(symbol) ||
+    SP500_UNIVERSE.includes(symbol) ||
+    ['SQQQ','SH','SPXS','SDOW','TZA','GLD','SLV','TSDD','TSLQ','FAZ','SDS','PSQ'].includes(symbol);
+}
 const DAILY_LOSS_LIMIT = -5_000;     // Raised — broker stops are the real protection now. CB was blocking all trading.
 const STOP_PCT = 0.05;               // 5% broker-side disaster stop
 const DOLLAR_STOP_LOSS = 100;         // Primary active stop when heartbeat is running
@@ -723,9 +734,9 @@ export class TradeEngine {
     if (!creds.alpaca) return false;
     const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
 
-    // Quality gate — WWBD? Only buy approved tickers
-    if (!APPROVED_TICKERS.has(symbol)) {
-      console.log(`  [QUALITY GATE] ${symbol} not in approved list — skipping. Signal: ${reason}`);
+    // Quality gate — approved owner list, S&P 500 research movers, or approved hedge ETFs.
+    if (!isAutoBuyAllowedSymbol(symbol)) {
+      console.log(`  [QUALITY GATE] ${symbol} not in auto-buy universe — skipping. Signal: ${reason}`);
       return false;
     }
 
@@ -829,6 +840,87 @@ export class TradeEngine {
       return true;
     } catch (e: any) {
       console.log(`  [BUY] ERROR ${symbol}: ${e.message}`);
+      return false;
+    }
+  }
+
+  private async buyExtendedHoursLimitPosition(symbol: string, price: number, reason: string): Promise<boolean> {
+    const creds = loadCredentials();
+    if (!creds.alpaca || price <= 0) return false;
+    const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
+
+    if (!isAutoBuyAllowedSymbol(symbol)) {
+      console.log(`  [PREMARKET QUALITY] ${symbol} not in auto-buy universe — ${reason}`);
+      return false;
+    }
+
+    try {
+      const tridentAdvice = await brain.shouldBuy(symbol, 0, `PREMARKET ${reason}`);
+      if (!tridentAdvice.should) {
+        console.log(`  [PREMARKET TRIDENT BLOCK] ${symbol}: ${tridentAdvice.reason}`);
+        return false;
+      }
+    } catch {}
+
+    let buyAmount = PER_POSITION;
+    try {
+      const posCheck = await this.executor.getPositions();
+      const deployed = posCheck.reduce((s, p) => s + Math.abs(p.marketValue), 0);
+      const available = BUDGET_MAX - deployed;
+      const MIN_BUY = 1000;
+      if (available < MIN_BUY || available < price) {
+        console.log(`  [PREMARKET BUY] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
+        return false;
+      }
+      if (posCheck.filter(p => !isCrypto(p.ticker)).length >= MAX_POSITIONS) {
+        console.log(`  [PREMARKET BUY] POSITION CAP — skipping ${symbol}.`);
+        return false;
+      }
+      buyAmount = Math.min(PER_POSITION, available);
+    } catch {}
+
+    const qty = Math.floor(buyAmount / price);
+    if (qty <= 0) return false;
+    const limitPrice = Math.round(price * (1 + PREMARKET_LIMIT_BUFFER_PCT) * 100) / 100;
+
+    try {
+      const res = await fetch(`${creds.alpaca.baseUrl}/v2/orders`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          symbol,
+          qty: String(qty),
+          side: 'buy',
+          type: 'limit',
+          time_in_force: 'day',
+          limit_price: String(limitPrice),
+          extended_hours: true,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.log(`  [PREMARKET BUY] BLOCKED ${symbol}: ${res.status} ${(await res.text()).slice(0, 120)}`);
+        return false;
+      }
+
+      const order = await res.json() as any;
+      console.log(`  [PREMARKET BUY] ${qty} ${symbol} limit @$${limitPrice.toFixed(2)} — ${reason} — ${order.status}`);
+      this._trackBuy(symbol, price, qty, order.id ?? null);
+      this.store.set(`premarket_order_${symbol}`, JSON.stringify({
+        symbol,
+        qty,
+        referencePrice: price,
+        limitPrice,
+        orderId: order.id ?? null,
+        status: order.status,
+        placedAt: new Date().toISOString(),
+        reason,
+      }));
+      brain.recordBuy(symbol, qty, price, `PREMARKET ${reason}`).catch(() => {});
+      await postToDiscord(`PREMARKET BUY ${qty} ${symbol} limit @$${limitPrice.toFixed(2)} | ${reason}`);
+      return true;
+    } catch (e: any) {
+      console.log(`  [PREMARKET BUY] ERROR ${symbol}: ${e.message}`);
       return false;
     }
   }
@@ -1419,19 +1511,22 @@ export class TradeEngine {
     const alpacaHeaders = { 'APCA-API-KEY-ID': creds.alpaca?.apiKey || '', 'APCA-API-SECRET-KEY': creds.alpaca?.apiSecret || '' };
 
     // ── 5a. MORNING PREP (8:00-9:25 AM ET) — unified pipeline ──────────
-    // Reads: last night's RSI-2 scan + research worker catalysts + pre-market snapshots
-    // Outputs: buy orders queued for 9:30 open
+    // Reads: last night's RSI-2 scan + research worker catalysts + pre-market snapshots.
+    // Re-runs every 15 minutes so startup ordering cannot permanently miss stars
+    // populated by the 7:00/8:00/8:30 research jobs.
     const isPreMarket = mkt.isWeekday && mkt.etHour >= 8 && (mkt.etHour < 9 || (mkt.etHour === 9 && mkt.etMin <= 25));
-    const preMarketKey = `premarket_scan_${today}`;
+    const preMarketSlotMin = Math.floor(mkt.etMin / 15) * 15;
+    const preMarketKey = `premarket_scan_${today}_${mkt.etHour}${String(preMarketSlotMin).padStart(2, '0')}`;
+    const preMarketLatestKey = `premarket_scan_${today}`;
 
     if (ENABLE_MORNING_PREP && isPreMarket && !this.store.get(preMarketKey)) {
       this.store.set(preMarketKey, 'running');
-      console.log(`  [MORNING PREP] Unified pipeline: last night RSI-2 + research catalysts + pre-market snapshots`);
+      console.log(`  [MORNING PREP] Unified pipeline slot ${mkt.etHour}:${String(preMarketSlotMin).padStart(2, '0')} — RSI-2 + research stars + pre-market snapshots`);
 
       try {
         const sp500Set = new Set(SP500_UNIVERSE);
         const PREP_ALLOWED_ETFS = new Set(['SQQQ','SH','SPXS','SDOW','TZA','GLD','SLV','TSDD','TSLQ','FAZ','SDS','PSQ']);
-        const isAllowedSymbol = (sym: string) => sp500Set.has(sym) || PREP_ALLOWED_ETFS.has(sym);
+        const isAllowedSymbol = (sym: string) => sp500Set.has(sym) || PREP_ALLOWED_ETFS.has(sym) || APPROVED_TICKERS.has(sym);
         const heldSet = new Set(equityPos.map(p => p.ticker));
 
         // SOURCE 1: Last night's RSI-2 scan signals
@@ -1450,14 +1545,24 @@ export class TradeEngine {
         console.log(`  [PREP] RSI-2 signals from last close: ${rsi2Signals.length} (${rsi2Signals.slice(0, 5).map(s => `${s.symbol} RSI=${s.rsi2.toFixed(1)}`).join(', ')})`);
 
         // SOURCE 2: Research worker catalysts (overnight news)
-        const researchStars = new Set<string>();
-        const catalystMap = new Map<string, string>();
+        const researchStars = new Map<string, { catalyst: string; score: number; sector: string; createdAt?: string }>();
         try {
           const stars = this.store.getResearchStars();
           for (const s of stars) {
-            if (isAllowedSymbol(s.symbol)) {
-              researchStars.add(s.symbol);
-              catalystMap.set(s.symbol, s.catalyst || '');
+            if (
+              isAllowedSymbol(s.symbol) &&
+              (s.sector || '') !== 'short_candidate' &&
+              s.score >= PREMARKET_MIN_STAR_SCORE
+            ) {
+              const existing = researchStars.get(s.symbol);
+              if (!existing || s.score > existing.score) {
+                researchStars.set(s.symbol, {
+                  catalyst: s.catalyst || '',
+                  score: s.score,
+                  sector: s.sector || '',
+                  createdAt: s.createdAt,
+                });
+              }
             }
           }
         } catch {}
@@ -1465,8 +1570,8 @@ export class TradeEngine {
 
         // SOURCE 3: Pre-market snapshots — check which signals are confirming
         // Scan RSI-2 signals + top research stars for pre-market movement
-        const checkSymbols = new Set([...rsi2Signals.map(s => s.symbol), ...researchStars]);
-        const confirmedBuys: Array<{ symbol: string; price: number; preMarketPct: number; hasRSI2: boolean; hasCatalyst: boolean; rsi2: number; reason: string }> = [];
+        const checkSymbols = new Set([...rsi2Signals.map(s => s.symbol), ...researchStars.keys()]);
+        const confirmedBuys: Array<{ symbol: string; price: number; preMarketPct: number; hasRSI2: boolean; hasCatalyst: boolean; rsi2: number; score: number; reason: string }> = [];
 
         const checkList = [...checkSymbols].filter(s => !heldSet.has(s) && !this._sessionSells.has(s) && !this._recentBuys.has(s));
         for (let i = 0; i < checkList.length; i += 30) {
@@ -1478,37 +1583,39 @@ export class TradeEngine {
             if (!snapRes.ok) continue;
             const snapData = await snapRes.json() as any;
             for (const [sym, snap] of Object.entries(snapData) as any) {
-              const price = snap?.latestTrade?.p || snap?.latestQuote?.ap;
+              const price = snap?.latestQuote?.ap || snap?.latestTrade?.p || snap?.latestQuote?.bp;
               const prevClose = snap?.prevDailyBar?.c;
               if (!price || !prevClose || price < 10) continue;
               const pctChange = ((price - prevClose) / prevClose) * 100;
 
               const hasRSI2 = rsi2Signals.some(s => s.symbol === sym);
-              const hasCatalyst = researchStars.has(sym);
+              const star = researchStars.get(sym);
+              const hasCatalyst = !!star;
               const rsi2Val = rsi2Signals.find(s => s.symbol === sym)?.rsi2 ?? 50;
+              const score = star?.score ?? 0;
 
               // Build reason string
               const reasons: string[] = [];
               if (hasRSI2) reasons.push(`RSI2=${rsi2Val.toFixed(1)}`);
-              if (hasCatalyst) reasons.push(`catalyst:${catalystMap.get(sym)?.slice(0, 40)}`);
+              if (hasCatalyst) reasons.push(`${star!.sector}:${star!.catalyst.slice(0, 40)}`);
               if (pctChange > 0) reasons.push(`premarket+${pctChange.toFixed(1)}%`);
+              if (score > 0) reasons.push(`score=${score.toFixed(2)}`);
 
-              // Only buy catalyst-driven movers that are up pre-market
-              // RSI-2 oversold buys DISABLED — consistently picked losers
-              if (hasCatalyst && pctChange > 1) {
-                confirmedBuys.push({ symbol: sym, price, preMarketPct: pctChange, hasRSI2: false, hasCatalyst, rsi2: rsi2Val, reason: reasons.join(' | ') });
+              // Act on research-backed early movers. RSI-2-only buys remain disabled.
+              if (hasCatalyst && pctChange >= PREMARKET_MIN_MOVE_PCT && pctChange <= PREMARKET_MAX_CHASE_PCT) {
+                confirmedBuys.push({ symbol: sym, price, preMarketPct: pctChange, hasRSI2, hasCatalyst, rsi2: rsi2Val, score, reason: reasons.join(' | ') });
               }
             }
           } catch {}
           await new Promise(r => setTimeout(r, 300));
         }
 
-        // Sort: RSI-2 + catalyst first, then RSI-2 only, then catalyst only
+        // Sort: strongest research first, then confirmed move size.
         confirmedBuys.sort((a, b) => {
-          const aScore = (a.hasRSI2 ? 2 : 0) + (a.hasCatalyst ? 1 : 0);
-          const bScore = (b.hasRSI2 ? 2 : 0) + (b.hasCatalyst ? 1 : 0);
-          if (aScore !== bScore) return bScore - aScore;
-          return a.rsi2 - b.rsi2; // Lower RSI = more oversold = better
+          const aRank = a.score + (a.hasRSI2 ? 0.03 : 0);
+          const bRank = b.score + (b.hasRSI2 ? 0.03 : 0);
+          if (aRank !== bRank) return bRank - aRank;
+          return b.preMarketPct - a.preMarketPct;
         });
 
         console.log(`  [PREP] Confirmed buys: ${confirmedBuys.length}`);
@@ -1516,49 +1623,41 @@ export class TradeEngine {
           console.log(`    ${b.symbol}: ${b.reason}`);
         }
 
-        // Place market-on-open orders for top picks
+        // Place extended-hours limit orders for top picks so we can catch the early move.
+        // The heartbeat auto-stop loop places broker stops as soon as positions appear.
         let placed = 0;
         for (const b of confirmedBuys) {
           if (placed >= MAX_POSITIONS - equityPos.length) break;
-          if (!APPROVED_TICKERS.has(b.symbol)) {
-            console.log(`  [MORNING SKIP] ${b.symbol} not approved — ${b.reason}`);
+          if (placed >= PREMARKET_MAX_ORDERS_PER_RUN) break;
+          if (!isAutoBuyAllowedSymbol(b.symbol)) {
+            console.log(`  [MORNING SKIP] ${b.symbol} not in auto-buy universe — ${b.reason}`);
             continue;
           }
-          const qty = Math.floor(PER_POSITION / b.price);
-          if (qty <= 0) continue;
-          try {
-            const orderRes = await fetch(`${creds.alpaca?.baseUrl}/v2/orders`, {
-              method: 'POST',
-              headers: { ...alpacaHeaders, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ symbol: b.symbol, qty: String(qty), side: 'buy', type: 'market', time_in_force: 'opg' }),
-              signal: AbortSignal.timeout(10_000),
-            });
-            if (orderRes.ok) {
-              console.log(`  [MORNING BUY] ${b.symbol} — ${qty} shares for open | ${b.reason}`);
-              this._trackBuy(b.symbol, b.price, qty, ((await orderRes.json()) as any).id ?? null);
-              placed++;
-            }
-          } catch {}
+          const bought = await this.buyExtendedHoursLimitPosition(b.symbol, b.price, b.reason);
+          if (bought) placed++;
         }
 
-        this.store.set(preMarketKey, JSON.stringify({
+        const summary = JSON.stringify({
           time: new Date().toISOString(),
+          slot: `${mkt.etHour}:${String(preMarketSlotMin).padStart(2, '0')}`,
           rsi2Signals: rsi2Signals.length,
           catalysts: researchStars.size,
           confirmed: confirmedBuys.length,
           placed,
           picks: confirmedBuys.slice(0, 10).map(b => `${b.symbol}(${b.reason.slice(0, 40)})`),
-        }));
+        });
+        this.store.set(preMarketKey, summary);
+        this.store.set(preMarketLatestKey, summary);
 
         brain.recordRule(
-          `MORNING PREP ${today}: ${rsi2Signals.length} RSI-2 signals + ${researchStars.size} catalysts → ${confirmedBuys.length} confirmed → ${placed} placed. Top: ${confirmedBuys.slice(0, 5).map(b => `${b.symbol}(${b.reason.slice(0, 30)})`).join(', ')}`,
+          `MORNING PREP ${today} ${mkt.etHour}:${String(preMarketSlotMin).padStart(2, '0')}: ${rsi2Signals.length} RSI-2 signals + ${researchStars.size} catalysts → ${confirmedBuys.length} confirmed → ${placed} placed. Top: ${confirmedBuys.slice(0, 5).map(b => `${b.symbol}(${b.reason.slice(0, 30)})`).join(', ')}`,
           'morning:prep',
         ).catch(() => {});
 
         if (placed > 0) {
-          await postToDiscord(`🌅 MORNING PREP: ${placed} orders for open — ${confirmedBuys.slice(0, placed).map(b => `${b.symbol} ${b.reason.slice(0, 30)}`).join(', ')}`);
+          await postToDiscord(`MORNING PREP: ${placed} pre-market limit orders — ${confirmedBuys.slice(0, placed).map(b => `${b.symbol} ${b.reason.slice(0, 30)}`).join(', ')}`);
         } else {
-          await postToDiscord(`🌅 MORNING PREP: ${confirmedBuys.length} candidates found, ${placed} placed (${rsi2Signals.length} RSI-2 + ${researchStars.size} catalysts)`);
+          await postToDiscord(`MORNING PREP: ${confirmedBuys.length} candidates found, ${placed} placed (${rsi2Signals.length} RSI-2 + ${researchStars.size} catalysts)`);
         }
 
       } catch (e: any) {

@@ -16,7 +16,7 @@ Overnight Research (5 PM → 7 AM)
 Morning Prep (8 AM ET)
   ├── Merges overnight catalysts + research stars + pre-market price snapshots
   ├── Confirms movers are actually moving pre-market
-  └── Places market-on-open (opg) orders → fill at 9:30 AM
+  └── Places extended-hours limit orders for qualified early movers
 
 Market Hours (9:30 AM → 4 PM ET)
   ├── Catalyst buys: high-score research stars moving up (10 AM → 2 PM)
@@ -76,7 +76,7 @@ Per-ticker win/loss tracking from closed trades. Adjusts research star scores ba
 ## Trading Rules
 
 ### Buy Logic
-- **Morning prep** at 8 AM: overnight catalysts → `opg` orders at open
+- **Morning prep** 8:00-9:25 AM ET: overnight catalysts + mover stars → extended-hours limit orders
 - **Catalyst buys** 10 AM - 2 PM: Biz Insider movers + catalyst hunter picks
 - **Core reinforcement**: auto-add to NVDA/AMZN when deep research score ≥ 90 and Trident approves
 - **No new buys after 2 PM ET** — late entries go red after hours
