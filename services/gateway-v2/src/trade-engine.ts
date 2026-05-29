@@ -46,6 +46,7 @@ const HEARTBEAT_MS = 120_000;        // 2 min — monitors positions, exits, for
 const MAX_POSITIONS = 8;              // Increased from 5 — more room to concentrate on winners
 const PER_POSITION = 6_000;           // $50K budget / 8 positions = $6,250 per slot
 const BUDGET_MAX = 70_000;            // Cash available — room for longs + shorts without using margin
+const BIZ_INSIDER_MOVERS_URL = 'https://markets.businessinsider.com/index/market-movers/s&p_500';
 
 // Strategy lockdown: only documented strategies may open equity positions.
 // The prior recovery build accreted momentum/catalyst/watchlist entries while
@@ -64,6 +65,8 @@ const PREMARKET_MIN_MOVE_PCT = 0.25;                 // Early confirmation thres
 const PREMARKET_MAX_CHASE_PCT = 8;                   // Match ORB gap discipline; avoid buying blow-off gaps
 const PREMARKET_LIMIT_BUFFER_PCT = 0.01;             // Limit order cap above current pre-market print/ask
 const PREMARKET_MAX_ORDERS_PER_RUN = 3;              // Re-runs every 15 min; keep each batch focused
+const MAX_INTRADAY_SHORTS = 2;                        // Keep downside capture focused and bounded
+const MIN_DOWNSIDE_SHORT_MOVE = -3.0;                 // Must be sharply red today before shorting
 
 // Core holdings — buy and hold, engine NEVER sells these
 const CORE_HOLDINGS = new Set<string>(['AMZN', 'NVDA']); // Owner long-term holds — engine NEVER sells these
@@ -106,6 +109,57 @@ const SMA_PERIOD = 200;              // Must be above 200-day SMA
 const RSI_PERIOD = 2;                // Connors RSI-2
 const FOREX_BANK = 50;
 const FOREX_CUT = -20;
+
+type BizInsiderMover = {
+  symbol: string;
+  pct: number;
+  name: string;
+  list: 'gainer' | 'loser';
+};
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function parseBizInsiderMovers(html: string): BizInsiderMover[] {
+  const movers: BizInsiderMover[] = [];
+  const tableSections = [...html.matchAll(/<h2[^>]*>[\s\S]*?S&amp;P 500 - Top (Gainers|Losers)[\s\S]*?<\/h2>[\s\S]*?<tbody[^>]*>([\s\S]*?)<\/tbody>/gi)];
+
+  for (const section of tableSections) {
+    const list = section[1].toLowerCase() === 'losers' ? 'loser' : 'gainer';
+    const rows = [...section[2].matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+    for (const rowMatch of rows) {
+      const row = rowMatch[1];
+      const link = row.match(/\/stocks\/([a-z0-9.-]+)-stock"[^>]*title="([^"]+)"/i);
+      if (!link) continue;
+      const symbol = link[1].replace(/[^a-z0-9]/gi, '').toUpperCase();
+      if (!symbol || symbol.length > 5 || !SP500_UNIVERSE.includes(symbol)) continue;
+      const pctMatches = [...row.matchAll(/>([+-]?\d[\d,.]*)%<\/span>/g)];
+      if (pctMatches.length === 0) continue;
+      const pct = Number(pctMatches[0][1].replace(/,/g, ''));
+      if (!Number.isFinite(pct)) continue;
+      movers.push({ symbol, pct, name: decodeHtml(link[2]), list });
+    }
+  }
+
+  // Fallback for simpler historical markup.
+  if (movers.length === 0) {
+    const entries = [...html.matchAll(/\/stocks\/([a-z]+)-stock[^"]*"[^>]*title="([^"]+)"[\s\S]{0,600}?([+-]?\d+\.\d+)%/gi)];
+    for (const m of entries) {
+      const symbol = m[1].toUpperCase();
+      const pct = Number(m[3]);
+      if (!symbol || symbol.length > 5 || !SP500_UNIVERSE.includes(symbol) || !Number.isFinite(pct)) continue;
+      movers.push({ symbol, pct, name: decodeHtml(m[2]), list: pct < 0 ? 'loser' : 'gainer' });
+    }
+  }
+
+  return movers;
+}
 
 // ─── Inverse ETF Config (hedge for down markets) ─────────────────────────────
 const INVERSE_ETF = 'SQQQ';           // 3x inverse Nasdaq — goes up when market drops
@@ -1901,51 +1955,191 @@ export class TradeEngine {
 
     }
 
-    // ── 5d2. CATALYST SHORTS — short the biggest losers from Biz Insider + research ──
-    // Only open shorts 10 AM - 2 PM ET — gives time to manage and cover before close
+    // ── 5d2. BIZ INSIDER DOWNSIDE SHORTS — short confirmed S&P 500 losers ──
+    // Only open shorts 10 AM - 2 PM ET — gives time to manage and cover before close.
+    // The BI S&P 500 movers page is the source of truth for "obvious list" names;
+    // Alpaca snapshots verify the move is still live before sending an order.
     if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && mkt.etHour < 14) {
-      try {
-        const stars = this.store.getResearchStars();
+      const shortScanSlot = Math.floor(mkt.etMin / 15) * 15;
+      const shortScanKey = `intraday_short_scan_${today}_${mkt.etHour}${String(shortScanSlot).padStart(2, '0')}`;
+
+      if (!this.store.get(shortScanKey)) {
+        this.store.set(shortScanKey, 'running');
+        try {
+          const stars = this.store.getResearchStars();
         const heldSet = new Set(equityPos.map(p => p.ticker));
         const freshPos = await this.executor.getPositions();
         const existingShorts = freshPos.filter(p => p.shares < 0).length;
         let openSlots = MAX_POSITIONS - freshPos.filter(p => !isCrypto(p.ticker)).length;
 
-        // Max 2 shorts at a time
-        if (existingShorts < 2 && openSlots > 0) {
-          const shortCandidates = stars
-            .filter(s => s.sector === 'short_candidate')
-            .filter(s => s.score >= 0.85)
-            .filter(s => !heldSet.has(s.symbol))
-            .filter(s => !this._sessionSells.has(s.symbol))
-            .filter(s => !this._recentBuys.has(s.symbol))
-            .sort((a: any, b: any) => b.score - a.score);
+          const summary: any = {
+            time: new Date().toISOString(),
+            scanned: 0,
+            existingShorts,
+            openSlots,
+            candidates: 0,
+            placed: 0,
+            topDown: [],
+            skipped: [] as string[],
+          };
 
-          for (const star of shortCandidates.slice(0, 2 - existingShorts)) {
-            if (openSlots <= 0) break;
-            try {
-              const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${star.symbol}&feed=iex`, {
-                headers: alpacaHeaders, signal: AbortSignal.timeout(5000),
-              });
-              if (!snapRes.ok) continue;
-              const snapData = await snapRes.json() as any;
-              const snap = snapData[star.symbol];
-              if (!snap) continue;
-              const price = snap.latestTrade?.p;
-              const prevClose = snap.prevDailyBar?.c;
-              if (!price || !prevClose || price < 10) continue;
-              const dayChange = ((price - prevClose) / prevClose) * 100;
+          // Max short book remains bounded.
+          if (existingShorts >= MAX_INTRADAY_SHORTS) {
+            summary.blocked = `max_shorts_${existingShorts}/${MAX_INTRADAY_SHORTS}`;
+            this.store.set(shortScanKey, JSON.stringify(summary));
+            this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
+          } else if (openSlots <= 0) {
+            summary.blocked = `position_cap_${freshPos.filter(p => !isCrypto(p.ticker)).length}/${MAX_POSITIONS}`;
+            this.store.set(shortScanKey, JSON.stringify(summary));
+            this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
+          } else {
 
-              // Must be down 3%+ today — confirms weakness
-              if (dayChange < -3.0) {
-                console.log(`  [CATALYST SHORT] ${star.symbol} ${dayChange.toFixed(1)}% today | ${star.catalyst?.slice(0, 60)} | score=${star.score.toFixed(2)}`);
-                const shorted = await this.shortPosition(star.symbol, price, `CATALYST_SHORT ${dayChange.toFixed(1)}% ${star.catalyst?.slice(0, 30)}`);
-                if (shorted) openSlots--;
+            type DownsideCandidate = {
+              symbol: string;
+              price: number;
+              dayChange: number;
+              score: number;
+              catalyst: string;
+              source: string;
+            };
+
+            const candidateMap = new Map<string, DownsideCandidate>();
+            const addCandidate = (candidate: DownsideCandidate) => {
+              const existing = candidateMap.get(candidate.symbol);
+              if (!existing || candidate.dayChange < existing.dayChange || candidate.score > existing.score) {
+                candidateMap.set(candidate.symbol, candidate);
               }
-            } catch {}
+            };
+
+            const shortStars = stars
+              .filter(s => s.sector === 'short_candidate' && String(s.catalyst || '').startsWith('BI LOSER'))
+              .filter(s => s.score >= 0.85)
+              .filter(s => !heldSet.has(s.symbol))
+              .filter(s => !this._sessionSells.has(s.symbol))
+              .filter(s => !this._recentBuys.has(s.symbol))
+              .sort((a: any, b: any) => b.score - a.score);
+
+            const biSymbols = new Map<string, { pct: number; catalyst: string; score: number }>();
+            for (const star of shortStars) {
+              biSymbols.set(star.symbol, {
+                pct: -3,
+                catalyst: star.catalyst || 'BI loser research star',
+                score: star.score,
+              });
+            }
+
+            try {
+              const biRes = await fetch(BIZ_INSIDER_MOVERS_URL, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+                signal: AbortSignal.timeout(8000),
+              });
+              if (biRes.ok) {
+                const html = await biRes.text();
+                const biMovers = parseBizInsiderMovers(html);
+                const losers = biMovers
+                  .filter(m => m.list === 'loser' && m.pct <= MIN_DOWNSIDE_SHORT_MOVE)
+                  .sort((a, b) => a.pct - b.pct);
+                summary.scanned = biMovers.length;
+                summary.bizInsiderLosers = losers.map(m => `${m.symbol}${m.pct.toFixed(1)}%`);
+                for (const loser of losers) {
+                  biSymbols.set(loser.symbol, {
+                    pct: loser.pct,
+                    catalyst: `BI S&P 500 loser ${loser.pct.toFixed(1)}% ${loser.name}`,
+                    score: Math.min(0.86 + Math.abs(loser.pct) / 100, 0.97),
+                  });
+                }
+              }
+            } catch (e: any) {
+              summary.skipped.push(`bi_fetch_error:${e?.message || String(e)}`);
+            }
+
+            const biList = [...biSymbols.entries()]
+              .filter(([symbol]) => !heldSet.has(symbol))
+              .filter(([symbol]) => !this._sessionSells.has(symbol))
+              .filter(([symbol]) => !this._recentBuys.has(symbol))
+              .sort((a, b) => a[1].pct - b[1].pct);
+
+            for (let i = 0; i < biList.length; i += 50) {
+              const batchSymbols = biList.slice(i, i + 50).map(([symbol]) => symbol);
+              const batch = batchSymbols.join(',');
+              try {
+                const snapRes = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${batch}&feed=iex`, {
+                  headers: alpacaHeaders, signal: AbortSignal.timeout(8000),
+                });
+                if (!snapRes.ok) continue;
+                const snapData = await snapRes.json() as any;
+                for (const symbol of batchSymbols) {
+                  const snap = snapData[symbol];
+                  const price = snap?.latestTrade?.p;
+                  const prevClose = snap?.prevDailyBar?.c;
+                  if (!price || !prevClose || price < 10) continue;
+                  const dayChange = ((price - prevClose) / prevClose) * 100;
+                  const bi = biSymbols.get(symbol)!;
+                  if (dayChange <= MIN_DOWNSIDE_SHORT_MOVE) {
+                    addCandidate({
+                      symbol,
+                      price,
+                      dayChange,
+                      score: bi.score,
+                      catalyst: bi.catalyst,
+                      source: 'biz_insider',
+                    });
+                  } else {
+                    summary.skipped.push(`${symbol}:alpaca_not_red_enough_${dayChange.toFixed(1)}%`);
+                  }
+                }
+              } catch {}
+              await new Promise(r => setTimeout(r, 150));
+            }
+
+          const candidates = [...candidateMap.values()]
+            .filter(c => !heldSet.has(c.symbol))
+            .filter(c => !this._sessionSells.has(c.symbol))
+            .filter(c => !this._recentBuys.has(c.symbol))
+            .sort((a, b) => a.dayChange - b.dayChange || b.score - a.score);
+
+          summary.candidates = candidates.length;
+          summary.topDown = candidates.slice(0, 10).map(c => `${c.symbol}${c.dayChange.toFixed(1)}%:${c.source}`);
+          console.log(`  [BI SHORT SCAN] ${candidates.length} confirmed BI downside candidates. Top: ${summary.topDown.slice(0, 5).join(', ') || 'none'}`);
+
+          let remainingShortSlots = Math.min(openSlots, MAX_INTRADAY_SHORTS - existingShorts);
+          for (const candidate of candidates) {
+            if (remainingShortSlots <= 0) break;
+            if (candidate.dayChange > MIN_DOWNSIDE_SHORT_MOVE) {
+              summary.skipped.push(`${candidate.symbol}:not_red_enough_${candidate.dayChange.toFixed(1)}%`);
+              continue;
+            }
+            console.log(`  [BI SHORT] ${candidate.symbol} ${candidate.dayChange.toFixed(1)}% today | ${candidate.catalyst.slice(0, 60)}`);
+            const shorted = await this.shortPosition(
+              candidate.symbol,
+              candidate.price,
+              `BI_SHORT ${candidate.dayChange.toFixed(1)}%`,
+            );
+            if (shorted) {
+              remainingShortSlots--;
+              openSlots--;
+              summary.placed++;
+              brain.recordRule(
+                `BI SHORT: ${candidate.symbol} ${candidate.dayChange.toFixed(1)}% @ $${candidate.price.toFixed(2)}`,
+                'autonomous_decision',
+              ).catch(() => {});
+            } else {
+              summary.skipped.push(`${candidate.symbol}:order_blocked`);
+            }
           }
+
+          this.store.set(shortScanKey, JSON.stringify(summary));
+          this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
+          if (summary.placed > 0) {
+            await postToDiscord(`BI SHORT: opened ${summary.placed} downside short(s). Top scan: ${summary.topDown.slice(0, 5).join(', ')}`);
+          }
+          }
+        } catch (e: any) {
+          const summary = { time: new Date().toISOString(), error: e?.message || String(e) };
+          this.store.set(shortScanKey, JSON.stringify(summary));
+          this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
         }
-      } catch {}
+      }
     }
 
     // ── 5e. MIDDAY MOMENTUM — buy top S&P 500 movers (11:00-11:15 AM ET) ──
