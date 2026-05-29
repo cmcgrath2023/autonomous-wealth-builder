@@ -1023,8 +1023,9 @@ export class TradeEngine {
         console.log(`  [SHORT] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
         return false;
       }
-      if (posCheck.length >= MAX_POSITIONS) {
-        console.log(`  [SHORT] POSITION CAP — ${posCheck.length}/${MAX_POSITIONS}. Skipping ${symbol}.`);
+      const equityCount = posCheck.filter(p => !isCrypto(p.ticker)).length;
+      if (equityCount >= MAX_POSITIONS + MAX_INTRADAY_SHORTS) {
+        console.log(`  [SHORT] POSITION CAP — ${equityCount}/${MAX_POSITIONS + MAX_INTRADAY_SHORTS}. Skipping ${symbol}.`);
         return false;
       }
       shortAmount = Math.min(PER_POSITION, available);
@@ -1969,14 +1970,17 @@ export class TradeEngine {
           const stars = this.store.getResearchStars();
         const heldSet = new Set(equityPos.map(p => p.ticker));
         const freshPos = await this.executor.getPositions();
-        const existingShorts = freshPos.filter(p => p.shares < 0).length;
-        let openSlots = MAX_POSITIONS - freshPos.filter(p => !isCrypto(p.ticker)).length;
+	        const existingShorts = freshPos.filter(p => p.shares < 0).length;
+          const equityCount = freshPos.filter(p => !isCrypto(p.ticker)).length;
+          const longOpenSlots = Math.max(0, MAX_POSITIONS - equityCount);
+          const shortOpenSlots = Math.max(0, MAX_POSITIONS + MAX_INTRADAY_SHORTS - equityCount);
 
           const summary: any = {
             time: new Date().toISOString(),
             scanned: 0,
             existingShorts,
-            openSlots,
+            longOpenSlots,
+            shortOpenSlots,
             candidates: 0,
             placed: 0,
             topDown: [],
@@ -1988,8 +1992,8 @@ export class TradeEngine {
             summary.blocked = `max_shorts_${existingShorts}/${MAX_INTRADAY_SHORTS}`;
             this.store.set(shortScanKey, JSON.stringify(summary));
             this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
-          } else if (openSlots <= 0) {
-            summary.blocked = `position_cap_${freshPos.filter(p => !isCrypto(p.ticker)).length}/${MAX_POSITIONS}`;
+          } else if (shortOpenSlots <= 0) {
+            summary.blocked = `short_overlay_cap_${equityCount}/${MAX_POSITIONS + MAX_INTRADAY_SHORTS}`;
             this.store.set(shortScanKey, JSON.stringify(summary));
             this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
           } else {
@@ -2102,7 +2106,7 @@ export class TradeEngine {
           summary.topDown = candidates.slice(0, 10).map(c => `${c.symbol}${c.dayChange.toFixed(1)}%:${c.source}`);
           console.log(`  [BI SHORT SCAN] ${candidates.length} confirmed BI downside candidates. Top: ${summary.topDown.slice(0, 5).join(', ') || 'none'}`);
 
-          let remainingShortSlots = Math.min(openSlots, MAX_INTRADAY_SHORTS - existingShorts);
+          let remainingShortSlots = Math.min(shortOpenSlots, MAX_INTRADAY_SHORTS - existingShorts);
           for (const candidate of candidates) {
             if (remainingShortSlots <= 0) break;
             if (candidate.dayChange > MIN_DOWNSIDE_SHORT_MOVE) {
@@ -2117,7 +2121,6 @@ export class TradeEngine {
             );
             if (shorted) {
               remainingShortSlots--;
-              openSlots--;
               summary.placed++;
               brain.recordRule(
                 `BI SHORT: ${candidate.symbol} ${candidate.dayChange.toFixed(1)}% @ $${candidate.price.toFixed(2)}`,
