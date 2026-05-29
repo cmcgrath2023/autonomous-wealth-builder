@@ -1230,25 +1230,26 @@ export class TradeEngine {
     // ── 3b. AUTO-STOP — ensure every position has a broker stop order ────
     try {
       const creds2 = loadCredentials();
-      if (creds2.alpaca) {
-        const hdrs = { 'APCA-API-KEY-ID': creds2.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds2.alpaca.apiSecret };
+	      if (creds2.alpaca) {
+	        const hdrs = { 'APCA-API-KEY-ID': creds2.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds2.alpaca.apiSecret };
         const ordRes = await fetch(`${creds2.alpaca.baseUrl}/v2/orders?status=open&limit=500`, {
           headers: hdrs, signal: AbortSignal.timeout(5000),
         });
-        if (ordRes.ok) {
-          const openOrders = await ordRes.json() as any[];
-          const stopsBy = new Set(
-            openOrders
-              .filter((o: any) => (o.type === 'stop' || o.stop_price) && o.side === 'sell')
-              .map((o: any) => o.symbol.toUpperCase()),
-          );
-          for (const pos of equityPos) {
-            if (stopsBy.has(pos.ticker)) continue;
-            const stopPrice = Math.round(pos.avgPrice * (1 - STOP_PCT) * 100) / 100;
-            console.log(`  [AUTO-STOP] ${pos.ticker} missing broker stop — placing sell stop @$${stopPrice.toFixed(2)}`);
-            await this.placeProtectiveStop(pos.ticker, Math.abs(pos.shares), 'sell', stopPrice, 'auto_heartbeat');
-          }
-        }
+	        if (ordRes.ok) {
+	          const openOrders = await ordRes.json() as any[];
+	          const stopsBy = new Set(
+	            openOrders
+	              .filter((o: any) => (o.type === 'stop' || o.stop_price))
+	              .map((o: any) => `${o.symbol.toUpperCase()}:${o.side}`),
+	          );
+	          for (const pos of equityPos) {
+	            const stopSide = pos.shares < 0 ? 'buy' : 'sell';
+	            if (stopsBy.has(`${pos.ticker}:${stopSide}`)) continue;
+	            const stopPrice = Math.round(pos.avgPrice * (pos.shares < 0 ? 1 + STOP_PCT : 1 - STOP_PCT) * 100) / 100;
+	            console.log(`  [AUTO-STOP] ${pos.ticker} missing broker stop — placing ${stopSide} stop @$${stopPrice.toFixed(2)}`);
+	            await this.placeProtectiveStop(pos.ticker, Math.abs(pos.shares), stopSide, stopPrice, 'auto_heartbeat');
+	          }
+	        }
       }
     } catch (e: any) {
       console.log(`  [AUTO-STOP ERR] ${e.message}`);
