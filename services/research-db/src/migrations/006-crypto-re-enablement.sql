@@ -12,6 +12,22 @@ VALUES
   ('DOGE/USD', 'Dogecoin', 'Crypto', 'Meme', 'ALPACA', NOW())
 ON CONFLICT (symbol) DO NOTHING;
 
+-- Equity/ETF nodes referenced by the crypto relationship graph. Full company
+-- enrichment can update these later; the FK requires a node before an edge.
+INSERT INTO companies (symbol, name, sector, industry, exchange, last_updated)
+VALUES
+  ('MSTR', 'MicroStrategy', 'Technology', 'Bitcoin Treasury', 'NASDAQ', NOW()),
+  ('COIN', 'Coinbase Global', 'Financials', 'Crypto Exchange', 'NASDAQ', NOW()),
+  ('MARA', 'Marathon Digital', 'Technology', 'Bitcoin Mining', 'NASDAQ', NOW()),
+  ('RIOT', 'Riot Platforms', 'Technology', 'Bitcoin Mining', 'NASDAQ', NOW()),
+  ('HUT', 'Hut 8', 'Technology', 'Bitcoin Mining', 'NASDAQ', NOW()),
+  ('CLSK', 'CleanSpark', 'Technology', 'Bitcoin Mining', 'NASDAQ', NOW()),
+  ('CIFR', 'Cipher Mining', 'Technology', 'Bitcoin Mining', 'NASDAQ', NOW()),
+  ('WULF', 'TeraWulf', 'Technology', 'Bitcoin Mining', 'NASDAQ', NOW()),
+  ('GLD', 'SPDR Gold Shares', 'Commodities', 'Gold ETF', 'NYSEARCA', NOW()),
+  ('QQQ', 'Invesco QQQ Trust', 'Technology', 'Index ETF', 'NASDAQ', NOW())
+ON CONFLICT (symbol) DO NOTHING;
+
 -- Crypto ↔ equity relationships (blast radius graph)
 -- BTC ecosystem
 INSERT INTO company_relationships (symbol_a, symbol_b, relationship, strength, evidence, source, discovered_at)
