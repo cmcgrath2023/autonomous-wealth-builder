@@ -1696,7 +1696,7 @@ export class TradeEngine {
         // SOURCE 2: Research worker catalysts (overnight news)
         const researchStars = new Map<string, { catalyst: string; score: number; sector: string; createdAt?: string }>();
         try {
-          const stars = await getActiveResearchStars();
+          const stars = await getActiveResearchStars({ includeRelated: true });
           for (const s of stars) {
             if (
               isAllowedSymbol(s.symbol) &&
@@ -1838,7 +1838,7 @@ export class TradeEngine {
       // 2. Pull research worker catalysts (news from weekend scanning)
       const catalysts = new Set<string>();
       try {
-        const stars = await getActiveResearchStars();
+        const stars = await getActiveResearchStars({ includeRelated: true });
         for (const s of stars) catalysts.add(s.symbol);
       } catch {}
 
@@ -2005,7 +2005,7 @@ export class TradeEngine {
     // Read research stars and buy high-conviction catalysts that are moving up today
     if (ENABLE_CATALYST_BUYS && mkt.isMarketOpen && mkt.etHour >= 10 && mkt.etHour < NEW_BUY_CUTOFF_HOUR) {
       try {
-        const stars = await getActiveResearchStars();
+        const stars = await getActiveResearchStars({ includeRelated: true });
         const heldSet = new Set(equityPos.map(p => p.ticker));
         const freshPos = await this.executor.getPositions();
         let openSlots = MAX_POSITIONS - freshPos.filter(p => !isCrypto(p.ticker)).length;
@@ -2061,7 +2061,7 @@ export class TradeEngine {
       if (!this.store.get(shortScanKey)) {
         this.store.set(shortScanKey, 'running');
         try {
-		          const stars = await getActiveResearchStars();
+		          const stars = await getActiveResearchStars({ includeRelated: true });
 	          const heldSet = new Set(equityPos.map(p => p.ticker));
 	          const freshPos = await this.executor.getPositions();
             const equityPositions = freshPos.filter(p => !isCrypto(p.ticker));
@@ -2395,7 +2395,7 @@ export class TradeEngine {
       const heldLongSet = new Set(equityPos.filter(p => !isShortPosition(p)).map(p => p.ticker));
       const heldShortSet = new Set(equityPos.filter(p => isShortPosition(p)).map(p => p.ticker));
       const researchStars = new Set<string>();
-      try { const stars = await getActiveResearchStars(); for (const s of stars) researchStars.add(s.symbol); } catch {}
+      try { const stars = await getActiveResearchStars({ includeRelated: true }); for (const s of stars) researchStars.add(s.symbol); } catch {}
 
       const scanResult = await scanRSI2(SP500_UNIVERSE, alpacaHeaders, heldLongSet, heldShortSet, researchStars);
       const { buys, shorts, diag } = scanResult;
@@ -2501,7 +2501,7 @@ export class TradeEngine {
       // Pull research stars — research worker writes these every 2 min
       const researchStars = new Set<string>();
       try {
-        const stars = await getActiveResearchStars();
+        const stars = await getActiveResearchStars({ includeRelated: true });
         for (const s of stars) researchStars.add(s.symbol);
         if (researchStars.size > 0) console.log(`  [RESEARCH] ${researchStars.size} active stars: ${[...researchStars].slice(0, 8).join(', ')}`);
       } catch {}

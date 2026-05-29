@@ -5,9 +5,8 @@
  * Handles: companies, relationships, catalysts, momentum, research signals,
  * theses, and outcomes. Uses pgvector for embedding-based similarity search.
  *
- * Trading tables (beliefs, closed_trades, system_buys, etc.) stay in SQLite
- * on the hot path. This PG layer is for the research/intelligence system
- * that needs graph joins, vector search, and scale.
+ * Research profiles, graph joins, vector search, and the gateway-v2 trading
+ * ledger live here. SQLite remains only as a legacy compatibility cache.
  *
  * Config: DATABASE_URL env var (e.g. postgresql://user:pass@localhost:5432/mtwm_research)
  */

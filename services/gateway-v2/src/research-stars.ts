@@ -1,5 +1,9 @@
 import type { ResearchStarRow } from '../../gateway/src/state-store.js';
 
+interface ResearchStarOptions {
+  includeRelated?: boolean;
+}
+
 export async function saveResearchStar(star: {
   symbol: string;
   sector: string;
@@ -42,7 +46,7 @@ export async function saveResearchStar(star: {
   ]);
 }
 
-export async function getActiveResearchStars(): Promise<ResearchStarRow[]> {
+export async function getActiveResearchStars(options: ResearchStarOptions = {}): Promise<ResearchStarRow[]> {
   const { query } = await import('../../research-db/src/index.js');
   const { rows } = await query<{
     symbol: string;
@@ -58,13 +62,15 @@ export async function getActiveResearchStars(): Promise<ResearchStarRow[]> {
      ORDER BY score DESC, updated_at DESC
      LIMIT 500
   `);
-  return rows.map((r) => ({
+  const stars = rows.map((r) => ({
     symbol: r.symbol,
     sector: r.sector,
     catalyst: r.catalyst,
     score: Number(r.score),
     createdAt: new Date(r.updated_at).toISOString(),
   }));
+  if (!options.includeRelated || stars.length === 0) return stars;
+  return expandWithGraphNeighbors(stars);
 }
 
 export async function expireResearchStars(maxAgeHours = 4): Promise<number> {
@@ -76,4 +82,49 @@ export async function expireResearchStars(maxAgeHours = 4): Promise<number> {
        AND updated_at < NOW() - ($1::text || ' hours')::interval
   `, [maxAgeHours]);
   return rowCount ?? 0;
+}
+
+async function expandWithGraphNeighbors(stars: ResearchStarRow[]): Promise<ResearchStarRow[]> {
+  const symbols = [...new Set(stars.map((s) => s.symbol).filter(Boolean))];
+  if (symbols.length === 0) return stars;
+
+  try {
+    const { query } = await import('../../research-db/src/index.js');
+    const { rows } = await query<{
+      symbol: string;
+      neighbor: string;
+      relationship: string;
+      strength: number;
+      lag_days: number | null;
+    }>(`
+      SELECT symbol, neighbor, relationship, strength, lag_days
+        FROM mv_relationship_hops
+       WHERE symbol = ANY($1)
+         AND strength >= 0.45
+       ORDER BY strength DESC
+       LIMIT 500
+    `, [symbols]);
+
+    const bySymbol = new Map(stars.map((s) => [s.symbol, s]));
+    const expanded = [...stars];
+    for (const rel of rows) {
+      if (!rel.neighbor || bySymbol.has(rel.neighbor)) continue;
+      const source = bySymbol.get(rel.symbol);
+      if (!source) continue;
+      const strength = Math.max(0, Math.min(1, Number(rel.strength) || 0.5));
+      const score = Math.min(0.97, source.score * (0.84 + strength * 0.16));
+      const star: ResearchStarRow = {
+        symbol: rel.neighbor,
+        sector: source.sector,
+        catalyst: `RELATED ${rel.relationship} from ${source.symbol}: ${source.catalyst}`,
+        score,
+        createdAt: source.createdAt,
+      };
+      bySymbol.set(star.symbol, star);
+      expanded.push(star);
+    }
+    return expanded.sort((a, b) => b.score - a.score);
+  } catch {
+    return stars;
+  }
 }

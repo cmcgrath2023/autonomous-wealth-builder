@@ -17,6 +17,7 @@
  */
 
 import { brain } from '../brain-client.js';
+import { fetchYFinanceProfile, type YFinanceProfile } from '../yfinance-bridge.js';
 
 const YAHOO_BASE = 'https://query2.finance.yahoo.com/v10/finance/quoteSummary';
 const MODULES = [
@@ -74,6 +75,10 @@ async function getYahooAuth(): Promise<{ crumb: string; cookie: string } | null>
 export interface TickerFundamentals {
   symbol: string;
   fetchedAt: string;
+  companyName?: string | null;
+  sector?: string | null;
+  industry?: string | null;
+  businessSummary?: string | null;
 
   // Analyst consensus
   analystTargetMean: number | null;
@@ -108,6 +113,69 @@ export interface TickerFundamentals {
 
   // Derived conviction
   fundamentalScore: number;             // 0-100 composite
+}
+
+function toNum(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function fundamentalsFromYFinance(symbol: string, profile: YFinanceProfile): TickerFundamentals {
+  const recommendationScore = toNum(profile.recommendationMean);
+  const analystTargetMean = toNum(profile.targetMeanPrice);
+  const currentPrice = toNum(profile.currentPrice);
+  let score = 50;
+  if (recommendationScore !== null) {
+    if (recommendationScore <= 2.0) score += 20;
+    else if (recommendationScore <= 2.5) score += 12;
+    else if (recommendationScore <= 3.0) score += 0;
+    else if (recommendationScore <= 4.0) score -= 10;
+    else score -= 15;
+  }
+  if (analystTargetMean && currentPrice && currentPrice > 0) {
+    const upside = (analystTargetMean - currentPrice) / currentPrice;
+    if (upside > 0.20) score += 15;
+    else if (upside > 0.10) score += 8;
+    else if (upside > 0) score += 3;
+    else if (upside > -0.10) score -= 5;
+    else score -= 10;
+  }
+  score += Math.min((profile.recentUpgrades ?? 0) * 3, 10);
+  score -= Math.min((profile.recentDowngrades ?? 0) * 3, 5);
+  const profitMargin = toNum(profile.profitMargins);
+  const revenueGrowth = toNum(profile.revenueGrowth);
+  if (profitMargin !== null && profitMargin > 0.15) score += 3;
+  if (revenueGrowth !== null && revenueGrowth > 0.10) score += 2;
+
+  return {
+    symbol,
+    fetchedAt: new Date().toISOString(),
+    companyName: profile.name ?? null,
+    sector: profile.sector ?? null,
+    industry: profile.industry ?? null,
+    businessSummary: profile.summary ?? null,
+    analystTargetMean,
+    analystTargetMedian: toNum(profile.targetMedianPrice),
+    analystTargetHigh: toNum(profile.targetHighPrice),
+    analystTargetLow: toNum(profile.targetLowPrice),
+    analystCount: Math.trunc(toNum(profile.analystCount) ?? 0),
+    recommendationKey: profile.recommendationKey ?? null,
+    recommendationScore,
+    recentUpgrades: profile.recentUpgrades ?? 0,
+    recentDowngrades: profile.recentDowngrades ?? 0,
+    nextEarningsDate: null,
+    earningsSurprisePct: null,
+    insiderBuyCount: 0,
+    insiderSellCount: 0,
+    insiderNetShares: 0,
+    revenueGrowth,
+    profitMargin,
+    operatingMargin: toNum(profile.operatingMargins),
+    returnOnEquity: toNum(profile.returnOnEquity),
+    debtToEquity: toNum(profile.debtToEquity),
+    freeCashFlow: toNum(profile.freeCashflow),
+    currentPrice,
+    fundamentalScore: Math.max(0, Math.min(100, score)),
+  };
 }
 
 function extractFundamentals(symbol: string, data: any): TickerFundamentals {
@@ -208,6 +276,10 @@ function extractFundamentals(symbol: string, data: any): TickerFundamentals {
   return {
     symbol,
     fetchedAt: new Date().toISOString(),
+    companyName: null,
+    sector: null,
+    industry: null,
+    businessSummary: null,
     analystTargetMean, analystTargetMedian, analystTargetHigh, analystTargetLow,
     analystCount, recommendationKey, recommendationScore,
     recentUpgrades, recentDowngrades,
@@ -224,7 +296,8 @@ export async function deepResearchTicker(symbol: string): Promise<TickerFundamen
     const auth = await getYahooAuth();
     if (!auth) {
       console.log(`  [DEEP] ${symbol}: Yahoo auth unavailable`);
-      return null;
+      const yfProfile = await fetchYFinanceProfile(symbol);
+      return yfProfile ? fundamentalsFromYFinance(symbol, yfProfile) : null;
     }
     const url = `${YAHOO_BASE}/${symbol}?modules=${MODULES}&crumb=${encodeURIComponent(auth.crumb)}`;
     const res = await fetch(url, {
@@ -234,16 +307,26 @@ export async function deepResearchTicker(symbol: string): Promise<TickerFundamen
     if (!res.ok) {
       if (res.status === 401) { _yahooCrumb = null; _yahooAuthExpiry = 0; } // force re-auth
       console.log(`  [DEEP] ${symbol}: Yahoo ${res.status}`);
-      return null;
+      const yfProfile = await fetchYFinanceProfile(symbol);
+      return yfProfile ? fundamentalsFromYFinance(symbol, yfProfile) : null;
     }
     const json = await res.json() as any;
     const result = json?.quoteSummary?.result?.[0];
     if (!result) return null;
 
-    return extractFundamentals(symbol, result);
+    const profile = extractFundamentals(symbol, result);
+    const yfProfile = await fetchYFinanceProfile(symbol);
+    if (yfProfile) {
+      profile.companyName = yfProfile.name ?? profile.companyName;
+      profile.sector = yfProfile.sector ?? profile.sector;
+      profile.industry = yfProfile.industry ?? profile.industry;
+      profile.businessSummary = yfProfile.summary ?? profile.businessSummary;
+    }
+    return profile;
   } catch (e: any) {
     console.log(`  [DEEP] ${symbol}: ${e.message}`);
-    return null;
+    const yfProfile = await fetchYFinanceProfile(symbol);
+    return yfProfile ? fundamentalsFromYFinance(symbol, yfProfile) : null;
   }
 }
 
@@ -345,6 +428,23 @@ export async function runDeepResearch(
             profile.revenueGrowth, profile.profitMargin, profile.operatingMargin,
             profile.returnOnEquity, profile.debtToEquity, profile.freeCashFlow,
             profile.currentPrice, profile.fundamentalScore,
+          ]);
+          await pgPool.query(`
+            INSERT INTO companies (symbol, name, sector, industry, sub_industry, last_price, last_updated)
+            VALUES ($1, $2, $3, $4, $4, $5, NOW())
+            ON CONFLICT (symbol) DO UPDATE SET
+              name = COALESCE(NULLIF(EXCLUDED.name, ''), companies.name),
+              sector = COALESCE(NULLIF(EXCLUDED.sector, ''), companies.sector),
+              industry = COALESCE(NULLIF(EXCLUDED.industry, ''), companies.industry),
+              sub_industry = COALESCE(NULLIF(EXCLUDED.sub_industry, ''), companies.sub_industry),
+              last_price = COALESCE(EXCLUDED.last_price, companies.last_price),
+              last_updated = NOW()
+          `, [
+            profile.symbol,
+            profile.companyName || profile.symbol,
+            profile.sector || '',
+            profile.industry || '',
+            profile.currentPrice,
           ]);
         } catch (e: any) {
           console.log(`  [DEEP] ${ticker} PG write failed: ${e.message}`);
