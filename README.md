@@ -70,8 +70,8 @@ Research Worker finds movers (Biz Insider, Yahoo, Bloomberg)
           → Catalyst buy path executes (score ≥ 0.95, Trident shouldBuy gate)
 ```
 
-### Bayesian Intelligence
-Per-ticker win/loss tracking from closed trades. Adjusts research star scores based on historical performance. Tickers with <40% win rate on 3+ observations get rejected.
+### Learning Prior
+Gateway-v2 still instantiates the shared Bayesian prior, but it is a lightweight advisory layer seeded from Trident `trade_outcome` memories. It can adjust research-star scoring only when enough closed-trade outcomes exist for a ticker. Trident/SONA is the durable learning system; there is no active FANN execution gate in gateway-v2.
 
 ## Trading Rules
 
@@ -85,7 +85,7 @@ Per-ticker win/loss tracking from closed trades. Adjusts research star scores ba
 
 ### Short Logic
 - **Catalyst shorts** 10 AM - 2 PM: Biz Insider biggest losers + bearish catalysts (earnings miss, downgrade, guidance cut)
-- **Max 2 shorts** at a time
+- **Dynamic short exposure**: short allocation targets move around a neutral 50/50 long-short posture based on SPY/QQQ, UVXY, and tape conditions. Red markets permit materially heavier short exposure; green markets pull short exposure down.
 - **All shorts covered at 3:45 PM** — no overnight short exposure
 - **5% buy-stop** on every short position
 
@@ -160,9 +160,9 @@ Single-process Node.js orchestrator running all components in-process.
 │  └──────────────┘  └──────────────┘  └───────────────┘                 │
 │                                                                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
-│  │ Bayesian     │  │ OpenClaw     │  │ Ops (SRE)     │                 │
-│  │ Intelligence │  │ Position     │  │ Health Monitor │                 │
-│  │ Win/Loss Prior│  │ Drop Alerts │  │ Component Chk  │                 │
+│  │ Learning     │  │ OpenClaw     │  │ Ops (SRE)     │                 │
+│  │ Prior        │  │ Position     │  │ Health Monitor │                 │
+│  │ Trade Outcomes│ │ Drop Alerts │  │ Component Chk  │                 │
 │  │ Score Adjust  │  │ Yahoo Search │  │ Tara Reports   │                 │
 │  └──────────────┘  └──────────────┘  └───────────────┘                 │
 │                                                                         │
@@ -193,6 +193,12 @@ Single-process Node.js orchestrator running all components in-process.
 | **State Store** | SQLite | Research stars, positions snapshot, scan results, daily keys |
 | **Research DB** | PostgreSQL (DO) | Companies, relationships, signals, theses, momentum, fundamentals |
 | **Trident** | External API | Domain-scoped memories, SONA patterns, trade history |
+
+### Runtime Boundaries
+
+- **Production runtime**: `services/gateway-v2` is the only trading orchestrator that should be running.
+- **Legacy runtime**: `services/gateway` contains old NeuralTrader/FANN-era routes and comments. It is retained for reference but is not the production execution path.
+- **SQLite is still intentional**: gateway-v2 uses SQLite as a local state/cache store for research stars, snapshots, scan state, and reconciliation metadata. PostgreSQL is the research database; Trident is the long-term intelligence/memory layer.
 
 ## Deployment
 
