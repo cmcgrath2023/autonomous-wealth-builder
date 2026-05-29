@@ -784,9 +784,10 @@ export class TradeEngine {
   // ── Buy + Broker Stop ──────────────────────────────────────────────────
 
   private async buyPosition(symbol: string, price: number, reason: string, stopPrice?: number): Promise<boolean> {
-    const creds = loadCredentials();
-    if (!creds.alpaca) return false;
-    const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
+	    const creds = loadCredentials();
+	    if (!creds.alpaca) return false;
+	    const alpaca = creds.alpaca;
+	    const headers = { 'APCA-API-KEY-ID': alpaca.apiKey, 'APCA-API-SECRET-KEY': alpaca.apiSecret, 'Content-Type': 'application/json' };
 
     // Quality gate — approved owner list, S&P 500 research movers, or approved hedge ETFs.
     if (!isAutoBuyAllowedSymbol(symbol)) {
@@ -827,7 +828,7 @@ export class TradeEngine {
     if (qty <= 0) return false;
 
     try {
-      const res = await fetch(`${creds.alpaca.baseUrl}/v2/orders`, {
+	      const res = await fetch(`${alpaca.baseUrl}/v2/orders`, {
         method: 'POST', headers,
         body: JSON.stringify({ symbol, qty: String(qty), side: 'buy', type: 'market', time_in_force: 'day' }),
         signal: AbortSignal.timeout(10_000),
@@ -1008,10 +1009,11 @@ export class TradeEngine {
 
   // ── Short a position ────────────────────────────────────────────────────
 
-  private async shortPosition(symbol: string, price: number, reason: string): Promise<boolean> {
-    const creds = loadCredentials();
-    if (!creds.alpaca) return false;
-    const headers = { 'APCA-API-KEY-ID': creds.alpaca.apiKey, 'APCA-API-SECRET-KEY': creds.alpaca.apiSecret, 'Content-Type': 'application/json' };
+	  private async shortPosition(symbol: string, price: number, reason: string): Promise<boolean> {
+	    const creds = loadCredentials();
+	    if (!creds.alpaca) return false;
+	    const alpaca = creds.alpaca;
+	    const headers = { 'APCA-API-KEY-ID': alpaca.apiKey, 'APCA-API-SECRET-KEY': alpaca.apiSecret, 'Content-Type': 'application/json' };
 
     let shortAmount = PER_POSITION;
     try {
@@ -1036,7 +1038,7 @@ export class TradeEngine {
 
     try {
       // Sell short
-      const res = await fetch(`${creds.alpaca.baseUrl}/v2/orders`, {
+	      const res = await fetch(`${alpaca.baseUrl}/v2/orders`, {
         method: 'POST', headers,
         body: JSON.stringify({ symbol, qty: String(qty), side: 'sell', type: 'market', time_in_force: 'day' }),
         signal: AbortSignal.timeout(10_000),
@@ -1050,24 +1052,31 @@ export class TradeEngine {
       console.log(`  [SHORT] ${qty} ${symbol} @~$${price.toFixed(2)} — ${reason} — ${order.status}`);
       this._trackBuy(symbol, price, qty, order.id ?? null); // track for position management
 
-      const stopPrice = Math.round(price * (1 + STOP_PCT) * 100) / 100;
-      try {
-        const stopRes = await fetch(`${creds.alpaca.baseUrl}/v2/orders`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            symbol,
-            qty: String(qty),
-            side: 'buy',
-            type: 'stop',
-            stop_price: String(stopPrice),
-            time_in_force: 'gtc',
-          }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (stopRes.ok) {
-          const stopOrder = await stopRes.json() as any;
-          this.store.set(`stop_order_${symbol}`, JSON.stringify({
+	      const stopPrice = Math.round(price * (1 + STOP_PCT) * 100) / 100;
+	      try {
+	        const placeShortStop = () => fetch(`${alpaca.baseUrl}/v2/orders`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              symbol,
+              qty: String(qty),
+              side: 'buy',
+              type: 'stop',
+              stop_price: String(stopPrice),
+              time_in_force: 'gtc',
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+	        let stopRes = await placeShortStop();
+          if (!stopRes.ok) {
+            const firstBody = await stopRes.text();
+            console.log(`  [SHORT SL RETRY] ${symbol}: ${stopRes.status} ${firstBody.slice(0, 80)}`);
+            await new Promise(r => setTimeout(r, 1500));
+            stopRes = await placeShortStop();
+          }
+	        if (stopRes.ok) {
+	          const stopOrder = await stopRes.json() as any;
+	          this.store.set(`stop_order_${symbol}`, JSON.stringify({
             symbol,
             qty,
             stopPrice,
