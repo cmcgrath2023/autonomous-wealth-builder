@@ -1244,7 +1244,12 @@ export class TradeEngine {
 	          );
 	          for (const pos of equityPos) {
 	            const stopSide = pos.shares < 0 ? 'buy' : 'sell';
+	            const wrongStopSide = pos.shares < 0 ? 'sell' : 'buy';
 	            if (stopsBy.has(`${pos.ticker}:${stopSide}`)) continue;
+	            const cancelledWrongSide = await this.cancelOpenStopOrders(pos.ticker, hdrs, creds2.alpaca.baseUrl, wrongStopSide);
+	            if (cancelledWrongSide > 0) {
+	              console.log(`  [AUTO-STOP] ${pos.ticker} canceled ${cancelledWrongSide} wrong-side ${wrongStopSide} stop(s)`);
+	            }
 	            const stopPrice = Math.round(pos.avgPrice * (pos.shares < 0 ? 1 + STOP_PCT : 1 - STOP_PCT) * 100) / 100;
 	            console.log(`  [AUTO-STOP] ${pos.ticker} missing broker stop — placing ${stopSide} stop @$${stopPrice.toFixed(2)}`);
 	            await this.placeProtectiveStop(pos.ticker, Math.abs(pos.shares), stopSide, stopPrice, 'auto_heartbeat');
