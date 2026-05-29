@@ -6,8 +6,9 @@
  * manages FACT cache, and aligns research with catalyst themes.
  */
 
-import { GatewayStateStore, ClosedTradeRow } from '../../../gateway/src/state-store.js';
+import { GatewayStateStore, ClosedTradeRow, ResearchStarRow } from '../../../gateway/src/state-store.js';
 import { brain } from '../brain-client.js';
+import { getActiveResearchStars } from '../research-stars.js';
 
 const LOOP_MS = 120_000;
 const MIN_TRADES_FOR_EVAL = 3;
@@ -68,10 +69,11 @@ export class ResearchQuality {
 
     try {
       // 1. Analyze sector performance from closed trades
-      const sectorPerf = this.analyzeSectorPerformance();
+      const stars = await getActiveResearchStars();
+      const sectorPerf = this.analyzeSectorPerformance(stars);
 
       // 2. Monitor research star quality
-      const starQuality = this.evaluateStarQuality(sectorPerf);
+      const starQuality = this.evaluateStarQuality(sectorPerf, stars);
 
       // 3. Write sector recommendations
       const recommendations = this.buildRecommendations(sectorPerf);
@@ -137,9 +139,8 @@ export class ResearchQuality {
     }
   }
 
-  private analyzeSectorPerformance(): SectorPerf[] {
+  private analyzeSectorPerformance(stars: ResearchStarRow[]): SectorPerf[] {
     const trades = this.store.getClosedTrades(200);
-    const stars = this.store.getResearchStars();
 
     // Map tickers to sectors via research stars
     const tickerSector = new Map<string, string>();
@@ -194,8 +195,7 @@ export class ResearchQuality {
     return 'other';
   }
 
-  private evaluateStarQuality(sectorPerf: SectorPerf[]): string {
-    const stars = this.store.getResearchStars();
+  private evaluateStarQuality(sectorPerf: SectorPerf[], stars: ResearchStarRow[]): string {
     if (stars.length === 0) return 'no stars';
 
     // Check how many current stars belong to promoted vs demoted sectors

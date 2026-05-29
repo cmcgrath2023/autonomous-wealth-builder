@@ -1,6 +1,6 @@
 /**
  * Research Worker — Standalone process that continuously scans markets
- * and writes research stars to the shared SQLite state store.
+ * and writes research stars to PostgreSQL + Trident research domains.
  *
  * 120-second loop: RSS news scan, 5-sector FACT analysis, Alpaca prices,
  * write stars + reports, expire stale stars (>4h).
@@ -13,6 +13,7 @@ import { CredentialVault } from '../../qudag/src/vault.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
+import { expireResearchStars, getActiveResearchStars, saveResearchStar } from './research-stars.js';
 
 // FIX 1 & 3: Bayesian filter for research stars — adjust scores based on trade outcomes
 let _bayesian: BayesianIntelligence | null = null;
@@ -309,6 +310,22 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
   const t0 = Date.now();
   const errors: string[] = [];
   let starsWritten = 0, reportsWritten = 0;
+  const activeStarSymbols = new Set<string>();
+  try {
+    for (const star of await getActiveResearchStars()) activeStarSymbols.add(star.symbol);
+  } catch {}
+
+  const writeStar = async (symbol: string, sector: string, catalyst: string, score: number): Promise<void> => {
+    await saveResearchStar({
+      symbol,
+      sector,
+      catalyst,
+      score,
+      source: 'research_worker',
+      metadata: { cycle: 'research-worker' },
+    });
+    activeStarSymbols.add(symbol);
+  };
 
   // 1. RSS
   let news: NewsItem[] = [];
@@ -352,7 +369,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         );
         for (const g of gainers.slice(0, 10)) {
           const score = Math.min(0.90 + g.percent_change / 100, 0.99);
-          store.saveResearchStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, bayesianAdjustScore(g.symbol, score));
+          await writeStar(g.symbol, 'momentum', `TOP MOVER +${g.percent_change.toFixed(1)}% | Vol: ${(g.trade_count || 0).toLocaleString()}`, bayesianAdjustScore(g.symbol, score));
           starsWritten++;
           if (!prices.has(g.symbol)) prices.set(g.symbol, { price: g.price, changePercent: g.percent_change });
         }
@@ -366,7 +383,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         for (const a of actives.slice(0, 5)) {
           if (!prices.has(a.symbol)) {
             const score = 0.75; // active but unknown direction — lower than movers
-            store.saveResearchStar(a.symbol, 'volume', `MOST ACTIVE | Vol: ${(a.trade_count || 0).toLocaleString()} | $${a.price.toFixed(2)}`, score);
+            await writeStar(a.symbol, 'volume', `MOST ACTIVE | Vol: ${(a.trade_count || 0).toLocaleString()} | $${a.price.toFixed(2)}`, score);
             starsWritten++;
           }
         }
@@ -387,10 +404,9 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
       let yahooAdded = 0;
       for (const q of yahooGainers.slice(0, 10)) {
         // Only add if not already a star from Alpaca (avoid duplicates)
-        const existing = store.getResearchStars().find((s: any) => s.symbol === q.symbol);
-        if (!existing) {
+        if (!activeStarSymbols.has(q.symbol)) {
           const score = Math.min(0.85 + q.regularMarketChangePercent / 200, 0.95);
-          store.saveResearchStar(q.symbol, 'momentum', `YAHOO GAINER +${q.regularMarketChangePercent.toFixed(1)}% | Vol: ${(q.regularMarketVolume || 0).toLocaleString()}`, bayesianAdjustScore(q.symbol, score));
+          await writeStar(q.symbol, 'momentum', `YAHOO GAINER +${q.regularMarketChangePercent.toFixed(1)}% | Vol: ${(q.regularMarketVolume || 0).toLocaleString()}`, bayesianAdjustScore(q.symbol, score));
           starsWritten++;
           yahooAdded++;
         }
@@ -411,10 +427,9 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
       const yahooLosers = loserQuotes.filter((q: any) => q.regularMarketPrice > 10 && q.regularMarketPrice < 500 && q.regularMarketChangePercent < -3);
       let losersAdded = 0;
       for (const q of yahooLosers.slice(0, 10)) {
-        const existing = store.getResearchStars().find((s: any) => s.symbol === q.symbol);
-        if (!existing) {
+        if (!activeStarSymbols.has(q.symbol)) {
           const score = Math.min(0.80 + Math.abs(q.regularMarketChangePercent) / 100, 0.90);
-          store.saveResearchStar(q.symbol, 'rsi2_candidate', `YAHOO LOSER ${q.regularMarketChangePercent.toFixed(1)}% | RSI-2 dip buy candidate | Vol: ${(q.regularMarketVolume || 0).toLocaleString()}`, bayesianAdjustScore(q.symbol, score));
+          await writeStar(q.symbol, 'rsi2_candidate', `YAHOO LOSER ${q.regularMarketChangePercent.toFixed(1)}% | RSI-2 dip buy candidate | Vol: ${(q.regularMarketVolume || 0).toLocaleString()}`, bayesianAdjustScore(q.symbol, score));
           starsWritten++;
           losersAdded++;
         }
@@ -438,8 +453,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         const sym = m[1].toUpperCase();
         const pct = parseFloat(m[2]);
         if (!sym || sym.length > 5 || Math.abs(pct) < 3) continue;
-        const existing = store.getResearchStars().find((s: any) => s.symbol === sym);
-        if (existing) continue;
+        if (activeStarSymbols.has(sym)) continue;
         moversToResearch.push({ symbol: sym, pct });
       }
 
@@ -460,21 +474,21 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
           }
           const score = Math.min(0.99, 0.85 + verdict.confidence * 0.14);
           if (verdict.direction === 'long') {
-            store.saveResearchStar(mover.symbol, 'momentum', `BI GAINER +${mover.pct.toFixed(1)}% | ${verdict.reason}`, bayesianAdjustScore(mover.symbol, score));
+            await writeStar(mover.symbol, 'momentum', `BI GAINER +${mover.pct.toFixed(1)}% | ${verdict.reason}`, bayesianAdjustScore(mover.symbol, score));
             starsWritten++; biGainers++;
           } else if (verdict.direction === 'short') {
-            store.saveResearchStar(mover.symbol, 'short_candidate', `BI LOSER ${mover.pct.toFixed(1)}% | ${verdict.reason}`, bayesianAdjustScore(mover.symbol, score));
+            await writeStar(mover.symbol, 'short_candidate', `BI LOSER ${mover.pct.toFixed(1)}% | ${verdict.reason}`, bayesianAdjustScore(mover.symbol, score));
             starsWritten++; biLosers++;
           }
         } else {
           // No LLM available — fall back to mechanical scoring (same as before)
           if (mover.pct >= 3) {
             const score = Math.min(0.99, 0.90 + mover.pct / 100);
-            store.saveResearchStar(mover.symbol, 'momentum', `BI GAINER +${mover.pct.toFixed(1)}% | S&P 500 top mover`, bayesianAdjustScore(mover.symbol, score));
+            await writeStar(mover.symbol, 'momentum', `BI GAINER +${mover.pct.toFixed(1)}% | S&P 500 top mover`, bayesianAdjustScore(mover.symbol, score));
             starsWritten++; biGainers++;
           } else if (mover.pct <= -3) {
             const score = Math.min(0.95, 0.85 + Math.abs(mover.pct) / 100);
-            store.saveResearchStar(mover.symbol, 'short_candidate', `BI LOSER ${mover.pct.toFixed(1)}% | S&P 500 short candidate`, bayesianAdjustScore(mover.symbol, score));
+            await writeStar(mover.symbol, 'short_candidate', `BI LOSER ${mover.pct.toFixed(1)}% | S&P 500 short candidate`, bayesianAdjustScore(mover.symbol, score));
             starsWritten++; biLosers++;
           }
         }
@@ -507,7 +521,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
             const ticker = pair.replace('/', '-'); // BTC/USD → BTC-USD for Alpaca orders
             const direction = changePct > 0 ? 'UP' : 'DOWN';
             const score = Math.min(0.80 + Math.abs(changePct) / 50, 0.95);
-            store.saveResearchStar(ticker, 'crypto', `CRYPTO ${direction} ${changePct > 0 ? '+' : ''}${changePct.toFixed(1)}% | $${price.toFixed(2)}`, score);
+            await writeStar(ticker, 'crypto', `CRYPTO ${direction} ${changePct > 0 ? '+' : ''}${changePct.toFixed(1)}% | $${price.toFixed(2)}`, score);
             starsWritten++;
             cryptoAdded++;
           }
@@ -531,9 +545,9 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
       for (const t of mentioned) {
         const s = prices.get(t);
         if (s && s.changePercent > 2) {
-          store.saveResearchStar(t, 'news', `NEWS: ${item.title.substring(0, 80)}`, 0.90);
+          await writeStar(t, 'news', `NEWS: ${item.title.substring(0, 80)}`, 0.90);
           starsWritten++;
-        } else if (!s && !store.getResearchStars().find((st: any) => st.symbol === t)) {
+        } else if (!s && !activeStarSymbols.has(t)) {
           newsTickersToFetch.add(t);
         }
       }
@@ -558,7 +572,7 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
           if (pct > 2) {
             // Find the news headline that mentioned this ticker
             const headline = news.find(n => n.title.includes(sym))?.title || '';
-            store.saveResearchStar(sym, 'news', `NEWS +${pct.toFixed(1)}%: ${headline.substring(0, 70)}`, 0.90);
+            await writeStar(sym, 'news', `NEWS +${pct.toFixed(1)}%: ${headline.substring(0, 70)}`, 0.90);
             starsWritten++;
             newsAdded++;
           }
@@ -591,11 +605,10 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
         const tickers = CATALYST_TICKERS[cat] || [];
         for (const ticker of tickers) {
           // Only add if it's actually moving (have price data) and not already a star
-          const existing = store.getResearchStars().find((s: any) => s.symbol === ticker);
-          if (existing) continue; // already tracked
+          if (activeStarSymbols.has(ticker)) continue; // already tracked
           const p = prices.get(ticker);
           if (p && p.changePercent > 1) {
-            store.saveResearchStar(ticker, 'catalyst', `CATALYST(${cat}): ${ticker} +${p.changePercent.toFixed(1)}%`, 0.90);
+            await writeStar(ticker, 'catalyst', `CATALYST(${cat}): ${ticker} +${p.changePercent.toFixed(1)}%`, 0.90);
             starsWritten++;
             catalystAdded++;
           }
@@ -606,13 +619,13 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
   } catch {}
 
   // 6. Expire stale stars
-  const expired = store.clearExpiredStars(STAR_EXPIRY_HOURS);
+  const expired = await expireResearchStars(STAR_EXPIRY_HOURS);
   console.log(`[Research] Cycle ${Date.now() - t0}ms | stars=${starsWritten} expired=${expired} reports=${reportsWritten} news=${news.length} prices=${prices.size} errors=${errors.length}`);
 
   // 7. Record research to Trident — learning coherence across sessions
   if (starsWritten > 0) {
     try {
-      const allStars = store.getResearchStars();
+      const allStars = await getActiveResearchStars();
       const topStars = allStars.sort((a: any, b: any) => b.score - a.score).slice(0, 10);
       const summary = topStars.map((s: any) => `${s.symbol} (${s.sector}) score:${s.score.toFixed(2)} — ${s.catalyst || ''}`).join('\n');
       const newsHeadlines = news.filter(n => n.sentiment === 'bullish').slice(0, 5).map(n => `[${n.source}] ${n.title}`).join('\n');

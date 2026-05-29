@@ -18,6 +18,14 @@
 
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { brain } from './brain-client.js';
+import {
+  closeTradeLot,
+  getOpenTradeLots,
+  getTradeLotByOrderId,
+  recordPostExitPg,
+  recordTradeClosePg,
+  recordTradeLot,
+} from './trading-ledger.js';
 
 export interface ClosedTradeInput {
   ticker: string;
@@ -71,12 +79,26 @@ export function recordClosedTrade(
   } catch (e) {
     console.error(`[trade-recorder] store.recordTrade failed for ${trade.ticker}:`, (e as Error).message);
   }
+  recordTradeClosePg({
+    ticker: trade.ticker,
+    direction: trade.direction,
+    reason: trade.reason,
+    qty: trade.qty,
+    entryPrice: trade.entryPrice ?? null,
+    exitPrice: trade.exitPrice,
+    pnl: trade.pnl,
+    openedAt: trade.openedAt ?? null,
+    closedAt,
+    orderId: trade.orderId ?? null,
+    source,
+  }).catch(() => {});
 
   // 2. Mark the corresponding system_buy as closed (if any) — keeps the
   //    persistent "we still own it" set accurate for manual-trade detection.
   try {
     store.closeSystemBuy(trade.ticker, closedAt, trade.direction);
   } catch {}
+  closeTradeLot(trade.ticker, trade.direction, closedAt).catch(() => {});
 
   // 3. Schedule post-exit tracking — the daily follower job will fill in
   //    T+1/T+3/T+5 prices and compute a regret score.
@@ -88,6 +110,12 @@ export function recordClosedTrade(
       exitReason: trade.reason,
     });
   } catch {}
+  recordPostExitPg({
+    ticker: trade.ticker,
+    exitAt: closedAt,
+    exitPrice: trade.exitPrice,
+    exitReason: trade.reason,
+  }).catch(() => {});
 
   // 4. Push to Trident memory for LoRA learning (fire-and-forget).
   brain.recordTradeClose(
@@ -258,11 +286,20 @@ export async function reconcileWithAlpaca(
   type Lot = { qty: number; price: number; time: string; orderId: string; source: string };
   const openLongs = new Map<string, Lot[]>();
   const openShorts = new Map<string, Lot[]>();
-  for (const b of store.getOpenSystemBuys()) {
-    const books = b.side === 'short' ? openShorts : openLongs;
-    const list = books.get(b.ticker) ?? [];
-    list.push({ qty: b.qty, price: b.price, time: b.boughtAt, orderId: '', source: b.source || 'unknown' });
-    books.set(b.ticker, list);
+  try {
+    for (const b of await getOpenTradeLots()) {
+      const books = b.side === 'short' ? openShorts : openLongs;
+      const list = books.get(b.ticker) ?? [];
+      list.push({ qty: b.qty, price: b.price, time: b.boughtAt, orderId: b.orderId, source: b.source || 'unknown' });
+      books.set(b.ticker, list);
+    }
+  } catch {
+    for (const b of store.getOpenSystemBuys()) {
+      const books = b.side === 'short' ? openShorts : openLongs;
+      const list = books.get(b.ticker) ?? [];
+      list.push({ qty: b.qty, price: b.price, time: b.boughtAt, orderId: '', source: b.source || 'unknown' });
+      books.set(b.ticker, list);
+    }
   }
 
   const seenTickers = new Set<string>();
@@ -272,7 +309,7 @@ export async function reconcileWithAlpaca(
 
     if (fill.side === 'buy' || fill.side === 'sell_short') {
       const entrySide = fill.side === 'sell_short' ? 'short' as const : 'long' as const;
-      const existingBuy = store.getSystemBuyByOrderId(fill.orderId);
+      const existingBuy = await getTradeLotByOrderId(fill.orderId).catch(() => store.getSystemBuyByOrderId(fill.orderId));
       const source = existingBuy?.source === 'engine' || existingBuy?.source === 'engine_short'
         ? existingBuy.source
         : existingBuy
@@ -291,6 +328,16 @@ export async function reconcileWithAlpaca(
           source,
           side: entrySide,
         });
+        recordTradeLot({
+          ticker: fill.ticker,
+          openedAt: fill.time,
+          entryPrice: fill.price,
+          qty: fill.qty,
+          brokerOrderId: fill.orderId,
+          source,
+          side: entrySide,
+          metadata: { reconciled: true },
+        }).catch(() => {});
         result.buysRecorded++;
         if (!existingBuy && source === 'owner_manual') {
           brain.recordOwnerEntry(fill.ticker, fill.qty, fill.price, entrySide).catch(() => {});

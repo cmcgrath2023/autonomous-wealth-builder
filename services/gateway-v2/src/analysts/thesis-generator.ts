@@ -9,6 +9,7 @@
  */
 
 import { brain } from '../brain-client.js';
+import { saveResearchStar } from '../research-stars.js';
 import { scoreConviction } from './conviction-scorer.js';
 import type { SignalCluster, ConvictionResult } from './conviction-scorer.js';
 
@@ -275,12 +276,14 @@ export async function runResearchCycle(
     let promoted = 0;
     for (const t of triggered) {
       const score = Math.min(0.99, 0.85 + (t.conviction * 0.15)); // conviction 0-1 → score 0.85-1.0
-      sqliteStore.saveResearchStar(
-        t.symbol,
-        'thesis',
-        `THESIS(${(t.conviction * 100).toFixed(0)}): ${(t.narrative || t.thesis || '').slice(0, 80)}`,
+      await saveResearchStar({
+        symbol: t.symbol,
+        sector: 'thesis',
+        catalyst: `THESIS(${(t.conviction * 100).toFixed(0)}): ${(t.narrative || t.thesis || '').slice(0, 80)}`,
         score,
-      );
+        source: 'thesis_generator',
+        metadata: { conviction: t.conviction },
+      });
       promoted++;
     }
     if (promoted > 0) console.log(`[research] Promoted ${promoted} triggered theses → research_stars`);

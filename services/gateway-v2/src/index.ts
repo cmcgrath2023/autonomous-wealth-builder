@@ -350,7 +350,7 @@ async function main(): Promise<void> {
       // Build watchlist from momentum scanner universe + thesis tickers
       const watchTickers: string[] = [];
       try {
-        const stars = await getActiveResearchStars(stateStore);
+        const stars = await getActiveResearchStars();
         for (const s of stars.slice(0, 200)) watchTickers.push(s.symbol);
         if (pgQueryFn) {
           const { rows: thesisTickers } = await pgQueryFn('SELECT DISTINCT symbol FROM research_theses WHERE status = \'active\' LIMIT 50');
@@ -505,7 +505,7 @@ async function runMomentumOnce(store: GatewayStateStore): Promise<void> {
       RIVN:'EV',NIO:'EV',PLUG:'EV',BE:'EV',
     };
 
-    const { snapshots, sectors, stars } = persistMomentumData(store, result, sectorMap);
+    const { snapshots, sectors, stars } = await persistMomentumData(store, result, sectorMap);
     log(`Momentum: scanned ${result.scanned} | ${result.strong.length} strong + ${result.moderate.length} moderate | DB: ${snapshots} snapshots, ${sectors} sectors, ${stars} stars`);
     if (result.strong.length > 0) {
       log(`  Top 5: ${result.strong.slice(0, 5).map(r => `${r.symbol} ${r.change5d >= 0 ? '+' : ''}${r.change5d.toFixed(1)}%`).join(', ')}`);
@@ -571,7 +571,7 @@ async function getDeepResearchTickers(store: GatewayStateStore): Promise<string[
 
   // Top research stars
   try {
-    const stars = await getActiveResearchStars(store);
+    const stars = await getActiveResearchStars();
     for (const s of stars.sort((a: any, b: any) => b.score - a.score).slice(0, 10)) {
       if (/^[A-Z]{1,5}$/.test(s.symbol) && !s.symbol.includes('-')) tickers.add(s.symbol);
     }

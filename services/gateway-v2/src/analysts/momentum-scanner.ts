@@ -11,6 +11,8 @@
  * This is what the user asked for 5+ times: "find what's actually moving."
  */
 
+import { saveResearchStar } from '../research-stars.js';
+
 // Broad universe covering all major sectors + liquid mid-caps.
 // This is NOT a static "buy these" list — it's the scan universe.
 // The scanner fetches bars for all of them and surfaces the ones with momentum.
@@ -247,23 +249,24 @@ export async function scanMomentum(
  *   - sector_momentum: sector averages per scan (tracks sector rotation)
  *   - research_stars: high-momentum tickers for the buy pipeline
  */
-export function persistMomentumData(
+export async function persistMomentumData(
   store: any, // GatewayStateStore
   results: MomentumScanResult,
   sectorMap: Record<string, string>,
-): { snapshots: number; sectors: number; stars: number } {
+): Promise<{ snapshots: number; sectors: number; stars: number }> {
   const now = new Date().toISOString();
   let snapshots = 0, sectors = 0;
+  const { query } = await import('../../../research-db/src/index.js');
 
   // 1. Write individual ticker snapshots
   const all = [...results.strong, ...results.moderate];
   for (const r of all) {
     try {
       const sector = sectorMap[r.symbol] || 'Other';
-      store.db?.prepare?.(`
+      await query(`
         INSERT INTO momentum_snapshots (symbol, sector, scanned_at, price, change_1d, change_5d, avg_volume, momentum, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scanner')
-      `)?.run(r.symbol, sector, now, r.currentPrice, r.change1d, r.change5d, r.avgVolume, r.momentum);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'scanner')
+      `, [r.symbol, sector, now, r.currentPrice, r.change1d, r.change5d, r.avgVolume, r.momentum]);
       snapshots++;
     } catch {}
   }
@@ -280,10 +283,10 @@ export function persistMomentumData(
       const avg1d = stocks.reduce((s, x) => s + x.change1d, 0) / stocks.length;
       const avg5d = stocks.reduce((s, x) => s + x.change5d, 0) / stocks.length;
       const top = stocks.sort((a, b) => b.change5d - a.change5d)[0];
-      store.db?.prepare?.(`
+      await query(`
         INSERT INTO sector_momentum (sector, scanned_at, ticker_count, avg_change_1d, avg_change_5d, top_ticker, top_change_5d, trend)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'flat')
-      `)?.run(sector, now, stocks.length, avg1d, avg5d, top?.symbol ?? '', top?.change5d ?? 0);
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'flat')
+      `, [sector, now, stocks.length, avg1d, avg5d, top?.symbol ?? '', top?.change5d ?? 0]);
       sectors++;
     } catch {}
   }
@@ -291,46 +294,53 @@ export function persistMomentumData(
   // 3. Write catalyst history entries for new significant movers
   for (const r of results.strong) {
     try {
-      store.db?.prepare?.(`
-        INSERT OR IGNORE INTO catalyst_history (symbol, catalyst_type, headline, detected_at, price_at_detection, outcome, source)
-        VALUES (?, 'momentum', ?, ?, ?, 'pending', 'momentum_scanner')
-      `)?.run(r.symbol, `5d +${r.change5d.toFixed(1)}% momentum`, now, r.currentPrice);
+      await query(`
+        INSERT INTO catalyst_history (symbol, catalyst_type, headline, detected_at, price_at_detection, outcome, source)
+        VALUES ($1, 'momentum', $2, $3, $4, 'pending', 'momentum_scanner')
+      `, [r.symbol, `5d +${r.change5d.toFixed(1)}% momentum`, now, r.currentPrice]);
     } catch {}
   }
 
-  // 4. Write to research_stars for the buy pipeline
-  const stars = persistMomentumStars(store, results);
+  // 4. Write to PG research_stars for the buy pipeline
+  const stars = await persistMomentumStars(results);
 
   return { snapshots, sectors, stars };
 }
 
 export function persistMomentumStars(
-  store: { saveResearchStar: (symbol: string, sector: string, catalyst: string, score: number) => void },
   results: MomentumScanResult,
-): number {
+): Promise<number> {
+  return persistMomentumStarsAsync(results);
+}
+
+async function persistMomentumStarsAsync(results: MomentumScanResult): Promise<number> {
   let written = 0;
   // Strong momentum gets high scores (0.90-0.95)
   for (const r of results.strong.slice(0, 20)) {
     const direction = r.change5d > 0 ? 'UP' : 'DOWN';
     const score = Math.min(0.95, 0.88 + Math.abs(r.change5d) / 200);
-    store.saveResearchStar(
-      r.symbol,
-      'momentum_5d',
-      `5d ${direction} ${r.change5d.toFixed(1)}% (today ${r.change1d >= 0 ? '+' : ''}${r.change1d.toFixed(1)}%) vol:${Math.round(r.avgVolume).toLocaleString()}`,
+    await saveResearchStar({
+      symbol: r.symbol,
+      sector: 'momentum_5d',
+      catalyst: `5d ${direction} ${r.change5d.toFixed(1)}% (today ${r.change1d >= 0 ? '+' : ''}${r.change1d.toFixed(1)}%) vol:${Math.round(r.avgVolume).toLocaleString()}`,
       score,
-    );
+      source: 'momentum_scanner',
+      metadata: { change1d: r.change1d, change5d: r.change5d, avgVolume: r.avgVolume },
+    });
     written++;
   }
   // Moderate gets slightly lower scores (0.85-0.89)
   for (const r of results.moderate.slice(0, 15)) {
     const direction = r.change5d > 0 ? 'UP' : 'DOWN';
     const score = Math.min(0.89, 0.83 + Math.abs(r.change5d) / 200);
-    store.saveResearchStar(
-      r.symbol,
-      'momentum_5d',
-      `5d ${direction} ${r.change5d.toFixed(1)}% (today ${r.change1d >= 0 ? '+' : ''}${r.change1d.toFixed(1)}%) vol:${Math.round(r.avgVolume).toLocaleString()}`,
+    await saveResearchStar({
+      symbol: r.symbol,
+      sector: 'momentum_5d',
+      catalyst: `5d ${direction} ${r.change5d.toFixed(1)}% (today ${r.change1d >= 0 ? '+' : ''}${r.change1d.toFixed(1)}%) vol:${Math.round(r.avgVolume).toLocaleString()}`,
       score,
-    );
+      source: 'momentum_scanner',
+      metadata: { change1d: r.change1d, change5d: r.change5d, avgVolume: r.avgVolume },
+    });
     written++;
   }
   return written;

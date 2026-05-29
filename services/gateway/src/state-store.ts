@@ -449,45 +449,6 @@ export class GatewayStateStore {
         score = excluded.score,
         created_at = excluded.created_at
     `).run(symbol, sector, catalyst, score, now);
-    this.saveResearchStarToPg(symbol, sector, catalyst, score, now);
-  }
-
-  private saveResearchStarToPg(symbol: string, sector: string, catalyst: string, score: number, createdAt: string): void {
-    if (process.env.RESEARCH_STARS_PG_WRITE === 'false') return;
-    const direction = sector === 'short_candidate' || catalyst.toLowerCase().includes('loser') ? 'short'
-      : sector === 'avoid' ? 'avoid'
-        : 'long';
-    import('../../research-db/src/index.js')
-      .then(({ query }) => query(`
-        INSERT INTO research_stars
-          (symbol, sector, catalyst, score, direction, source, first_seen_at, updated_at, expires_at, active, metadata)
-        VALUES
-          ($1, $2, $3, $4, $5, 'gateway_v2', $6, $6, $7, TRUE, $8::jsonb)
-        ON CONFLICT (symbol) DO UPDATE SET
-          sector = EXCLUDED.sector,
-          catalyst = EXCLUDED.catalyst,
-          score = EXCLUDED.score,
-          direction = EXCLUDED.direction,
-          source = EXCLUDED.source,
-          updated_at = EXCLUDED.updated_at,
-          expires_at = EXCLUDED.expires_at,
-          active = TRUE,
-          metadata = research_stars.metadata || EXCLUDED.metadata
-      `, [
-        symbol,
-        sector,
-        catalyst,
-        Math.max(0, Math.min(1, score)),
-        direction,
-        createdAt,
-        new Date(Date.now() + 4 * 3_600_000).toISOString(),
-        JSON.stringify({ sqlite_cache: true }),
-      ]))
-      .catch((e: any) => {
-        if (process.env.LOG_RESEARCH_STAR_PG_ERRORS === 'true') {
-          console.warn(`[state-store] PG research_star write failed for ${symbol}:`, e.message);
-        }
-      });
   }
 
   getResearchStars(): ResearchStarRow[] {
@@ -511,14 +472,6 @@ export class GatewayStateStore {
   clearExpiredStars(maxAgeHours = 4): number {
     const cutoff = new Date(Date.now() - maxAgeHours * 3_600_000).toISOString();
     const result = this.db.prepare('DELETE FROM research_stars WHERE created_at < ?').run(cutoff);
-    import('../../research-db/src/index.js')
-      .then(({ query }) => query(
-        `UPDATE research_stars
-            SET active = FALSE, updated_at = NOW()
-          WHERE updated_at < NOW() - ($1::text || ' hours')::interval`,
-        [maxAgeHours],
-      ))
-      .catch(() => {});
     return result.changes;
   }
 

@@ -5,6 +5,7 @@
 
 import { execSync } from 'child_process';
 import { GatewayStateStore } from '../../../gateway/src/state-store.js';
+import { getActiveResearchStars } from '../research-stars.js';
 
 const CYCLE_MS = 15_000;
 const HTTP_TIMEOUT_MS = 3_000;
@@ -176,7 +177,7 @@ export class Ops {
       ]);
 
       const tradeEngine = this.checkTradeEngine();
-      const researchWorker = this.checkResearchWorker();
+      const researchWorker = await this.checkResearchWorker();
       const tunnel = this.checkTunnel();
       const stateStore = this.checkStateStore();
       const managers = this.checkManagers();
@@ -313,10 +314,10 @@ export class Ops {
     }
   }
 
-  private checkResearchWorker(): ComponentHealth {
+  private async checkResearchWorker(): Promise<ComponentHealth> {
     const now = new Date().toISOString();
     try {
-      const stars = this.store.getResearchStars();
+      const stars = await getActiveResearchStars();
       if (stars.length === 0) {
         return { healthy: false, starsCount: 0, lastCheck: now };
       }

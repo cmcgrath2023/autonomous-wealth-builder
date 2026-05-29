@@ -161,10 +161,17 @@ async function signalScan(
 ): Promise<void> {
   console.log('[signal-scan] Starting 15-min scan...');
 
-  // BRIDGE: Write Catalyst Hunter + Research Worker stars FROM SQLite TO PG research_signals.
-  // This connects the Wave 1-2 analysts to the Wave 4 research pipeline.
+  // Promote active PG research stars into research_signals for clustering.
   try {
-    const stars = sqliteStore.getResearchStars();
+    const { rows: stars } = await pgQuery(`
+      SELECT symbol, sector, catalyst, score, source, metadata
+        FROM research_stars
+       WHERE active = TRUE
+         AND updated_at > NOW() - INTERVAL '24 hours'
+         AND (expires_at IS NULL OR expires_at > NOW())
+       ORDER BY score DESC, updated_at DESC
+       LIMIT 500
+    `);
     let bridged = 0;
     for (const star of stars) {
       if (!star.symbol || !star.catalyst) continue;
@@ -190,22 +197,23 @@ async function signalScan(
         await pgQuery(`
           INSERT INTO research_signals (symbol, sector, signal_type, headline, confidence, decay_hours,
             metadata, created_by, detected_at)
-          VALUES ($1, $2, $3, $4, $5, 24, $6, 'bridge_from_sqlite', NOW())
+          VALUES ($1, $2, $3, $4, $5, 24, $6, 'research_star', NOW())
         `, [
           star.symbol,
           star.sector || '',
           signalType,
           (star.catalyst || '').slice(0, 200),
           Math.min(0.9, star.score),
-          JSON.stringify({ source: 'research_stars_bridge' }),
+          JSON.stringify({ source: 'research_stars', starSource: star.source, starMetadata: star.metadata }),
         ]);
         bridged++;
       } catch {}
     }
-    if (bridged > 0) console.log(`[signal-scan] Bridged ${bridged} research stars → PG research_signals`);
+    if (bridged > 0) console.log(`[signal-scan] Promoted ${bridged} PG research stars → research_signals`);
   } catch (e: any) {
-    console.log(`[signal-scan] Bridge failed: ${e.message}`);
+    console.log(`[signal-scan] Research-star signal promotion failed: ${e.message}`);
   }
+  void sqliteStore;
 
   // 1. Read latest catalyst entries (now populated by the bridge above + catalyst_history)
   try {

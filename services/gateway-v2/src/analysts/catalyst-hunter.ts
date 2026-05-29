@@ -14,11 +14,9 @@
  *      recent news items, extracts symbols, filters for catalyst keywords
  *      in the headline (beat, upgrade, approval, raised guidance, etc.).
  *
- * Consumer: writes results directly to `research_stars` via
- * `store.saveResearchStar()`. Trade-engine's buy pipeline already reads
- * research stars as a universe feeder — Catalyst Hunter output automatically
- * flows into the Alpaca movers ∪ research-worker stars ∪ catalyst hunter
- * merge that feeds NeuralTrader.scan().
+ * Consumer: writes results to PostgreSQL `research_stars` and
+ * `research_signals`. Trade-engine reads active PG stars as its catalyst
+ * universe.
  *
  * Schedule: pre-market 8:30 AM ET + midday 12 PM ET + afternoon 2 PM ET.
  */
@@ -26,6 +24,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { GatewayStateStore } from '../../../gateway/src/state-store.js';
 import { loadCredentials } from '../config-bus.js';
+import { saveResearchStar } from '../research-stars.js';
 
 const CATALYST_MODEL = 'claude-sonnet-4-6';
 
@@ -315,22 +314,22 @@ Return ONLY the JSON array. No commentary.`;
   private async persistCandidates(candidates: CatalystCandidate[]): Promise<void> {
     for (const c of candidates) {
       try {
-        // SQLite: research_stars (for trade-engine buy/short pipeline)
         const BEARISH_TYPES = new Set(['earnings_miss', 'guidance_cut', 'downgrade', 'crash', 'sec_probe', 'restructuring']);
         const isBearish = BEARISH_TYPES.has(c.catalystType);
         const score = Math.min(0.99, 0.85 + c.confidence * 0.14);
-        this.store.saveResearchStar(
-          c.symbol,
-          isBearish ? 'short_candidate' : 'catalyst',
-          `[${c.catalystType}] ${c.catalyst}`,
+        await saveResearchStar({
+          symbol: c.symbol,
+          sector: isBearish ? 'short_candidate' : 'catalyst',
+          catalyst: `[${c.catalystType}] ${c.catalyst}`,
           score,
-        );
+          source: 'catalyst_hunter',
+          metadata: { catalystType: c.catalystType, source: c.source },
+        });
       } catch (e: any) {
-        console.warn(`[CATALYST] SQLite persist failed for ${c.symbol}: ${e.message}`);
+        console.warn(`[CATALYST] research_star persist failed for ${c.symbol}: ${e.message}`);
       }
 
       // PG: catalyst_history + research_signals (for thesis pipeline)
-      // This is the dual-write that bridges SQLite analysts → PG research system
       try {
         if (this.pgQuery) {
           // catalyst_history

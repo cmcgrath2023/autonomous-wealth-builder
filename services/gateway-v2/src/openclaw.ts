@@ -13,6 +13,7 @@
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from './config-bus.js';
 import { brain } from './brain-client.js';
+import { getActiveResearchStars } from './research-stars.js';
 
 export type AutonomyLevel = 'observe' | 'suggest' | 'act';
 
@@ -177,7 +178,7 @@ export class OpenClawEngine {
     }));
 
     // Self-healing check: detect and fix issues
-    this.selfHeal();
+    this.selfHeal().catch(() => {});
 
     // Record OpenClaw activity to Brain every 10 heartbeats
     if (this.heartbeatCount % 10 === 0) {
@@ -192,7 +193,7 @@ export class OpenClawEngine {
 
   // ── Self-Healing ─────────────────────────────────────────────────────
 
-  private selfHeal(): void {
+  private async selfHeal(): Promise<void> {
     // 1. Check if trade engine is responding
     const engineStatus = this.store.get('trade_engine_status');
     if (engineStatus) {
@@ -208,7 +209,7 @@ export class OpenClawEngine {
 
     // 2. Check if research worker is producing stars
     try {
-      const stars = this.store.getResearchStars();
+      const stars = await getActiveResearchStars();
       if (stars.length === 0) {
         console.log('[OpenClaw] HEAL: No research stars — research worker may be down');
         this.store.set('restart_request:research_worker', new Date().toISOString());
@@ -266,7 +267,8 @@ export class OpenClawEngine {
         const wins = todayTrades.filter(t => t.pnl > 0).length;
         const losses = todayTrades.filter(t => t.pnl <= 0).length;
         const realizedPnl = todayTrades.reduce((s, t) => s + t.pnl, 0);
-        const summary = `Positions: ${autonomy.positionCount || 0} | Deployed: $${(autonomy.totalDeployed || 0).toFixed(0)} | Realized: $${realizedPnl.toFixed(2)} (${wins}W/${losses}L) | Stars: ${this.store.getResearchStars().length}`;
+        const stars = await getActiveResearchStars();
+        const summary = `Positions: ${autonomy.positionCount || 0} | Deployed: $${(autonomy.totalDeployed || 0).toFixed(0)} | Realized: $${realizedPnl.toFixed(2)} (${wins}W/${losses}L) | Stars: ${stars.length}`;
         console.log(`[OpenClaw] STATUS: ${summary}`);
         brain.recordDailySummary(
           new Date().toISOString().slice(0, 10),

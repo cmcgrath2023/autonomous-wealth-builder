@@ -13,6 +13,7 @@
 import { Client, GatewayIntentBits, EmbedBuilder, Message, TextChannel } from 'discord.js';
 import { GatewayStateStore } from '../../gateway/src/state-store.js';
 import { loadCredentials, getAlpacaHeaders } from './config-bus.js';
+import { getActiveResearchStars } from './research-stars.js';
 
 // ─── Agent Definitions ──────────────────────────────────────────────────────
 
@@ -216,7 +217,7 @@ function buildLizaResponse(store: GatewayStateStore, question: string): string {
   return lines.join('\n') || 'Wire is quiet. No major headlines to report.';
 }
 
-function buildFerdResponse(store: GatewayStateStore, question: string): string {
+async function buildFerdResponse(store: GatewayStateStore, question: string): Promise<string> {
   const lines: string[] = [];
 
   // Research recommendations
@@ -232,7 +233,7 @@ function buildFerdResponse(store: GatewayStateStore, question: string): string {
   }
 
   // Research stars
-  const stars = store.getResearchStars();
+  const stars = await getActiveResearchStars();
   if (stars.length > 0) {
     lines.push('');
     lines.push(`**Top research stars** (${stars.length} total):`);
@@ -347,7 +348,7 @@ async function getAgentResponse(agent: AgentName, store: GatewayStateStore, ques
   const dataResponse = agent === 'warren' ? buildWarrenResponse(store, question)
     : agent === 'fin' ? await buildFinResponse(store, question)
     : agent === 'liza' ? buildLizaResponse(store, question)
-    : buildFerdResponse(store, question);
+    : await buildFerdResponse(store, question);
 
   // For commands (!status, !positions etc), return data directly
   if (question.startsWith('!')) return dataResponse;
