@@ -69,6 +69,8 @@ const MIN_DOWNSIDE_SHORT_MOVE = -3.0;                 // Must be sharply red tod
 const SHORT_TARGET_MIN = 0.20;                        // Bull tape: stay mostly long
 const SHORT_TARGET_MAX = 0.80;                        // Tanking tape: allow heavy short book
 const MIN_SHORT_NOTIONAL = 500;                       // Avoid noise-size shorts
+const ROTATE_WEAK_LONG_MAX_PNL_PCT = -0.25;           // Only free capital from lagging non-core longs
+const ROTATE_WEAK_LONG_MAX_DOLLAR_PNL = -50;
 
 // Core holdings — buy and hold, engine NEVER sells these
 const CORE_HOLDINGS = new Set<string>(['AMZN', 'NVDA']); // Owner long-term holds — engine NEVER sells these
@@ -169,18 +171,19 @@ async function computeMarketShortTarget(
   const avgEquityMove = equityMoves.length > 0 ? equityMoves.reduce((s, v) => s + v, 0) / equityMoves.length : 0;
   const volMove = typeof uvxyChangePct === 'number' && isFinite(uvxyChangePct) ? uvxyChangePct : 0;
 
-  // Center at 50/50. Falling SPY/QQQ and rising UVXY move the target toward 80% short.
-  let targetShortRatio = 0.50 + (-avgEquityMove * 0.10) + (volMove * 0.025);
+  // Center at 50/50. Positive tape tilts toward long movers; negative tape tilts toward BI losers.
+  const marketTilt = clampNumber(avgEquityMove / 2.0 - volMove / 12.0, -1, 1);
+  let targetShortRatio = 0.50 - (marketTilt * 0.30);
   targetShortRatio = clampNumber(targetShortRatio, SHORT_TARGET_MIN, SHORT_TARGET_MAX);
 
   if (macroRegime === 'crisis') targetShortRatio = Math.max(targetShortRatio, 0.80);
   else if (macroRegime === 'risk_off') targetShortRatio = Math.max(targetShortRatio, 0.65);
-  else if (macroRegime === 'trending' && avgEquityMove >= 0) targetShortRatio = Math.min(targetShortRatio, 0.25);
-  else if (macroRegime === 'risk_on' && avgEquityMove >= 0) targetShortRatio = Math.min(targetShortRatio, 0.40);
+  else if (macroRegime === 'trending' && marketTilt > 0) targetShortRatio = Math.min(targetShortRatio, 0.20);
+  else if (macroRegime === 'risk_on' && marketTilt > 0) targetShortRatio = Math.min(targetShortRatio, 0.35);
 
   return {
     targetShortRatio,
-    reason: `SPY ${spyChangePct === null ? 'n/a' : spyChangePct.toFixed(2) + '%'}, QQQ ${qqqChangePct === null ? 'n/a' : qqqChangePct.toFixed(2) + '%'}, UVXY ${uvxyChangePct === null ? 'n/a' : uvxyChangePct.toFixed(2) + '%'}, macro ${macroRegime || 'n/a'}`,
+    reason: `SPY ${spyChangePct === null ? 'n/a' : spyChangePct.toFixed(2) + '%'}, QQQ ${qqqChangePct === null ? 'n/a' : qqqChangePct.toFixed(2) + '%'}, UVXY ${uvxyChangePct === null ? 'n/a' : uvxyChangePct.toFixed(2) + '%'}, tilt ${marketTilt.toFixed(2)}, macro ${macroRegime || 'n/a'}`,
     spyChangePct,
     qqqChangePct,
     uvxyChangePct,
@@ -2062,11 +2065,16 @@ export class TradeEngine {
             const coreLongExposure = equityPositions
               .filter(p => p.shares > 0 && CORE_HOLDINGS.has(p.ticker))
               .reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const weakLongRotationCandidates = equityPositions
+              .filter(p => p.shares > 0)
+              .filter(p => !CORE_HOLDINGS.has(p.ticker))
+              .filter(p => p.unrealizedPnlPercent <= ROTATE_WEAK_LONG_MAX_PNL_PCT || p.unrealizedPnl <= ROTATE_WEAK_LONG_MAX_DOLLAR_PNL)
+              .sort((a, b) => a.unrealizedPnlPercent - b.unrealizedPnlPercent);
             const shortTarget = await computeMarketShortTarget(alpacaHeaders, this.store);
             const currentShortRatio = grossExposure > 0 ? shortExposure / grossExposure : 0;
             const targetShortDollars = BUDGET_MAX * shortTarget.targetShortRatio;
             const targetShortCapacity = Math.max(0, targetShortDollars - shortExposure);
-            const budgetCapacity = Math.max(0, BUDGET_MAX - grossExposure);
+            let budgetCapacity = Math.max(0, BUDGET_MAX - grossExposure);
             let remainingShortBudget = Math.min(targetShortCapacity, budgetCapacity);
 
           const summary: any = {
@@ -2084,16 +2092,16 @@ export class TradeEngine {
               budgetCapacity: Math.round(budgetCapacity),
               remainingShortBudget: Math.round(remainingShortBudget),
               marketTargetReason: shortTarget.reason,
+              weakLongRotationCandidates: weakLongRotationCandidates.map(p => `${p.ticker}:${p.unrealizedPnlPercent.toFixed(1)}%:$${p.unrealizedPnl.toFixed(0)}`),
 	            candidates: 0,
 	            placed: 0,
+              rotated: [] as string[],
 	            topDown: [],
 	            skipped: [] as string[],
 	          };
 
-	          if (remainingShortBudget < MIN_SHORT_NOTIONAL) {
-	            summary.blocked = targetShortCapacity < MIN_SHORT_NOTIONAL
-                ? `short_target_met_${Math.round(shortExposure)}/${Math.round(targetShortDollars)}`
-                : `budget_cap_${Math.round(grossExposure)}/${BUDGET_MAX}`;
+	          if (targetShortCapacity < MIN_SHORT_NOTIONAL) {
+	            summary.blocked = `short_target_met_${Math.round(shortExposure)}/${Math.round(targetShortDollars)}`;
 	            this.store.set(shortScanKey, JSON.stringify(summary));
 	            this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
 	          } else {
@@ -2205,6 +2213,35 @@ export class TradeEngine {
           summary.candidates = candidates.length;
           summary.topDown = candidates.slice(0, 10).map(c => `${c.symbol}${c.dayChange.toFixed(1)}%:${c.source}`);
           console.log(`  [BI SHORT SCAN] ${candidates.length} confirmed BI downside candidates. Top: ${summary.topDown.slice(0, 5).join(', ') || 'none'}`);
+
+          if (candidates.length > 0 && remainingShortBudget < MIN_SHORT_NOTIONAL && budgetCapacity < MIN_SHORT_NOTIONAL) {
+            for (const weakLong of weakLongRotationCandidates) {
+              if (remainingShortBudget >= MIN_SHORT_NOTIONAL) break;
+              const need = Math.min(PER_POSITION, targetShortCapacity) - remainingShortBudget;
+              if (need <= 0) break;
+              console.log(`  [ROTATE] Freeing capital from weak non-core long ${weakLong.ticker} (${weakLong.unrealizedPnlPercent.toFixed(1)}%, $${weakLong.unrealizedPnl.toFixed(0)}) for BI loser shorts`);
+              const sold = await this.sellPosition(
+                weakLong.ticker,
+                weakLong.shares,
+                `rotate_to_bi_shorts_target_${(shortTarget.targetShortRatio * 100).toFixed(0)}pct`,
+                weakLong.unrealizedPnl,
+                weakLong.avgPrice,
+                weakLong.currentPrice,
+              );
+              if (sold) {
+                const freed = Math.abs(weakLong.marketValue);
+                budgetCapacity += freed;
+                remainingShortBudget = Math.min(targetShortCapacity, budgetCapacity);
+                summary.rotated.push(`${weakLong.ticker}:$${Math.round(freed)}`);
+                summary.budgetCapacity = Math.round(budgetCapacity);
+                summary.remainingShortBudget = Math.round(remainingShortBudget);
+              }
+            }
+          }
+
+          if (remainingShortBudget < MIN_SHORT_NOTIONAL) {
+            summary.blocked = `budget_cap_${Math.round(grossExposure)}/${BUDGET_MAX}`;
+          }
 
           for (const candidate of candidates) {
             if (remainingShortBudget < MIN_SHORT_NOTIONAL || remainingShortBudget < candidate.price) break;
