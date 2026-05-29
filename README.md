@@ -135,8 +135,8 @@ Single-process Node.js orchestrator running all components in-process.
 │  │ Trade Engine  │  │ Research     │  │ Catalyst      │                 │
 │  │ Buy/Sell/Short│  │ Worker       │  │ Hunter        │                 │
 │  │ Heartbeat SL  │  │ Biz Insider  │  │ Earnings Beats│                 │
-│  │ Core Reinforce│  │ Yahoo/BBG    │  │ AH Extended   │                 │
-│  │ SQQQ Hedge   │  │ 2-min cycle  │  │ 6x daily      │                 │
+│  │ Dynamic Shorts│  │ BI Movers    │  │ AH Extended   │                 │
+│  │ Core + Hedges │  │ 2-min cycle  │  │ 6x daily      │                 │
 │  └──────┬───────┘  └──────┬───────┘  └───────┬───────┘                 │
 │         │                  │                   │                         │
 │  ┌──────┴──────────────────┴───────────────────┴───────┐               │
@@ -162,8 +162,8 @@ Single-process Node.js orchestrator running all components in-process.
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐                 │
 │  │ Learning     │  │ OpenClaw     │  │ Ops (SRE)     │                 │
 │  │ Prior        │  │ Position     │  │ Health Monitor │                 │
-│  │ Trade Outcomes│ │ Drop Alerts │  │ Component Chk  │                 │
-│  │ Score Adjust  │  │ Yahoo Search │  │ Tara Reports   │                 │
+│  │ Outcome Feed │  │ Drop Alerts │  │ Component Chk  │                 │
+│  │ Score Nudges │  │ Yahoo Search │  │ Tara Reports   │                 │
 │  └──────────────┘  └──────────────┘  └───────────────┘                 │
 │                                                                         │
 ├─────────────────────────────────────────────────────────────────────────┤
