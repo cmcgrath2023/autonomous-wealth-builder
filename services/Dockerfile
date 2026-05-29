@@ -16,6 +16,7 @@ COPY services/package*.json ./
 RUN npm ci --omit=dev
 
 COPY --from=build /app/services/dist ./dist
+COPY --from=build /app/services/research-db/src/migrations ./dist/research-db/src/migrations
 
 EXPOSE 3001
 CMD ["node", "dist/gateway-v2/src/index.js"]
