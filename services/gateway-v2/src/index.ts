@@ -25,6 +25,7 @@ import { loadCredentials, getAlpacaHeaders } from './config-bus.js';
 import { BayesianIntelligence } from '../../shared/intelligence/bayesian-intelligence.js';
 import { eventBus } from '../../shared/utils/event-bus.js';
 import { brain } from './brain-client.js';
+import { getActiveResearchStars } from './research-stars.js';
 
 const DB_PATH = join(process.cwd(), 'data', 'gateway-state.db');
 const LOCK_PATH = process.env.AWB_GATEWAY_LOCK_PATH || join(process.cwd(), 'data', 'awb-gateway.lock');
@@ -349,7 +350,7 @@ async function main(): Promise<void> {
       // Build watchlist from momentum scanner universe + thesis tickers
       const watchTickers: string[] = [];
       try {
-        const stars = stateStore.getResearchStars();
+        const stars = await getActiveResearchStars(stateStore);
         for (const s of stars.slice(0, 200)) watchTickers.push(s.symbol);
         if (pgQueryFn) {
           const { rows: thesisTickers } = await pgQueryFn('SELECT DISTINCT symbol FROM research_theses WHERE status = \'active\' LIMIT 50');
@@ -559,7 +560,7 @@ function scheduleCatalystHunter(store: GatewayStateStore): void {
 }
 
 // ─── Deep Research (7 AM ET daily) ────────────────────────────────────────
-function getDeepResearchTickers(store: GatewayStateStore): string[] {
+async function getDeepResearchTickers(store: GatewayStateStore): Promise<string[]> {
   const tickers = new Set<string>();
 
   // Core holdings
@@ -570,7 +571,7 @@ function getDeepResearchTickers(store: GatewayStateStore): string[] {
 
   // Top research stars
   try {
-    const stars = store.getResearchStars();
+    const stars = await getActiveResearchStars(store);
     for (const s of stars.sort((a: any, b: any) => b.score - a.score).slice(0, 10)) {
       if (/^[A-Z]{1,5}$/.test(s.symbol) && !s.symbol.includes('-')) tickers.add(s.symbol);
     }
@@ -581,7 +582,7 @@ function getDeepResearchTickers(store: GatewayStateStore): string[] {
 
 async function runDeepResearchOnce(store: GatewayStateStore): Promise<void> {
   try {
-    const tickers = getDeepResearchTickers(store);
+    const tickers = await getDeepResearchTickers(store);
     log(`Deep Research: starting on ${tickers.length} tickers`);
     const { runDeepResearch } = await import('./analysts/index.js');
     const result = await runDeepResearch(tickers);
