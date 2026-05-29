@@ -65,8 +65,10 @@ const PREMARKET_MIN_MOVE_PCT = 0.25;                 // Early confirmation thres
 const PREMARKET_MAX_CHASE_PCT = 8;                   // Match ORB gap discipline; avoid buying blow-off gaps
 const PREMARKET_LIMIT_BUFFER_PCT = 0.01;             // Limit order cap above current pre-market print/ask
 const PREMARKET_MAX_ORDERS_PER_RUN = 3;              // Re-runs every 15 min; keep each batch focused
-const MAX_INTRADAY_SHORTS = 2;                        // Keep downside capture focused and bounded
 const MIN_DOWNSIDE_SHORT_MOVE = -3.0;                 // Must be sharply red today before shorting
+const SHORT_TARGET_MIN = 0.20;                        // Bull tape: stay mostly long
+const SHORT_TARGET_MAX = 0.80;                        // Tanking tape: allow heavy short book
+const MIN_SHORT_NOTIONAL = 500;                       // Avoid noise-size shorts
 
 // Core holdings — buy and hold, engine NEVER sells these
 const CORE_HOLDINGS = new Set<string>(['AMZN', 'NVDA']); // Owner long-term holds — engine NEVER sells these
@@ -116,6 +118,75 @@ type BizInsiderMover = {
   name: string;
   list: 'gainer' | 'loser';
 };
+
+type MarketShortTarget = {
+  targetShortRatio: number;
+  reason: string;
+  spyChangePct: number | null;
+  qqqChangePct: number | null;
+  uvxyChangePct: number | null;
+  macroRegime: string | null;
+};
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+async function computeMarketShortTarget(
+  headers: Record<string, string>,
+  store: GatewayStateStore,
+): Promise<MarketShortTarget> {
+  let spyChangePct: number | null = null;
+  let qqqChangePct: number | null = null;
+  let uvxyChangePct: number | null = null;
+  let macroRegime: string | null = null;
+
+  try {
+    const snapRes = await fetch('https://data.alpaca.markets/v2/stocks/snapshots?symbols=SPY,QQQ,UVXY&feed=iex', {
+      headers,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (snapRes.ok) {
+      const data = await snapRes.json() as any;
+      const pct = (symbol: string): number | null => {
+        const snap = data[symbol];
+        const price = snap?.latestTrade?.p || snap?.latestQuote?.ap;
+        const prev = snap?.prevDailyBar?.c;
+        return price && prev ? ((price - prev) / prev) * 100 : null;
+      };
+      spyChangePct = pct('SPY');
+      qqqChangePct = pct('QQQ');
+      uvxyChangePct = pct('UVXY');
+    }
+  } catch {}
+
+  try {
+    const macro = JSON.parse(store.get('macro_latest_verdict') || '{}');
+    macroRegime = typeof macro.regime === 'string' ? macro.regime : null;
+  } catch {}
+
+  const equityMoves = [spyChangePct, qqqChangePct].filter((v): v is number => typeof v === 'number' && isFinite(v));
+  const avgEquityMove = equityMoves.length > 0 ? equityMoves.reduce((s, v) => s + v, 0) / equityMoves.length : 0;
+  const volMove = typeof uvxyChangePct === 'number' && isFinite(uvxyChangePct) ? uvxyChangePct : 0;
+
+  // Center at 50/50. Falling SPY/QQQ and rising UVXY move the target toward 80% short.
+  let targetShortRatio = 0.50 + (-avgEquityMove * 0.10) + (volMove * 0.025);
+  targetShortRatio = clampNumber(targetShortRatio, SHORT_TARGET_MIN, SHORT_TARGET_MAX);
+
+  if (macroRegime === 'crisis') targetShortRatio = Math.max(targetShortRatio, 0.80);
+  else if (macroRegime === 'risk_off') targetShortRatio = Math.max(targetShortRatio, 0.65);
+  else if (macroRegime === 'trending' && avgEquityMove >= 0) targetShortRatio = Math.min(targetShortRatio, 0.25);
+  else if (macroRegime === 'risk_on' && avgEquityMove >= 0) targetShortRatio = Math.min(targetShortRatio, 0.40);
+
+  return {
+    targetShortRatio,
+    reason: `SPY ${spyChangePct === null ? 'n/a' : spyChangePct.toFixed(2) + '%'}, QQQ ${qqqChangePct === null ? 'n/a' : qqqChangePct.toFixed(2) + '%'}, UVXY ${uvxyChangePct === null ? 'n/a' : uvxyChangePct.toFixed(2) + '%'}, macro ${macroRegime || 'n/a'}`,
+    spyChangePct,
+    qqqChangePct,
+    uvxyChangePct,
+    macroRegime,
+  };
+}
 
 function decodeHtml(value: string): string {
   return value
@@ -1009,7 +1080,7 @@ export class TradeEngine {
 
   // ── Short a position ────────────────────────────────────────────────────
 
-	  private async shortPosition(symbol: string, price: number, reason: string): Promise<boolean> {
+	  private async shortPosition(symbol: string, price: number, reason: string, maxNotional = PER_POSITION): Promise<boolean> {
 	    const creds = loadCredentials();
 	    if (!creds.alpaca) return false;
 	    const alpaca = creds.alpaca;
@@ -1020,17 +1091,11 @@ export class TradeEngine {
       const posCheck = await this.executor.getPositions();
       const deployed = posCheck.reduce((s, p) => s + Math.abs(p.marketValue), 0);
       const available = BUDGET_MAX - deployed;
-      const MIN_SHORT = 500;
-      if (available < MIN_SHORT || available < price) {
-        console.log(`  [SHORT] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
-        return false;
-      }
-      const equityCount = posCheck.filter(p => !isCrypto(p.ticker)).length;
-      if (equityCount >= MAX_POSITIONS + MAX_INTRADAY_SHORTS) {
-        console.log(`  [SHORT] POSITION CAP — ${equityCount}/${MAX_POSITIONS + MAX_INTRADAY_SHORTS}. Skipping ${symbol}.`);
-        return false;
-      }
-      shortAmount = Math.min(PER_POSITION, available);
+	      if (available < MIN_SHORT_NOTIONAL || available < price) {
+	        console.log(`  [SHORT] BUDGET CAP — $${deployed.toFixed(0)} deployed, $${available.toFixed(0)} free. Skipping ${symbol}.`);
+	        return false;
+	      }
+	      shortAmount = Math.min(PER_POSITION, maxNotional, available);
     } catch {}
 
     const qty = Math.floor(shortAmount / price);
@@ -1982,36 +2047,56 @@ export class TradeEngine {
       if (!this.store.get(shortScanKey)) {
         this.store.set(shortScanKey, 'running');
         try {
-          const stars = this.store.getResearchStars();
-        const heldSet = new Set(equityPos.map(p => p.ticker));
-        const freshPos = await this.executor.getPositions();
-	        const existingShorts = freshPos.filter(p => p.shares < 0).length;
-          const equityCount = freshPos.filter(p => !isCrypto(p.ticker)).length;
-          const longOpenSlots = Math.max(0, MAX_POSITIONS - equityCount);
-          const shortOpenSlots = Math.max(0, MAX_POSITIONS + MAX_INTRADAY_SHORTS - equityCount);
+	          const stars = this.store.getResearchStars();
+	          const heldSet = new Set(equityPos.map(p => p.ticker));
+	          const freshPos = await this.executor.getPositions();
+            const equityPositions = freshPos.filter(p => !isCrypto(p.ticker));
+		        const existingShorts = equityPositions.filter(p => p.shares < 0).length;
+            const longExposure = equityPositions
+              .filter(p => p.shares > 0)
+              .reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const shortExposure = equityPositions
+              .filter(p => p.shares < 0)
+              .reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const grossExposure = longExposure + shortExposure;
+            const coreLongExposure = equityPositions
+              .filter(p => p.shares > 0 && CORE_HOLDINGS.has(p.ticker))
+              .reduce((s, p) => s + Math.abs(p.marketValue), 0);
+            const shortTarget = await computeMarketShortTarget(alpacaHeaders, this.store);
+            const currentShortRatio = grossExposure > 0 ? shortExposure / grossExposure : 0;
+            const targetShortDollars = BUDGET_MAX * shortTarget.targetShortRatio;
+            const targetShortCapacity = Math.max(0, targetShortDollars - shortExposure);
+            const budgetCapacity = Math.max(0, BUDGET_MAX - grossExposure);
+            let remainingShortBudget = Math.min(targetShortCapacity, budgetCapacity);
 
           const summary: any = {
-            time: new Date().toISOString(),
-            scanned: 0,
-            existingShorts,
-            longOpenSlots,
-            shortOpenSlots,
-            candidates: 0,
-            placed: 0,
-            topDown: [],
-            skipped: [] as string[],
-          };
+	            time: new Date().toISOString(),
+	            scanned: 0,
+	            existingShorts,
+              longExposure: Math.round(longExposure),
+              shortExposure: Math.round(shortExposure),
+              grossExposure: Math.round(grossExposure),
+              coreLongExposure: Math.round(coreLongExposure),
+              currentShortRatio: Number(currentShortRatio.toFixed(3)),
+              targetShortRatio: Number(shortTarget.targetShortRatio.toFixed(3)),
+              targetShortDollars: Math.round(targetShortDollars),
+              targetShortCapacity: Math.round(targetShortCapacity),
+              budgetCapacity: Math.round(budgetCapacity),
+              remainingShortBudget: Math.round(remainingShortBudget),
+              marketTargetReason: shortTarget.reason,
+	            candidates: 0,
+	            placed: 0,
+	            topDown: [],
+	            skipped: [] as string[],
+	          };
 
-          // Max short book remains bounded.
-          if (existingShorts >= MAX_INTRADAY_SHORTS) {
-            summary.blocked = `max_shorts_${existingShorts}/${MAX_INTRADAY_SHORTS}`;
-            this.store.set(shortScanKey, JSON.stringify(summary));
-            this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
-          } else if (shortOpenSlots <= 0) {
-            summary.blocked = `short_overlay_cap_${equityCount}/${MAX_POSITIONS + MAX_INTRADAY_SHORTS}`;
-            this.store.set(shortScanKey, JSON.stringify(summary));
-            this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
-          } else {
+	          if (remainingShortBudget < MIN_SHORT_NOTIONAL) {
+	            summary.blocked = targetShortCapacity < MIN_SHORT_NOTIONAL
+                ? `short_target_met_${Math.round(shortExposure)}/${Math.round(targetShortDollars)}`
+                : `budget_cap_${Math.round(grossExposure)}/${BUDGET_MAX}`;
+	            this.store.set(shortScanKey, JSON.stringify(summary));
+	            this.store.set('intraday_short_scan_latest', JSON.stringify(summary));
+	          } else {
 
             type DownsideCandidate = {
               symbol: string;
@@ -2121,21 +2206,24 @@ export class TradeEngine {
           summary.topDown = candidates.slice(0, 10).map(c => `${c.symbol}${c.dayChange.toFixed(1)}%:${c.source}`);
           console.log(`  [BI SHORT SCAN] ${candidates.length} confirmed BI downside candidates. Top: ${summary.topDown.slice(0, 5).join(', ') || 'none'}`);
 
-          let remainingShortSlots = Math.min(shortOpenSlots, MAX_INTRADAY_SHORTS - existingShorts);
           for (const candidate of candidates) {
-            if (remainingShortSlots <= 0) break;
+            if (remainingShortBudget < MIN_SHORT_NOTIONAL || remainingShortBudget < candidate.price) break;
             if (candidate.dayChange > MIN_DOWNSIDE_SHORT_MOVE) {
               summary.skipped.push(`${candidate.symbol}:not_red_enough_${candidate.dayChange.toFixed(1)}%`);
               continue;
             }
             console.log(`  [BI SHORT] ${candidate.symbol} ${candidate.dayChange.toFixed(1)}% today | ${candidate.catalyst.slice(0, 60)}`);
+            const shortNotional = Math.min(PER_POSITION, remainingShortBudget);
             const shorted = await this.shortPosition(
               candidate.symbol,
               candidate.price,
               `BI_SHORT ${candidate.dayChange.toFixed(1)}%`,
+              shortNotional,
             );
             if (shorted) {
-              remainingShortSlots--;
+              const estimatedNotional = Math.floor(shortNotional / candidate.price) * candidate.price;
+              remainingShortBudget = Math.max(0, remainingShortBudget - estimatedNotional);
+              summary.remainingShortBudget = Math.round(remainingShortBudget);
               summary.placed++;
               brain.recordRule(
                 `BI SHORT: ${candidate.symbol} ${candidate.dayChange.toFixed(1)}% @ $${candidate.price.toFixed(2)}`,
