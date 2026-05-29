@@ -100,6 +100,30 @@ export class BrainClient {
     });
   }
 
+  async recordOwnerEntry(ticker: string, qty: number, price: number, side: 'long' | 'short' = 'long'): Promise<void> {
+    const ts = new Date().toISOString();
+    await brainFetch('/v1/memories', {
+      method: 'POST',
+      body: JSON.stringify({
+        domain: 'owner_action',
+        category: 'finance',
+        title: `Owner manual entry: ${ticker} ${side} ${qty} @$${price.toFixed(2)}`,
+        content: `OWNER MANUAL ENTRY: ${ticker} ${side} | qty=${qty} | price=$${price.toFixed(2)} | Source: Alpaca fill reconciliation | ${ts}`,
+        tags: ['trade', 'entry', 'owner_manual', ticker.toLowerCase(), side],
+        source: `${SOURCE}:owner-manual-entry`,
+      }),
+    });
+    await brainFetch('/v1/train', {
+      method: 'POST',
+      body: JSON.stringify({
+        input: `Owner manual entry: ${ticker} ${side} qty=${qty} price=$${price.toFixed(2)}`,
+        output: 'owner_selected_trade',
+        domain: 'owner_action',
+        metadata: { ticker, qty, price, side, source: 'owner_manual', timestamp: ts },
+      }),
+    });
+  }
+
   // ── Query before buying ────────────────────────────────────────────
   //
   // Brain search returns content/title/tags but NOT metadata.

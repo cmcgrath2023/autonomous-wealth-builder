@@ -301,6 +301,8 @@ export class GatewayStateStore {
     this.ensureColumn('closed_trades', 'qty', 'REAL');
     this.ensureColumn('closed_trades', 'source', "TEXT NOT NULL DEFAULT 'engine'");
     this.ensureColumn('closed_trades', 'order_id', 'TEXT');
+    this.ensureColumn('system_buys', 'source', "TEXT NOT NULL DEFAULT 'unknown'");
+    this.ensureColumn('system_buys', 'side', "TEXT NOT NULL DEFAULT 'long'");
     // Unique index used for idempotent upserts from the Alpaca reconciler.
     // (ticker, closed_at, order_id) — order_id is NULL for engine-side writes
     // so these still dedupe on ticker+closed_at via COALESCE.
@@ -308,6 +310,12 @@ export class GatewayStateStore {
       this.db.exec(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_dedup
         ON closed_trades(ticker, closed_at, COALESCE(order_id, ''));
+      `);
+    } catch {}
+    try {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_system_buys_order
+        ON system_buys(client_order_id);
       `);
     } catch {}
   }
@@ -609,19 +617,52 @@ export class GatewayStateStore {
     qty: number;
     clientOrderId?: string | null;
     boughtAt?: string;
+    source?: string;
+    side?: 'long' | 'short';
   }): void {
     const ts = buy.boughtAt ?? new Date().toISOString();
+    if (buy.clientOrderId) {
+      const existing = this.db.prepare(`
+        SELECT rowid, source
+          FROM system_buys
+         WHERE client_order_id = ?
+         ORDER BY bought_at ASC
+         LIMIT 1
+      `).get(buy.clientOrderId) as any;
+      if (existing) {
+        this.db.prepare(`
+          UPDATE system_buys
+             SET ticker = ?,
+                 bought_at = ?,
+                 price = ?,
+                 qty = ?,
+                 status = 'open',
+                 source = ?,
+                 side = ?
+           WHERE rowid = ?
+        `).run(
+          buy.ticker,
+          ts,
+          buy.price,
+          buy.qty,
+          buy.source ?? existing.source ?? 'unknown',
+          buy.side ?? 'long',
+          existing.rowid,
+        );
+        return;
+      }
+    }
     this.db.prepare(`
       INSERT OR REPLACE INTO system_buys
-        (ticker, bought_at, price, qty, client_order_id, status)
-      VALUES (?, ?, ?, ?, ?, 'open')
-    `).run(buy.ticker, ts, buy.price, buy.qty, buy.clientOrderId ?? null);
+        (ticker, bought_at, price, qty, client_order_id, status, source, side)
+      VALUES (?, ?, ?, ?, ?, 'open', ?, ?)
+    `).run(buy.ticker, ts, buy.price, buy.qty, buy.clientOrderId ?? null, buy.source ?? 'engine', buy.side ?? 'long');
   }
 
   /** Ticker → earliest open system buy (used for entry price / hold duration). */
-  getOpenSystemBuy(ticker: string): { ticker: string; boughtAt: string; price: number; qty: number } | null {
+  getOpenSystemBuy(ticker: string): { ticker: string; boughtAt: string; price: number; qty: number; source: string; side: 'long' | 'short' } | null {
     const row = this.db.prepare(
-      `SELECT ticker, bought_at AS boughtAt, price, qty
+      `SELECT ticker, bought_at AS boughtAt, price, qty, source, side
          FROM system_buys
         WHERE ticker = ? AND status = 'open'
         ORDER BY bought_at ASC LIMIT 1`,
@@ -630,25 +671,39 @@ export class GatewayStateStore {
   }
 
   /** All currently-open system buys (every ticker the system still believes it owns). */
-  getOpenSystemBuys(): Array<{ ticker: string; boughtAt: string; price: number; qty: number }> {
+  getOpenSystemBuys(): Array<{ ticker: string; boughtAt: string; price: number; qty: number; source: string; side: 'long' | 'short' }> {
     const rows = this.db.prepare(
-      `SELECT ticker, bought_at AS boughtAt, price, qty
+      `SELECT ticker, bought_at AS boughtAt, price, qty, source, side
          FROM system_buys WHERE status = 'open' ORDER BY bought_at ASC`,
     ).all() as any[];
     return rows;
   }
 
+  /** Return the recorded buy metadata for a broker order id, if the engine already knows it. */
+  getSystemBuyByOrderId(orderId: string | null | undefined): { ticker: string; boughtAt: string; price: number; qty: number; source: string; side: 'long' | 'short' } | null {
+    if (!orderId) return null;
+    const row = this.db.prepare(
+      `SELECT ticker, bought_at AS boughtAt, price, qty, source, side
+         FROM system_buys
+        WHERE client_order_id = ?
+        ORDER BY bought_at ASC LIMIT 1`,
+    ).get(orderId) as any;
+    return row || null;
+  }
+
   /** Mark the earliest open system buy for a ticker as closed. */
-  closeSystemBuy(ticker: string, closedAt?: string): void {
+  closeSystemBuy(ticker: string, closedAt?: string, side?: 'long' | 'short'): void {
+    const sideFilter = side ? 'AND side = ?' : '';
+    const params = side ? [ticker, side] : [ticker];
     this.db.prepare(`
       UPDATE system_buys
          SET status = 'closed'
        WHERE rowid = (
          SELECT rowid FROM system_buys
-          WHERE ticker = ? AND status = 'open'
+          WHERE ticker = ? AND status = 'open' ${sideFilter}
           ORDER BY bought_at ASC LIMIT 1
        )
-    `).run(ticker);
+    `).run(...params);
     void closedAt; // reserved for future use
   }
 

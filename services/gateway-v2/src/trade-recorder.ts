@@ -75,7 +75,7 @@ export function recordClosedTrade(
   // 2. Mark the corresponding system_buy as closed (if any) — keeps the
   //    persistent "we still own it" set accurate for manual-trade detection.
   try {
-    store.closeSystemBuy(trade.ticker);
+    store.closeSystemBuy(trade.ticker, closedAt, trade.direction);
   } catch {}
 
   // 3. Schedule post-exit tracking — the daily follower job will fill in
@@ -153,8 +153,8 @@ export interface ReconcilerResult {
 /**
  * Pulls Alpaca fill activities for the last `daysBack` calendar days and
  * reconciles them against the local store:
- *   - Every BUY with no matching system_buy row becomes one (so overnight
- *     holds stay tagged as system-bought after midnight).
+ *   - Every BUY with no matching system_buy order id becomes one. Known engine
+ *     order ids stay engine-sourced; unknown broker fills are owner/manual.
  *   - Every SELL with no matching closed_trades row becomes one, with PnL
  *     computed from the nearest unmatched BUY of the same ticker (FIFO).
  *
@@ -215,7 +215,7 @@ export async function reconcileWithAlpaca(
   interface Fill {
     ticker: string;
     orderId: string;
-    side: 'buy' | 'sell';
+    side: 'buy' | 'sell' | 'sell_short' | 'buy_to_cover';
     qty: number;
     price: number;       // volume-weighted
     time: string;        // last fill time for the order
@@ -223,9 +223,9 @@ export async function reconcileWithAlpaca(
   const byOrder = new Map<string, Fill>();
   for (const a of activities) {
     if (a.activity_type !== 'FILL') continue;
-    const side = a.side === 'buy' || a.side === 'buy_to_cover' ? 'buy' as const
-               : (a.side === 'sell' || a.side === 'sell_short') ? 'sell' as const
-               : null;
+    const side = a.side === 'buy' || a.side === 'sell' || a.side === 'sell_short' || a.side === 'buy_to_cover'
+      ? a.side
+      : null;
     if (!side) continue;
     const qty = parseFloat(a.qty);
     const price = parseFloat(a.price);
@@ -252,14 +252,17 @@ export async function reconcileWithAlpaca(
   // Stable ordering: oldest fills first.
   const fills = [...byOrder.values()].sort((a, b) => a.time.localeCompare(b.time));
 
-  // Per-ticker FIFO stack of open buy lots from this reconciliation window.
-  // We also seed with any open system_buys so a buy that happened before the
-  // reconcile window still pairs with a newer sell.
-  const openBuys = new Map<string, Array<{ qty: number; price: number; time: string; orderId: string }>>();
+  // Per-ticker FIFO stacks of open long/short lots from this reconciliation
+  // window. We seed with local open lots so entries before the window still pair
+  // with newer exits.
+  type Lot = { qty: number; price: number; time: string; orderId: string; source: string };
+  const openLongs = new Map<string, Lot[]>();
+  const openShorts = new Map<string, Lot[]>();
   for (const b of store.getOpenSystemBuys()) {
-    const list = openBuys.get(b.ticker) ?? [];
-    list.push({ qty: b.qty, price: b.price, time: b.boughtAt, orderId: '' });
-    openBuys.set(b.ticker, list);
+    const books = b.side === 'short' ? openShorts : openLongs;
+    const list = books.get(b.ticker) ?? [];
+    list.push({ qty: b.qty, price: b.price, time: b.boughtAt, orderId: '', source: b.source || 'unknown' });
+    books.set(b.ticker, list);
   }
 
   const seenTickers = new Set<string>();
@@ -267,8 +270,17 @@ export async function reconcileWithAlpaca(
   for (const fill of fills) {
     seenTickers.add(fill.ticker);
 
-    if (fill.side === 'buy') {
-      // Record as a system buy if we don't already have this exact order_id.
+    if (fill.side === 'buy' || fill.side === 'sell_short') {
+      const entrySide = fill.side === 'sell_short' ? 'short' as const : 'long' as const;
+      const existingBuy = store.getSystemBuyByOrderId(fill.orderId);
+      const source = existingBuy?.source === 'engine' || existingBuy?.source === 'engine_short'
+        ? existingBuy.source
+        : existingBuy
+          ? existingBuy.source || 'unknown'
+          : 'owner_manual';
+
+      // Record as an open lot. Unknown broker fills become owner_manual entries
+      // so Chris's manual buys are first-class training/memory events.
       try {
         store.recordSystemBuy({
           ticker: fill.ticker,
@@ -276,18 +288,24 @@ export async function reconcileWithAlpaca(
           qty: fill.qty,
           clientOrderId: fill.orderId,
           boughtAt: fill.time,
+          source,
+          side: entrySide,
         });
         result.buysRecorded++;
+        if (!existingBuy && source === 'owner_manual') {
+          brain.recordOwnerEntry(fill.ticker, fill.qty, fill.price, entrySide).catch(() => {});
+        }
       } catch (e: any) {
         result.errors.push(`buy ${fill.ticker}: ${e.message}`);
       }
-      const list = openBuys.get(fill.ticker) ?? [];
-      list.push({ qty: fill.qty, price: fill.price, time: fill.time, orderId: fill.orderId });
-      openBuys.set(fill.ticker, list);
+      const books = entrySide === 'short' ? openShorts : openLongs;
+      const list = books.get(fill.ticker) ?? [];
+      list.push({ qty: fill.qty, price: fill.price, time: fill.time, orderId: fill.orderId, source });
+      books.set(fill.ticker, list);
       continue;
     }
 
-    // SELL — skip if we've already recorded this exact order_id.
+    // SELL / BUY_TO_COVER — skip if we've already recorded this exact order_id.
     if (store.hasTrade(fill.ticker, fill.time, fill.orderId)) continue;
 
     // Delete any engine-sourced duplicate writes for this ticker within a
@@ -302,32 +320,48 @@ export async function reconcileWithAlpaca(
       }
     } catch {}
 
-    // FIFO-pair against open buy lots to compute realized PnL.
-    const lots = openBuys.get(fill.ticker) ?? [];
+    // FIFO-pair against open lots to compute realized PnL.
+    const exitDirection = fill.side === 'buy_to_cover' ? 'short' as const : 'long' as const;
+    const books = exitDirection === 'short' ? openShorts : openLongs;
+    const lots = books.get(fill.ticker) ?? [];
     let remainingQty = fill.qty;
     let realizedPnl = 0;
     let totalCost = 0;
     let matchedQty = 0;
     let earliestBuyTime: string | null = null;
+    const matchedSources = new Set<string>();
     while (remainingQty > 0 && lots.length > 0) {
       const lot = lots[0];
       const useQty = Math.min(remainingQty, lot.qty);
-      realizedPnl += (fill.price - lot.price) * useQty;
+      realizedPnl += exitDirection === 'short'
+        ? (lot.price - fill.price) * useQty
+        : (fill.price - lot.price) * useQty;
       totalCost += lot.price * useQty;
       matchedQty += useQty;
+      matchedSources.add(lot.source || 'unknown');
       if (earliestBuyTime === null || lot.time < earliestBuyTime) earliestBuyTime = lot.time;
       lot.qty -= useQty;
       remainingQty -= useQty;
       if (lot.qty <= 1e-9) lots.shift();
     }
-    openBuys.set(fill.ticker, lots);
+    books.set(fill.ticker, lots);
 
     const avgEntry = matchedQty > 0 ? totalCost / matchedQty : null;
+    const closeSource = matchedSources.size === 1
+      ? [...matchedSources][0]
+      : matchedSources.size > 1
+        ? 'mixed_manual_engine'
+        : 'alpaca_reconcile';
+    const closeReason = closeSource === 'owner_manual'
+      ? (exitDirection === 'short' ? 'owner_manual_cover' : 'owner_manual_exit')
+      : closeSource === 'mixed_manual_engine'
+        ? 'mixed_manual_engine_exit'
+        : 'alpaca_reconcile';
     try {
       recordClosedTrade(store, {
         ticker: fill.ticker,
-        direction: 'long',
-        reason: 'alpaca_reconcile',
+        direction: exitDirection,
+        reason: closeReason,
         qty: fill.qty,
         entryPrice: avgEntry,
         exitPrice: fill.price,
@@ -335,7 +369,7 @@ export async function reconcileWithAlpaca(
         openedAt: earliestBuyTime ?? '',
         closedAt: fill.time,
         orderId: fill.orderId,
-        source: 'alpaca_reconcile',
+        source: closeSource,
       });
       result.sellsRecorded++;
     } catch (e: any) {

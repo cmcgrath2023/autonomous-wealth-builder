@@ -631,13 +631,13 @@ export class TradeEngine {
     return new Map();
   }
 
-  private _trackBuy(ticker: string, price = 0, qty = 0, orderId: string | null = null): void {
+  private _trackBuy(ticker: string, price = 0, qty = 0, orderId: string | null = null, side: 'long' | 'short' = 'long'): void {
     const buys = this._recentBuys;
     buys.set(ticker, Date.now());
     const obj: Record<string, number> = {};
     for (const [k, v] of buys) obj[k] = v;
     this.store.set('recent_buys_today', JSON.stringify({ date: new Date().toISOString().slice(0, 10), buys: obj }));
-    try { this.store.recordSystemBuy({ ticker, price, qty, clientOrderId: orderId }); } catch {}
+    try { this.store.recordSystemBuy({ ticker, price, qty, clientOrderId: orderId, source: side === 'short' ? 'engine_short' : 'engine', side }); } catch {}
   }
 
   private get _sessionSells(): Set<string> {
@@ -1118,7 +1118,7 @@ export class TradeEngine {
       }
       const order = await res.json() as any;
       console.log(`  [SHORT] ${qty} ${symbol} @~$${price.toFixed(2)} — ${reason} — ${order.status}`);
-      this._trackBuy(symbol, price, qty, order.id ?? null); // track for position management
+      this._trackBuy(symbol, price, qty, order.id ?? null, 'short'); // track for position management
 
 	      const stopPrice = Math.round(price * (1 + STOP_PCT) * 100) / 100;
 	      try {
