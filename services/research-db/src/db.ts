@@ -27,15 +27,24 @@ function buildPoolConfig(): pg.PoolConfig {
     throw new Error('RESEARCH_DATABASE_URL (or DATABASE_URL) environment variable is required for the research database');
   }
 
+  const parsed = new URL(connectionString);
+  const sslMode = parsed.searchParams.get('sslmode');
   const isLocal =
-    connectionString.includes('localhost') ||
-    connectionString.includes('127.0.0.1');
+    parsed.hostname === 'localhost' ||
+    parsed.hostname === '127.0.0.1' ||
+    parsed.hostname === 'postgres';
+
+  const ssl = sslMode === 'disable' || isLocal
+    ? false
+    : sslMode === 'require' || sslMode === 'no-verify'
+      ? { rejectUnauthorized: false }
+      : { rejectUnauthorized: true };
 
   return {
     connectionString,
     max: 10,
     idleTimeoutMillis: 30_000,
-    ssl: isLocal ? false : { rejectUnauthorized: true },
+    ssl,
   };
 }
 
