@@ -18,6 +18,15 @@
 const BRAIN_URL = process.env.BRAIN_SERVER_URL || 'https://trident.cetaceanlabs.com';
 const SOURCE = 'mtwm';
 
+function domainFromSource(source: string): string {
+  const raw = source.includes(':') ? source.split(':')[0] : source;
+  if (raw === 'system') return 'strategy_knowledge';
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9_/-]/g, '_')
+    .slice(0, 60);
+}
+
 // Brain tags must be <= 30 chars
 function sanitizeTags(tags: string[]): string[] {
   return tags.map(t => t.slice(0, 30).toLowerCase().replace(/[^a-z0-9_\-/]/g, '_'));
@@ -366,13 +375,15 @@ export class BrainClient {
   // ── Record rules/patterns ──────────────────────────────────────────
 
   async recordRule(rule: string, ruleSource: string): Promise<void> {
+    const domain = domainFromSource(ruleSource);
     await brainFetch('/v1/memories', {
       method: 'POST',
       body: JSON.stringify({
+        domain,
         category: 'finance',
         title: `Trading rule (${ruleSource})`,
         content: `TRADING RULE: ${rule}`,
-        tags: ['rule', 'trading', ruleSource],
+        tags: ['rule', 'trading', domain, ruleSource],
         source: `${SOURCE}:rule`,
       }),
     });
@@ -384,10 +395,12 @@ export class BrainClient {
     tags?: string[];
     category?: 'finance' | 'custom' | 'pattern' | 'solution';
     source?: string;
+    domain?: string;
   }): Promise<boolean> {
     const result = await brainFetch('/v1/memories', {
       method: 'POST',
       body: JSON.stringify({
+        ...(note.domain ? { domain: note.domain } : {}),
         category: note.category || 'pattern',
         title: note.title,
         content: `LEARNING NOTE: ${note.content}\n\nRecorded: ${new Date().toISOString()}`,
@@ -405,11 +418,27 @@ export class BrainClient {
     await brainFetch('/v1/memories', {
       method: 'POST',
       body: JSON.stringify({
+        domain: 'research',
         category: 'finance',
         title: `Research cycle: ${data.starsCount} stars — top: ${topList}`,
         content: `RESEARCH CYCLE ${data.date}\nStars: ${data.starsCount}\n\nTop picks:\n${data.summary}\n\nBullish headlines:\n${data.newsHeadlines || 'None'}\n\nErrors: ${data.errors.length > 0 ? data.errors.join('; ') : 'None'}`,
         tags: sanitizeTags(['research', 'cycle', 'stars', ...data.topStars.slice(0, 5).map(s => s.symbol.toLowerCase())]),
         source: `${SOURCE}:research-worker`,
+      }),
+    });
+  }
+
+  async recordResearchStar(star: { symbol: string; sector: string; catalyst: string; score: number; direction?: 'long' | 'short' | 'watch' | 'avoid' }): Promise<void> {
+    const direction = star.direction ?? (star.sector === 'short_candidate' ? 'short' : 'long');
+    await brainFetch('/v1/memories', {
+      method: 'POST',
+      body: JSON.stringify({
+        domain: 'research',
+        category: 'finance',
+        title: `Research star: ${star.symbol} ${direction} ${star.score.toFixed(2)}`,
+        content: `RESEARCH STAR: ${star.symbol} ${direction} | sector=${star.sector} | score=${star.score.toFixed(2)} | catalyst=${star.catalyst} | ${new Date().toISOString()}`,
+        tags: sanitizeTags(['research', 'star', direction, star.symbol.toLowerCase(), star.sector]),
+        source: `${SOURCE}:research-star`,
       }),
     });
   }

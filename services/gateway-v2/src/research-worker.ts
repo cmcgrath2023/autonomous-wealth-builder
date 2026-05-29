@@ -628,6 +628,13 @@ async function runCycle(store: GatewayStateStore, factCache: MarketFACTCache): P
 
       // Record high-value individual catalysts to Trident for SONA learning
       for (const star of topStars.filter((s: any) => s.score >= 0.95)) {
+        brain.recordResearchStar({
+          symbol: star.symbol,
+          sector: star.sector,
+          catalyst: star.catalyst || '',
+          score: star.score,
+          direction: star.sector === 'short_candidate' ? 'short' : 'long',
+        }).catch(() => {});
         brain.recordRule(
           `CATALYST: ${star.symbol} (${star.sector}) score=${star.score.toFixed(2)} — ${star.catalyst?.slice(0, 100) || 'momentum'}`,
           'research:catalyst',
